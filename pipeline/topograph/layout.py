@@ -114,20 +114,24 @@ def compute_layout(lib, model: str, backend=None, log=print) -> int:
     if not ids:
         log("Nothing embedded yet; run `topograph embed` first.")
         return 0
-    log(f"Laying out {len(ids)} items")
-    xy = project(vecs)
+    from .progress import step
+    with step(f"Laying out {len(ids):,} items on the map"):
+        xy = project(vecs)
     # Fit into a 1000x1000 square for the viewer, keeping the aspect ratio
     # (distances on the map mean something) with a margin for the terrain.
     lo, hi = xy.min(0), xy.max(0)
     span = max(float((hi - lo).max()), 1e-9)
     xy = (xy - (lo + hi) / 2) / span * 900 + 500
-    labels = cluster(xy)
-    nbrs = neighbors(vecs) if len(ids) > 1 else np.zeros((len(ids), 0), int)
+    with step("Finding regions"):
+        labels = cluster(xy)
+    with step("Finding nearest neighbors"):
+        nbrs = neighbors(vecs) if len(ids) > 1 else np.zeros((len(ids), 0), int)
 
     texts = {r["id"]: r["text"] for r in lib.conn.execute("select id, text from item")}
     visual = {r[0] for r in lib.conn.execute("select distinct item_id from media where status='ok'")}
-    terms = term_labels([texts.get(i) for i in ids], labels)
-    names = concept_labels(backend, vecs, labels, load_concepts())
+    with step("Naming regions"):
+        terms = term_labels([texts.get(i) for i in ids], labels)
+        names = concept_labels(backend, vecs, labels, load_concepts())
 
     clusters = sorted(set(labels) - {-1})
     final = {}
@@ -160,5 +164,6 @@ def compute_layout(lib, model: str, backend=None, log=print) -> int:
         c.execute("insert into cluster(model, id, label, terms) values (?,?,?,?)",
                   (model, int(cl), final[cl], json.dumps(terms.get(cl, []))))
     c.commit()
-    log(f"  {len(set(labels) - {-1})} regions")
+    log(f"  {len(clusters)} regions: " + ", ".join(final[cl] for cl in clusters[:8]) +
+        (", …" if len(clusters) > 8 else ""))
     return len(ids)

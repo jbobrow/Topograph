@@ -135,42 +135,50 @@ def embed_library(lib, backend, log=print, force: bool = False) -> int:
 
     todo_img = [(r["id"], r["text"]) for r in rows if media.get(r["id"])]
     todo_txt = [(r["id"], r["text"]) for r in rows if not media.get(r["id"]) and r["text"]]
-    log(f"Embedding {len(todo_img)} visual items and {len(todo_txt)} text items with {backend.name}")
+    from .progress import Progress
+    total = len(todo_img) + len(todo_txt)
+    if not total:
+        lib.set_meta("embedding_model", backend.name)
+        c.commit()
+        return 0
+    with Progress("Reading images and captions", total=total, unit="items") as prog:
 
-    done = 0
-    chunk = 256
-    for start in range(0, len(todo_img), chunk):
-        part = todo_img[start:start + chunk]
-        paths, owners = [], []
-        for idx, (iid, _) in enumerate(part):
-            for p in media[iid]:
-                paths.append(p)
-                owners.append(idx)
-        img_vecs = backend.images(paths)
-        agg = np.zeros((len(part), backend.dim), np.float32)
-        np.add.at(agg, owners, img_vecs)
-        agg = _norm(agg)
-        captions = [(k, t) for k, (_, t) in enumerate(part) if t]
-        if captions:
-            tv = backend.texts([t[:300] for _, t in captions])
-            for (k, _), v in zip(captions, tv):
-                agg[k] = IMAGE_WEIGHT * agg[k] + (1 - IMAGE_WEIGHT) * v
+        done = 0
+        chunk = 64   # small batches keep the progress line moving
+        for start in range(0, len(todo_img), chunk):
+            part = todo_img[start:start + chunk]
+            paths, owners = [], []
+            for idx, (iid, _) in enumerate(part):
+                for p in media[iid]:
+                    paths.append(p)
+                    owners.append(idx)
+            img_vecs = backend.images(paths)
+            agg = np.zeros((len(part), backend.dim), np.float32)
+            np.add.at(agg, owners, img_vecs)
             agg = _norm(agg)
-        c.executemany("insert or replace into embedding(item_id, model, vector) values (?,?,?)",
-                      [(iid, backend.name, agg[k].astype(np.float32).tobytes())
-                       for k, (iid, _) in enumerate(part)])
-        c.commit()
-        done += len(part)
-        log(f"  images {done}/{len(todo_img)}")
+            captions = [(k, t) for k, (_, t) in enumerate(part) if t]
+            if captions:
+                tv = backend.texts([t[:300] for _, t in captions])
+                for (k, _), v in zip(captions, tv):
+                    agg[k] = IMAGE_WEIGHT * agg[k] + (1 - IMAGE_WEIGHT) * v
+                agg = _norm(agg)
+            c.executemany("insert or replace into embedding(item_id, model, vector) values (?,?,?)",
+                          [(iid, backend.name, agg[k].astype(np.float32).tobytes())
+                           for k, (iid, _) in enumerate(part)])
+            c.commit()
+            done += len(part)
+            prog.advance(len(part), note="images")
 
-    for start in range(0, len(todo_txt), 1024):
-        part = todo_txt[start:start + 1024]
-        tv = backend.texts([t[:300] for _, t in part])
-        c.executemany("insert or replace into embedding(item_id, model, vector) values (?,?,?)",
-                      [(iid, backend.name, tv[k].astype(np.float32).tobytes())
-                       for k, (iid, _) in enumerate(part)])
+        for start in range(0, len(todo_txt), 256):
+            part = todo_txt[start:start + 256]
+            tv = backend.texts([t[:300] for _, t in part])
+            c.executemany("insert or replace into embedding(item_id, model, vector) values (?,?,?)",
+                          [(iid, backend.name, tv[k].astype(np.float32).tobytes())
+                           for k, (iid, _) in enumerate(part)])
+            c.commit()
+            done += len(part)
+            prog.advance(len(part), note="text")
+        lib.set_meta("embedding_model", backend.name)
         c.commit()
-        done += len(part)
-    lib.set_meta("embedding_model", backend.name)
-    c.commit()
+        prog.close(f"{len(todo_img):,} images, {len(todo_txt):,} text items")
     return done

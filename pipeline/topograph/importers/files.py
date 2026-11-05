@@ -60,8 +60,10 @@ SENSITIVE_PATH = re.compile(
     r"(?<![A-Za-z])(medical|health records?|ct[ _-]?scans?|cat[ _-]?scans?|mri|x-?rays?|ultrasounds?|"
     r"radiology|dicom|lab[ _-]?results?|prescriptions?|patient|diagnos[ie]s|"
     r"identification|passports?|id cards?|driver'?s? licen[cs]e|"
-    r"tax(es)?|w-?9s?|1099s?|w-?2s?|bank(ing)?|statements?|insurance|legal|lease|payroll|invoices?|"
-    r"receipts?|1password|keychain|private|passwords?)(?![A-Za-z])", re.I)
+    r"tax(es)?|bank(ing)?|statements?|insurance|legal|lease|payroll|invoices?|"
+    r"receipts?|1password|keychain|private|passwords?)(?![A-Za-z])"
+    # Tax form numbers need number boundaries too, or "3410992.jpg" would match 1099.
+    r"|(?<![A-Za-z0-9])(w-?9s?|w-?2s?|1099(-?(k|misc|nec|int|div|b|r|g|s))?s?)(?![A-Za-z0-9])", re.I)
 SENSITIVE_HOST = re.compile(
     r"(\.gov$|\.gov\.|chase|bankofamerica|wellsfargo|citi|amex|americanexpress|capitalone|syf\.com|"
     r"synchrony|discover\.com|intuit|turbotax|irs\.|paypal|venmo|schwab|fidelity|vanguard|"
@@ -237,8 +239,11 @@ TYPE_FOR = {"screenshot": "capture", "your photo": "made", "download": "download
             "working file": "made", "opened image": "made", "image, no signal": "made"}
 
 
-def walk(roots, opts: Options, report: Report):
-    """Yield (path, stat, decision, details) for candidate files under roots."""
+def walk(roots, opts: Options, report: Report, on_folder=None):
+    """Yield (path, stat, decision, details) for candidate files under roots.
+
+    `on_folder(path)` is called as each folder is entered (for progress display).
+    """
     report_project_dirs.clear()
     excluded = {str(Path(e).expanduser()) for e in opts.exclude}
     for root in roots:
@@ -246,6 +251,8 @@ def walk(roots, opts: Options, report: Report):
         rules: dict[Path, list[str]] = {}
         for dirpath, dirnames, filenames in os.walk(root):
             here = Path(dirpath)
+            if on_folder:
+                on_folder(here)
             patterns = read_ignore(here)
             if patterns:
                 rules[here] = patterns
@@ -346,11 +353,14 @@ def ignored(path: Path, is_dir: bool, rules: dict) -> bool:
     return False
 
 
-def parse(roots, opts: Options, report: Report, preview):
-    """Yield Records for kept files. `preview(path) -> (bytes|None, kind)`."""
-    for p, st, decision, d in walk(roots, opts, report):
-        if decision.startswith("skip"):
-            continue
+def collect(roots, opts: Options, report: Report, on_folder=None) -> list:
+    """Walk the folders and return the files to keep, so the import knows its total."""
+    return [c for c in walk(roots, opts, report, on_folder) if not c[2].startswith("skip")]
+
+
+def parse(candidates, report: Report, preview):
+    """Yield Records for files from `collect`. `preview(path) -> (bytes|None, kind)`."""
+    for p, st, decision, d in candidates:
         try:
             fid = _file_id(p, st.st_size)
         except OSError:

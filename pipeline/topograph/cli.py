@@ -11,14 +11,26 @@ from __future__ import annotations
 
 import argparse
 import sys
-import time
 from pathlib import Path
 
 from . import media as media_mod
 from .config import default_library
 from .db import Library, upsert_record
 from .importers import IMPORTERS, detect
+from .progress import Progress, step
 from .util import Archive
+
+
+def _short(path, root=None) -> str:
+    """A folder name short enough for the progress line."""
+    path = Path(path)
+    try:
+        if root:
+            path = path.relative_to(root)
+    except ValueError:
+        pass
+    parts = path.parts
+    return "/".join(parts[-3:]) if len(parts) > 3 else str(path)
 
 
 def cmd_import(args, lib):
@@ -26,24 +38,23 @@ def cmd_import(args, lib):
     kinds = [args.platform] if args.platform else detect(archive)
     if not kinds:
         sys.exit("Couldn't recognize this export. Use --platform x|instagram to force it.")
+    names = {"x": "X", "instagram": "Instagram", "facebook": "Facebook"}
     for kind in kinds:
-        print(f"Importing {kind} from {', '.join(map(str, archive.sources))}")
-        new = total = 0
-        t0 = time.time()
-        for rec in IMPORTERS[kind].parse(archive):
-            new += upsert_record(lib, rec, media_mod.ingest)
-            total += 1
-            if total % 500 == 0:
-                lib.conn.commit()
-                print(f"  {total} records…")
-        lib.conn.commit()
-        print(f"  {total} records, {new} new items ({time.time() - t0:.1f}s)")
+        new = 0
+        with Progress(f"Importing {names.get(kind, kind)}", unit="records") as prog:
+            for rec in IMPORTERS[kind].parse(archive):
+                new += upsert_record(lib, rec, media_mod.ingest)
+                prog.advance(note=f"{new:,} new" + (", copying images" if rec.media else ""))
+                if prog.done % 500 == 0:
+                    lib.conn.commit()
+            lib.conn.commit()
+            prog.close(f"{prog.done:,} records, {new:,} new items")
     _stats(lib)
 
 
 def cmd_files(args, lib):
     import json
-    from .importers.files import Options, Report, format_report, parse, walk
+    from .importers.files import Options, Report, collect, format_report, parse
     from .media import preview_from_path
     roots = [str(Path(r).expanduser()) for r in args.paths] or json.loads(lib.get_meta("files_roots", "[]"))
     if not roots:
@@ -53,41 +64,50 @@ def cmd_files(args, lib):
     opts = Options(include_code=args.include_code, include_pdf=args.include_pdf,
                    include_cloud_only=args.include_cloud_only, exclude=excludes)
     report = Report()
+    label = "Looking through your folders" + (" (dry run)" if args.dry_run else "")
+    with Progress(label, unit="files checked") as prog:
+        def checked():
+            return sum(report.kept.values()) + sum(report.skipped.values())
+
+        def on_folder(path):
+            prog.advance(checked() - prog.done, note=_short(path))
+        candidates = collect(roots, opts, report, on_folder)
+        prog.advance(checked() - prog.done, note="")
+        prog.close(f"{prog.done:,} files checked, {len(candidates):,} to keep")
     if args.dry_run:
-        print(f"Looking through {', '.join(roots)} (nothing will be imported)")
-        for _ in walk(roots, opts, report):
-            pass
         print(format_report(report))
         return
     lib.set_meta("files_roots", json.dumps(roots))
     lib.set_meta("files_excludes", json.dumps(excludes))
-    print(f"Reading {', '.join(roots)}")
-    new = total = 0
-    t0 = time.time()
-    for rec in parse(roots, opts, report, preview_from_path):
-        new += upsert_record(lib, rec, media_mod.ingest)
-        total += 1
-        if total % 250 == 0:
-            lib.conn.commit()
-            print(f"  {total} files…")
-    lib.conn.commit()
-    print(f"  {total} files, {new} new ({time.time() - t0:.0f}s)\n")
+    new = 0
+    with Progress("Making previews", total=len(candidates), unit="files") as prog:
+        for rec in parse(candidates, report, preview_from_path):
+            new += upsert_record(lib, rec, media_mod.ingest)
+            src = rec.interactions[0].get("source") or ""
+            prog.advance(note=_short(Path(src).parent) if src else None)
+            if prog.done % 250 == 0:
+                lib.conn.commit()
+        lib.conn.commit()
+        prog.close(f"{prog.done:,} files, {new:,} new")
+    print()
     print(format_report(report))
     _stats(lib)
 
 
 def cmd_hydrate(args, lib):
     from .hydrate import download_pending_media, hydrate
-    print("Fetching media for links (Ctrl-C to pause; run again to resume)")
+    print("Fetching images for liked and saved posts. Ctrl-C pauses; run again to resume.")
     try:
-        pre = download_pending_media(lib, delay=args.delay / 3)
-        s = hydrate(lib, limit=args.limit, delay=args.delay,
-                    platforms=[args.platform] if args.platform else None)
-        print(f"  hydrated {s['hydrated']}, unreachable {s['unreachable']}, "
-              f"media files {s['media'] + pre}")
+        with Progress("Downloading waiting images", unit="images") as prog:
+            pre = download_pending_media(lib, delay=args.delay / 3, progress=prog)
+        with Progress("Fetching liked and saved posts", unit="posts") as prog:
+            s = hydrate(lib, limit=args.limit, delay=args.delay,
+                        platforms=[args.platform] if args.platform else None, progress=prog)
+            prog.close(f"{s['hydrated']:,} fetched, {s['unreachable']:,} unreachable, "
+                       f"{s['media'] + pre:,} images")
     except KeyboardInterrupt:
         lib.conn.commit()
-        print("\nPaused.")
+        print("Paused. Run `topograph hydrate` again to pick up where you left off.")
     _stats(lib)
 
 
@@ -96,7 +116,9 @@ def _backend(args):
     name = args.backend or auto_backend()
     if name == "lite":
         print("Using the lite embedder (install the 'clip' extra for much better maps).")
-    return get_backend(name)
+        return get_backend(name)
+    with step("Loading the image model (CLIP; the first run downloads about 600 MB)"):
+        return get_backend(name)
 
 
 def cmd_embed(args, lib):
@@ -117,7 +139,8 @@ def cmd_layout(args, lib, backend=None):
 def cmd_export(args, lib):
     from .export import export
     model = lib.get_meta("embedding_model")
-    path = export(lib, model)
+    with step("Writing the map for the viewer"):
+        path = export(lib, model)
     print(f"Wrote {path}")
 
 
@@ -128,7 +151,9 @@ def cmd_build(args, lib):
     backend = _backend(args)
     embed_library(lib, backend, force=args.force)
     compute_layout(lib, backend.name, backend=backend)
-    print(f"Wrote {export(lib, backend.name)}")
+    with step("Writing the map for the viewer"):
+        path = export(lib, backend.name)
+    print(f"Done. Open it with `topograph serve`. ({path})")
 
 
 def cmd_serve(args, lib):

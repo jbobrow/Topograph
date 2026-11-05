@@ -184,7 +184,8 @@ HYDRATORS = {"x": hydrate_x, "instagram": hydrate_instagram}
 
 # --- driver -----------------------------------------------------------------
 
-def download_pending_media(lib, item_id: str | None = None, delay: float = 0.3, log=print) -> int:
+def download_pending_media(lib, item_id: str | None = None, delay: float = 0.3, log=print,
+                           progress=None) -> int:
     """Download media rows that only have a remote URL."""
     q = "select item_id, ord, original_url, kind from media where status='pending' and original_url is not null"
     args = ()
@@ -192,7 +193,13 @@ def download_pending_media(lib, item_id: str | None = None, delay: float = 0.3, 
         q += " and item_id=?"
         args = (item_id,)
     done = 0
-    for row in lib.conn.execute(q, args).fetchall():
+    rows = lib.conn.execute(q, args).fetchall()
+    if progress:
+        progress.set_total(len(rows))
+        log = progress.write
+    for row in rows:
+        if progress:
+            progress.advance(note=row["item_id"])
         try:
             data = fetch(row["original_url"], accept="image/*")
         except FetchError as e:
@@ -211,7 +218,8 @@ def download_pending_media(lib, item_id: str | None = None, delay: float = 0.3, 
     return done
 
 
-def hydrate(lib, limit: int | None = None, delay: float = 1.5, platforms=None, log=print) -> dict:
+def hydrate(lib, limit: int | None = None, delay: float = 1.5, platforms=None, log=print,
+            progress=None) -> dict:
     stats = {"hydrated": 0, "unreachable": 0, "skipped": 0, "media": 0}
     q = ("select * from item where hydrated=0 and hydrate_attempts<? "
          "order by (select max(at) from interaction where item_id=item.id) desc")
@@ -221,7 +229,12 @@ def hydrate(lib, limit: int | None = None, delay: float = 1.5, platforms=None, l
     if limit:
         rows = rows[:limit]
     consecutive_failures = 0
+    if progress:
+        progress.set_total(len(rows))
+        log = progress.write
     for i, item in enumerate(rows, 1):
+        if progress:
+            progress.advance(note=f"{stats['hydrated']:,} fetched, {stats['unreachable']:,} unreachable")
         fn = HYDRATORS.get(item["platform"])
         if not fn:
             stats["skipped"] += 1
@@ -259,7 +272,8 @@ def hydrate(lib, limit: int | None = None, delay: float = 1.5, platforms=None, l
                 stats["unreachable"] += 1
         if i % 10 == 0:
             lib.conn.commit()
-            log(f"  {i}/{len(rows)}  hydrated {stats['hydrated']}, unreachable {stats['unreachable']}")
+            if not progress:
+                log(f"  {i}/{len(rows)}  hydrated {stats['hydrated']}, unreachable {stats['unreachable']}")
         if consecutive_failures >= 10:
             log("  10 network failures in a row; stopping. Check your connection and run again.")
             break
