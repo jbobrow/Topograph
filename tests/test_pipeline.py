@@ -302,9 +302,10 @@ def test_scan_and_site_rules(tmp_path, monkeypatch):
     for i, f in enumerate([scans / "slice001.jpg", wp / "uploads" / "2014" / "board.jpg",
                            wp / "themes" / "twenty" / "header.jpg",
                            root / "site" / "wordpress" / "wp-includes" / "bg.jpg"]):
-        f.write_bytes(image_bytes(30 + i, size=(1600, 1200)))
+        f.write_bytes(image_bytes(30 + i, size=(1600, 1200), fmt="PNG"))
     report = files_mod.Report()
-    seen = {p.name: d for p, st, d, _ in files_mod.walk([root], files_mod.Options(), report)}
+    opts = files_mod.Options(min_unsignaled_bytes=1000)   # drawn test images compress well
+    seen = {p.name: d for p, st, d, _ in files_mod.walk([root], opts, report)}
     assert seen["slice001.jpg"] == "skip: sensitive folder or name"
     assert seen["board.jpg"] == "image, no signal"
     assert "header.jpg" not in seen and "bg.jpg" not in seen
