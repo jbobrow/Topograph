@@ -282,8 +282,7 @@ def walk(roots, opts: Options, report: Report):
                 if details.get("host"):
                     report.sources[".".join(details["host"].split(".")[-2:])] += 1
                 if decision == "image, no signal":
-                    rel = p.parent.relative_to(root).parts
-                    report.unsignaled_folders[str(root.joinpath(*rel[:2]))] += 1
+                    report.unsignaled_folders[(str(root),) + p.parent.relative_to(root).parts] += 1
                 yield p, st, decision, details
 
 
@@ -377,6 +376,49 @@ def parse(roots, opts: Options, report: Report, preview):
         )
 
 
+def review_groups(counts: Counter, big: int = 250, max_depth: int = 6) -> list[tuple[str, int]]:
+    """Folders to review, split until each line is something a person can judge.
+
+    `counts` maps (root, *parts) -> images directly in that folder. A big group is
+    split into its subfolders when no single subfolder holds nearly all of it.
+    """
+    def total(prefix):
+        n = len(prefix)
+        return sum(v for k, v in counts.items() if k[:n] == prefix)
+
+    def expand(prefix):
+        t = total(prefix)
+        n = len(prefix)
+        children = Counter()
+        for k, v in counts.items():
+            if k[:n] == prefix and len(k) > n:
+                children[k[: n + 1]] += v
+        here = t - sum(children.values())
+        if t <= big or n - 1 >= max_depth or not children:
+            return [(prefix, t)]
+        # One child holding nearly everything: descend without listing the parent.
+        if len(children) == 1 or max(children.values()) >= 0.9 * t:
+            top = max(children, key=children.get)
+            rest = [(prefix + ("(other)",), t - children[top])] if t - children[top] else []
+            return expand(top) + rest
+        out = []
+        for child in children:
+            out += expand(child)
+        if here:
+            out.append((prefix, here))
+        return out
+
+    tops = Counter()
+    for k, v in counts.items():
+        tops[k[:3]] += v                      # root + two folders, as a starting point
+    result = []
+    for prefix in tops:
+        result += expand(prefix)
+    named = [(str(Path(*[x for x in k if x != "(other)"])) + (" (other files)" if k[-1] == "(other)" else ""), n)
+             for k, n in result]
+    return sorted(named, key=lambda kv: -kv[1])
+
+
 def format_report(report: Report) -> str:
     lines = []
     total_kept = sum(v for v in report.kept.values() if v > 0)
@@ -391,12 +433,14 @@ def format_report(report: Report) -> str:
         lines.append("Most common download sources: " +
                      ", ".join(f"{h} ({n})" for h, n in report.sources.most_common(8)))
     if report.left_out:
-        lines.append(f"Left out {len(report.left_out)} folder(s) you excluded:")
-        lines += [f"  {f}" for f in report.left_out[:20]]
+        parents = Counter(str(Path(f).parent) for f in report.left_out)
+        lines.append(f"Left out {len(report.left_out):,} folder(s) you excluded:")
+        lines += [f"  {n:5,} in {parent}" for parent, n in parents.most_common(8)]
     if report.unsignaled_folders:
         lines.append("Images with no sign of being yours, by folder. If one isn't your work, leave it "
                      "out with --exclude PATH, or list it in a .topographignore file in a folder above it:")
-        lines += [f"  {n:7,}  {f}" for f, n in report.unsignaled_folders.most_common(12)]
+        groups = review_groups(report.unsignaled_folders)
+        lines += [f"  {n:7,}  {f}" for f, n in groups[:15]]
     if report.archives:
         lines.append("Platform exports found (import these with `topograph import`):")
         lines += [f"  {a}" for a in report.archives]

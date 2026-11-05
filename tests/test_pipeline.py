@@ -273,3 +273,19 @@ def test_files_ignore_file(tmp_path, monkeypatch):
     names = {p.name for p, *_ in files_mod.walk([root], files_mod.Options(), report)}
     assert names == {"my-work.png", "my-page.png"}
     assert report.left_out == [str(root / "napkin" / "class" / "people" / "someone")]
+
+
+def test_review_groups_split_big_folders():
+    from collections import Counter
+    c = Counter()
+    c[("/D", "napkin", "MIT", "site", "wp")] = 1800
+    c[("/D", "napkin", "MIT", "Process")] = 1400
+    c[("/D", "napkin", "MIT", "people", "me", "projects")] = 400
+    c[("/D", "Personal", "Family", "2015")] = 300
+    c[("/D", "Personal", "Family", "2016")] = 310
+    groups = dict(files_mod.review_groups(c))
+    assert groups["/D/napkin/MIT/site/wp"] == 1800
+    assert groups["/D/napkin/MIT/Process"] == 1400
+    assert groups["/D/napkin/MIT/people/me/projects"] == 400
+    # Family splits by year only because it's big; each year stays one line.
+    assert groups["/D/Personal/Family/2016"] == 310
