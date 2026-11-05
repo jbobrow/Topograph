@@ -48,14 +48,26 @@ def video_poster(data: bytes) -> bytes | None:
 VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm"}
 
 
+PREVIEW_TIMEOUT = 20  # seconds; Quick Look can hang on a big or unusual file
+
+
+def _run(cmd) -> bool:
+    """Run a preview tool; a hang or crash means "no preview", never a failed import."""
+    try:
+        subprocess.run(cmd, capture_output=True, timeout=PREVIEW_TIMEOUT)
+        return True
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
 def _quicklook(path: Path, size: int = 1600) -> bytes | None:
     """macOS Quick Look renders previews for PSD, AI, Sketch, PDF, STL, 3MF and more."""
     ql = shutil.which("qlmanage")
     if not ql:
         return None
     with tempfile.TemporaryDirectory() as tmp:
-        subprocess.run([ql, "-t", "-s", str(size), "-o", tmp, str(path)],
-                       capture_output=True, timeout=60)
+        if not _run([ql, "-t", "-s", str(size), "-o", tmp, str(path)]):
+            return None
         outs = list(Path(tmp).glob("*.png"))
         return outs[0].read_bytes() if outs else None
 
@@ -73,8 +85,9 @@ def preview_from_path(path: Path) -> tuple[bytes | None, str]:
             with tempfile.TemporaryDirectory() as tmp:
                 out = Path(tmp) / "poster.jpg"
                 for seek in ("1", "0"):
-                    subprocess.run([ffmpeg, "-loglevel", "error", "-y", "-ss", seek, "-i", str(path),
-                                    "-frames:v", "1", "-q:v", "3", str(out)], capture_output=True, timeout=60)
+                    if not _run([ffmpeg, "-loglevel", "error", "-y", "-ss", seek, "-i", str(path),
+                                 "-frames:v", "1", "-q:v", "3", str(out)]):
+                        break
                     if out.exists() and out.stat().st_size:
                         return out.read_bytes(), "video"
         return _quicklook(path), "video"

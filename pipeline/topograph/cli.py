@@ -80,8 +80,13 @@ def cmd_files(args, lib):
     lib.set_meta("files_roots", json.dumps(roots))
     lib.set_meta("files_excludes", json.dumps(excludes))
     new = 0
+    done_ids = {r[0] for r in lib.conn.execute(
+        "select i.id from item i join media m on m.item_id = i.id "
+        "where i.platform = 'files' and m.status = 'ok'")}
     with Progress("Making previews", total=len(candidates), unit="files") as prog:
-        for rec in parse(candidates, report, preview_from_path):
+        def skipped(path):
+            prog.advance(note=_short(path.parent))
+        for rec in parse(candidates, report, preview_from_path, done_ids, on_skip=skipped):
             new += upsert_record(lib, rec, media_mod.ingest)
             src = rec.interactions[0].get("source") or ""
             prog.advance(note=_short(Path(src).parent) if src else None)
@@ -117,8 +122,18 @@ def _backend(args):
     if name == "lite":
         print("Using the lite embedder (install the 'clip' extra for much better maps).")
         return get_backend(name)
-    with step("Loading the image model (CLIP; the first run downloads about 600 MB)"):
-        return get_backend(name)
+    import logging
+    import os
+    import warnings
+    logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+    warnings.filterwarnings("ignore", module="huggingface_hub")
+    from .embed import clip_is_cached
+    if clip_is_cached():
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")   # no network, no warnings
+        with step("Loading the image model (CLIP)"):
+            return get_backend(name)
+    print("Downloading the image model (CLIP, about 600 MB, first run only)")
+    return get_backend(name)
 
 
 def cmd_embed(args, lib):

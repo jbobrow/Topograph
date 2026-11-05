@@ -112,6 +112,24 @@ def get_backend(name: str):
     raise ValueError(f"Unknown backend {name!r} (use 'clip' or 'lite')")
 
 
+CLIP_REPO = "laion/CLIP-ViT-B-32-laion2B-s34B-b79K"
+
+
+def clip_is_cached() -> bool:
+    """Whether the CLIP weights are already on disk (then no download, and no network)."""
+    try:
+        from huggingface_hub import try_to_load_from_cache
+    except ImportError:
+        return False
+    for fname in ("open_clip_model.safetensors", "open_clip_pytorch_model.bin"):
+        try:
+            if isinstance(try_to_load_from_cache(CLIP_REPO, fname), str):
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def auto_backend() -> str:
     try:
         import open_clip  # noqa: F401

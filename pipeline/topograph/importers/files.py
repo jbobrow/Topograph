@@ -154,6 +154,7 @@ class Report:
     # Images with no signal, by folder: the ones worth a human look before importing.
     unsignaled_folders: Counter = field(default_factory=Counter)
     left_out: list = field(default_factory=list)  # folders skipped by --exclude or an ignore file
+    already: Counter = field(default_factory=Counter)  # imported on an earlier run
 
 
 def _created(st) -> int | None:
@@ -358,17 +359,31 @@ def collect(roots, opts: Options, report: Report, on_folder=None) -> list:
     return [c for c in walk(roots, opts, report, on_folder) if not c[2].startswith("skip")]
 
 
-def parse(candidates, report: Report, preview):
-    """Yield Records for files from `collect`. `preview(path) -> (bytes|None, kind)`."""
+def parse(candidates, report: Report, preview, done_ids=frozenset(), on_skip=None):
+    """Yield Records for files from `collect`. `preview(path) -> (bytes|None, kind)`.
+
+    Files whose id is in `done_ids` already have a preview, so they are skipped
+    (an interrupted import picks up where it stopped). `on_skip(path)` is called
+    for every file that yields nothing, so progress can count it.
+    """
     for p, st, decision, d in candidates:
         try:
             fid = _file_id(p, st.st_size)
         except OSError:
             report.skipped["skip: unreadable"] += 1
+            on_skip and on_skip(p)
+            continue
+        if f"file:{fid}" in done_ids:
+            report.already[decision] += 1
+            on_skip and on_skip(p)
             continue
         created = _created(st)
-        data, kind = preview(p)
+        try:
+            data, kind = preview(p)
+        except Exception:  # one odd file must never stop the whole import
+            data = None
         if data is None:
+            on_skip and on_skip(p)
             report.skipped["skip: no preview available"] += 1
             report.kept[decision] -= 1
             continue
@@ -439,6 +454,8 @@ def format_report(report: Report) -> str:
     for k, v in report.kept.most_common():
         if v > 0:
             lines.append(f"  {v:7,}  {k}")
+    if report.already:
+        lines.append(f"  ({sum(report.already.values()):,} of these were already imported)")
     lines.append(f"Skipping {sum(report.skipped.values()):,}:")
     for k, v in report.skipped.most_common():
         lines.append(f"  {v:7,}  {k[6:]}")

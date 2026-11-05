@@ -321,3 +321,33 @@ def test_review_groups_count_each_image_once():
     groups = files_mod.review_groups(c)
     assert sum(n for _, n in groups) == 278
     assert len({name for name, _ in groups}) == len(groups)
+
+
+def test_files_import_survives_bad_files_and_resumes(tmp_path, monkeypatch):
+    from fixtures import image_bytes
+    monkeypatch.setattr(files_mod, "_getxattr", lambda p, n: None)
+    root = tmp_path / "Desktop"
+    root.mkdir()
+    for i in range(4):
+        (root / f"part {i}.stl").write_bytes(f"solid part{i}\n".encode() * 10)
+    opts = files_mod.Options()
+
+    def preview(path):
+        if path.name == "part 1.stl":
+            raise TimeoutError("Quick Look hung")      # must not stop the import
+        if path.name == "part 2.stl":
+            return None, "image"                       # no preview available
+        return image_bytes(len(path.name), fmt="PNG"), "image"
+
+    skipped = []
+    report = files_mod.Report()
+    recs = list(files_mod.parse(files_mod.collect([root], opts, report), report, preview,
+                                on_skip=skipped.append))
+    assert {r.text for r in recs} == {"part 0, in Desktop", "part 3, in Desktop"}
+    assert len(skipped) == 2
+
+    # A second run skips what was already imported.
+    done = {r.id for r in recs}
+    report = files_mod.Report()
+    again = list(files_mod.parse(files_mod.collect([root], opts, report), report, preview, done))
+    assert again == [] and sum(report.already.values()) == 2
