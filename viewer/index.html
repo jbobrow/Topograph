@@ -4,21 +4,29 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Topograph</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Cg fill=%27none%27 stroke=%27%239a6b3f%27 stroke-width=%272%27%3E%3Cellipse cx=%2716%27 cy=%2716%27 rx=%2714%27 ry=%2711%27/%3E%3Cellipse cx=%2716%27 cy=%2715%27 rx=%279%27 ry=%277%27/%3E%3Cellipse cx=%2716%27 cy=%2714%27 rx=%274%27 ry=%273%27/%3E%3C/g%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 fill=%27%23111%27/%3E%3Cg fill=%27none%27 stroke=%27%23e9e9e6%27 stroke-width=%272%27%3E%3Cellipse cx=%2716%27 cy=%2717%27 rx=%2712%27 ry=%279%27/%3E%3Cellipse cx=%2716%27 cy=%2716%27 rx=%277%27 ry=%275%27/%3E%3C/g%3E%3Crect x=%2715%27 y=%2714%27 width=%272%27 height=%272%27 fill=%27%23e9e9e6%27/%3E%3C/svg%3E">
   <link rel="stylesheet" href="style.css">
   <script src="vendor/d3.min.js"></script>
 </head>
 <body>
   <header class="bar">
-    <h1 class="wordmark">Topograph</h1>
-    <nav class="views" aria-label="Views">
-      <button data-view="terrain" aria-pressed="true">Terrain</button>
-      <button data-view="strata" aria-pressed="false">Strata</button>
+    <h1 class="wordmark"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4"><ellipse cx="8" cy="8.5" rx="7" ry="5.5"></ellipse><ellipse cx="8" cy="8" rx="3.8" ry="2.8"></ellipse><rect x="7.2" y="7.2" width="1.6" height="1.6" fill="currentColor" stroke="none"></rect></svg>topograph</h1>
+    <nav class="keys" aria-label="Views">
+      <button class="key" data-view="terrain" aria-pressed="true"><span class="led" aria-hidden="true"></span>terrain</button>
+      <button class="key" data-view="strata" aria-pressed="false"><span class="led" aria-hidden="true"></span>strata</button>
     </nav>
     <div class="filters">
-      <div class="chips" id="platforms" aria-label="Platforms"></div>
-      <div class="chips" id="actions" aria-label="What you did"></div>
-      <input id="query" type="search" placeholder="Filter by words or @author" autocomplete="off">
+      <div class="keys" id="platforms" aria-label="Platforms"></div>
+      <div class="keys" id="actions" aria-label="What you did"></div>
+      <div class="keys" id="image-mode" role="radiogroup" aria-label="Images">
+        <button class="key" role="radio" data-mode="color" aria-checked="false"><span class="led" aria-hidden="true"></span>color</button>
+        <button class="key" role="radio" data-mode="gray" aria-checked="true"><span class="led" aria-hidden="true"></span>gray</button>
+        <button class="key" role="radio" data-mode="dither" aria-checked="false"><span class="led" aria-hidden="true"></span>1-bit</button>
+      </div>
+      <label class="search">
+        <span class="search-label">find</span>
+        <input id="query" type="search" placeholder="words or @author" autocomplete="off">
+      </label>
     </div>
   </header>
 
@@ -26,11 +34,11 @@
     <section id="terrain" class="view">
       <canvas id="map" aria-label="Map of everything you've posted, liked and saved"></canvas>
       <div id="tip" class="tip" hidden></div>
-      <div class="legend" id="legend"></div>
+      <div class="readout" id="legend"></div>
       <div class="zoom">
-        <button id="zoom-in" aria-label="Zoom in">+</button>
-        <button id="zoom-out" aria-label="Zoom out">−</button>
-        <button id="zoom-fit" aria-label="Show everything">⤢</button>
+        <button class="key square" id="zoom-in" aria-label="Zoom in">+</button>
+        <button class="key square" id="zoom-out" aria-label="Zoom out">−</button>
+        <button class="key square" id="zoom-fit" aria-label="Show everything">fit</button>
       </div>
     </section>
 
@@ -40,19 +48,19 @@
     </section>
 
     <aside id="panel" class="panel" hidden aria-live="polite">
-      <button class="close" id="panel-close" aria-label="Close">×</button>
+      <button class="key square close" id="panel-close" aria-label="Close">×</button>
       <div id="panel-body"></div>
     </aside>
   </main>
 
   <footer class="time">
-    <button id="play" aria-label="Play through time">▶</button>
+    <button class="key square" id="play" aria-label="Play through time">▶</button>
     <svg id="timeline" aria-label="Time range"></svg>
-    <output id="range-label"></output>
+    <output class="readout-lg" id="range-label"></output>
   </footer>
 
   <div id="empty" class="empty" hidden>
-    <h2>No map yet</h2>
+    <h2>no map yet</h2>
     <p>Import an export, then build the map:</p>
     <pre>topograph import ~/Downloads/instagram-export.zip
 topograph build

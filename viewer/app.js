@@ -58,6 +58,7 @@
 
   const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   const fmtMonth = d3.timeFormat("%b %Y");
+  const fmtStamp = d3.timeFormat("%Y.%m");
   const fmtDay = d3.timeFormat("%-d %b %Y");
   const toDate = (s) => new Date(s * 1000);
 
@@ -81,8 +82,11 @@
   // ---------------------------------------------------------------- filters UI
   function chip(container, label, pressed, onToggle) {
     const b = document.createElement("button");
-    b.className = "chip";
-    b.textContent = label;
+    b.className = "key";
+    const led = document.createElement("span");
+    led.className = "led";
+    led.setAttribute("aria-hidden", "true");
+    b.append(led, label);
     b.setAttribute("aria-pressed", String(pressed));
     b.addEventListener("click", () => {
       const now = b.getAttribute("aria-pressed") !== "true";
@@ -105,16 +109,29 @@
       update();
     }));
   }
+  // Images: color, gray, or 1-bit dither. The canvas copies are made on demand.
+  let imageMode = "gray";
+  try { imageMode = localStorage.getItem("topograph.images") || "gray"; } catch (e) { /* private window */ }
+  function setImageMode(mode) {
+    imageMode = mode;
+    document.body.dataset.images = mode;
+    document.querySelectorAll("#image-mode .key").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.mode === mode)));
+    try { localStorage.setItem("topograph.images", mode); } catch (e) { /* ignore */ }
+    if (state.selected) openItem(state.selected);
+    requestDraw();
+  }
+  document.querySelectorAll("#image-mode .key").forEach((b) => b.addEventListener("click", () => setImageMode(b.dataset.mode)));
+
   let qTimer;
   document.getElementById("query").addEventListener("input", (e) => {
     clearTimeout(qTimer);
     qTimer = setTimeout(() => { state.query = e.target.value.trim().toLowerCase(); update(); }, 150);
   });
 
-  document.querySelectorAll(".views button").forEach((b) => b.addEventListener("click", () => setView(b.dataset.view)));
+  document.querySelectorAll("[data-view]").forEach((b) => b.addEventListener("click", () => setView(b.dataset.view)));
   function setView(v) {
     state.view = v;
-    document.querySelectorAll(".views button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.view === v)));
+    document.querySelectorAll("[data-view]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.view === v)));
     document.getElementById("terrain").hidden = v !== "terrain";
     document.getElementById("strata").hidden = v !== "strata";
     if (v === "terrain") { resizeMap(); } else { drawStrata(); }
@@ -132,10 +149,11 @@
   const fullDensity = density.contours(items);
   const LEVELS = 13;
   const THRESHOLDS = d3.range(LEVELS).map((i) => fullDensity.max * 0.025 * Math.pow(0.92 / 0.025, i / (LEVELS - 1)));
-  let contours = [];
+  let contours = [], contoursVersion = 0;
   function computeContours() {
     const fn = visible.length ? density.contours(visible) : null;
     contours = fn ? THRESHOLDS.map((t) => fn(t)) : [];
+    contoursVersion++;
   }
 
   let quadtree;
@@ -171,19 +189,132 @@
     d3.select(canvas).transition().duration(600).call(zoom.transform, t);
   }
 
-  // Thumbnails load lazily and are kept in a bounded cache.
+  // Thumbnails load lazily and are kept in a bounded cache, with gray and
+  // 1-bit copies made the first time each mode needs them.
   const images = new Map();
-  function thumb(d) {
+
+  const TIERS = [96, 192, 320];
+  function thumb(d, screenPx = 320) {
     let e = images.get(d.id);
     if (!e) {
       const img = new Image();
       e = { img, ok: false };
-      img.onload = () => { e.ok = true; requestDraw(); };
+      // decode() happens off the main thread; drawing an undecoded image would
+      // decode it synchronously, ~25 ms each, and stall the map.
       img.src = MEDIA(d.th);
+      img.decode().then(() => { e.ok = true; requestDraw(); }, () => { e.failed = true; });
       images.set(d.id, e);
       if (images.size > 2500) images.delete(images.keys().next().value);
     }
-    return e.ok ? e.img : null;
+    if (!e.ok) return null;
+    if (imageMode === "color") return e.img;
+    // Convert at the size it is drawn (in three steps), for up to ~12 ms per
+    // frame; until a sharper copy is ready, any smaller one stands in.
+    const want = TIERS.find((t) => t >= screenPx * DPR) || TIERS[TIERS.length - 1];
+    const key = imageMode + want;
+    if (e[key]) return e[key];
+    if (!convertQueue.has(key + d.id)) convertQueue.set(key + d.id, { e, mode: imageMode, tier: want, key });
+    if (!pumping) { pumping = true; setTimeout(pump, 0); }
+    for (const t of TIERS) if (e[imageMode + t]) return e[imageMode + t];
+    return null;
+  }
+
+  // Conversions run in their own short bursts between frames, newest requests
+  // first, so a slow map frame never holds them up.
+  const convertQueue = new Map();
+  let pumping = false;
+  function pump() {
+    const stop = performance.now() + 14;
+    let done = 0;
+    const jobs = [...convertQueue.entries()].reverse();
+    for (const [id, job] of jobs) {
+      if (performance.now() > stop) break;
+      convertQueue.delete(id);
+      if (job.mode !== imageMode || job.e[job.key]) continue;
+      job.e[job.key] = processImage(job.e.img, job.mode, job.tier);
+      done++;
+    }
+    if (done) requestDraw();
+    if (convertQueue.size) setTimeout(pump, 0); else pumping = false;
+  }
+
+  const rgbCache = {};
+  function themeRgb(name) {
+    if (!rgbCache[name]) { const c = d3.color(css(name)) || d3.color("#000"); rgbCache[name] = [c.r, c.g, c.b]; }
+    return rgbCache[name];
+  }
+  // Gray, or 1-bit with Atkinson dithering (in the current ink and ground).
+  function processImage(img, mode, maxEdge) {
+    const scale = Math.min(1, maxEdge / Math.max(img.naturalWidth, img.naturalHeight));
+    const w = Math.max(1, Math.round(img.naturalWidth * scale)), h = Math.max(1, Math.round(img.naturalHeight * scale));
+    const c = document.createElement("canvas");
+    c.width = w; c.height = h;
+    const x = c.getContext("2d", { willReadFrequently: true });
+    x.drawImage(img, 0, 0, w, h);
+    const im = x.getImageData(0, 0, w, h), px = im.data;
+    const lum = new Float32Array(w * h);
+    for (let i = 0; i < w * h; i++) lum[i] = 0.2126 * px[i * 4] + 0.7152 * px[i * 4 + 1] + 0.0722 * px[i * 4 + 2];
+    // Map luminance onto the theme's own dark→light ramp, so images stay positive in dark mode.
+    const ink = themeRgb("--ink"), bg = themeRgb("--surface");
+    const [lo, hi] = ink[0] + ink[1] + ink[2] < bg[0] + bg[1] + bg[2] ? [ink, bg] : [bg, ink];
+    if (mode === "dither") {
+      const spread = [[1, 0], [2, 0], [-1, 1], [0, 1], [1, 1], [0, 2]];
+      for (let yy = 0; yy < h; yy++) for (let xx = 0; xx < w; xx++) {
+        const i = yy * w + xx, old = lum[i], v = old < 128 ? 0 : 255, err = (old - v) / 8;
+        lum[i] = v;
+        for (const [dx, dy] of spread) {
+          const nx = xx + dx, ny = yy + dy;
+          if (nx >= 0 && nx < w && ny < h) lum[ny * w + nx] += err;
+        }
+      }
+    }
+    for (let i = 0; i < w * h; i++) {
+      const t = Math.min(1, Math.max(0, lum[i] / 255));
+      px[i * 4] = lo[0] + (hi[0] - lo[0]) * t;
+      px[i * 4 + 1] = lo[1] + (hi[1] - lo[1]) * t;
+      px[i * 4 + 2] = lo[2] + (hi[2] - lo[2]) * t;
+    }
+    x.putImageData(im, 0, 0);
+    return c;
+  }
+  function clearProcessed() {
+    for (const e of images.values()) for (const m of ["gray", "dither"]) for (const t of TIERS) delete e[m + t];
+  }
+
+  // Ordered (Bayer) dither patterns: one density per elevation band, drawn in
+  // screen pixels so the dots stay crisp at any zoom.
+  const BAYER = (() => {
+    let m = [[0]];
+    for (let n = 0; n < 3; n++) {
+      const s = m.length, out = [];
+      for (let y = 0; y < s * 2; y++) out.push(new Array(s * 2));
+      for (let y = 0; y < s; y++) for (let x = 0; x < s; x++) {
+        const v = m[y][x] * 4;
+        out[y][x] = v; out[y][x + s] = v + 2; out[y + s][x] = v + 3; out[y + s][x + s] = v + 1;
+      }
+      m = out;
+    }
+    return m; // 8x8, values 0..63
+  })();
+  let ditherCache = null;
+  function ditherPatterns() {
+    const key = css("--ink") + DPR;
+    if (ditherCache && ditherCache.key === key) return ditherCache.list;
+    const ink = css("--ink");
+    const list = d3.range(LEVELS).map((i) => {
+      // Capped well below solid so thumbnails and labels stay readable on the peaks.
+      const density = 0.03 + 0.31 * Math.pow(i / (LEVELS - 1), 1.3);
+      const c = document.createElement("canvas");
+      c.width = 8; c.height = 8;
+      const x = c.getContext("2d");
+      x.fillStyle = ink;
+      for (let yy = 0; yy < 8; yy++) for (let xx = 0; xx < 8; xx++) {
+        if (BAYER[yy][xx] < density * 64) x.fillRect(xx, yy, 1, 1);
+      }
+      return tctx.createPattern(c, "repeat");
+    });
+    ditherCache = { key, list };
+    return list;
   }
 
   let drawPending = false;
@@ -193,122 +324,191 @@
     requestAnimationFrame(() => { drawPending = false; drawMap(); });
   }
 
+  const terrainCanvas = document.createElement("canvas");
+  const tctx = terrainCanvas.getContext("2d");
+  let terrainKey = "";
+  function renderTerrain(k, bg, ink, hair) {
+    if (terrainCanvas.width !== canvas.width || terrainCanvas.height !== canvas.height) {
+      terrainCanvas.width = canvas.width; terrainCanvas.height = canvas.height;
+    }
+    const t = tctx;
+    t.setTransform(DPR, 0, 0, DPR, 0, 0);
+    t.fillStyle = bg;
+    t.fillRect(0, 0, W, H);
+    // Instrument grid, fixed to the screen.
+    t.fillStyle = hair;
+    for (let gx = 12; gx < W; gx += 24) for (let gy = 12; gy < H; gy += 24) t.fillRect(gx, gy, 1, 1);
+    t.save();
+    t.translate(transform.x, transform.y);
+    t.scale(k, k);
+    const path = d3.geoPath(null, t);
+    // Elevation as dither density, then contour lines; every fourth is an index contour.
+    const pats = ditherPatterns();
+    const toScreen = t.getTransform().inverse().multiply(new DOMMatrix().scale(DPR));
+    contours.forEach((c, i) => {
+      const pat = pats[i];
+      pat.setTransform(toScreen);
+      t.beginPath(); path(c);
+      t.fillStyle = pat;
+      t.fill();
+    });
+    t.strokeStyle = ink;
+    contours.forEach((c, i) => {
+      t.beginPath(); path(c);
+      const index = i % 4 === 3;
+      t.globalAlpha = index ? 0.9 : 0.45;
+      t.lineWidth = (index ? 1.1 : 0.5) / k;
+      t.stroke();
+    });
+    t.restore();
+  }
+
   let labelBoxes = [];
+  function thumbSize(k) { return Math.min(150, 6.5 * Math.pow(k, 0.9)); }
   function drawMap() {
     if (state.view !== "terrain" || !W) return;
     const k = transform.k;
-    const paper = css("--paper"), ink = css("--ink"), contourCol = css("--contour"), water = css("--water");
-    const tint = d3.scaleLinear().domain([0, 0.35, 0.7, 1])
-      .range([css("--tint-0"), css("--tint-1"), css("--tint-2"), css("--tint-3")]).interpolate(d3.interpolateRgb);
+    const bg = css("--bg"), surface = css("--surface"), ink = css("--ink"), ink2 = css("--ink-2"), hair = css("--hair");
+    convertQueue.clear();   // only what this frame still needs gets re-queued
 
+    // The terrain (grid, dithered bands, contours) only changes when you pan,
+    // zoom or filter, so it is drawn once into its own canvas and reused while
+    // thumbnails and labels update on top.
+    const tkey = [transform.x, transform.y, k, W, H, DPR, contoursVersion, bg].join("|");
+    if (terrainKey !== tkey) {
+      terrainKey = tkey;
+      renderTerrain(k, bg, ink, hair);
+    }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.drawImage(terrainCanvas, 0, 0);
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-    ctx.fillStyle = paper;
-    ctx.fillRect(0, 0, W, H);
-
     ctx.save();
     ctx.translate(transform.x, transform.y);
     ctx.scale(k, k);
-    const path = d3.geoPath(null, ctx);
 
-    // Hypsometric tint, then contour lines; every fourth line is an index contour.
-    contours.forEach((c, i) => {
-      ctx.beginPath(); path(c);
-      ctx.fillStyle = tint(i / (LEVELS - 1));
-      ctx.fill();
-    });
-    ctx.strokeStyle = contourCol;
-    contours.forEach((c, i) => {
-      ctx.beginPath(); path(c);
-      const index = i % 4 === 3;
-      ctx.globalAlpha = index ? 0.85 : 0.5;
-      ctx.lineWidth = (index ? 1.3 : 0.6) / k;
-      ctx.stroke();
-    });
-    ctx.globalAlpha = 1;
-
-    // Viewport in world coordinates.
     const [x0, y0] = transform.invert([0, 0]);
     const [x1, y1] = transform.invert([W, H]);
     const inView = (d) => d.x >= x0 - 20 && d.x <= x1 + 20 && d.y >= y0 - 20 && d.y <= y1 + 20;
 
+    // Markers: squares for what you made or posted, circles for what you kept.
+    const mark = (d, r) => {
+      ctx.beginPath();
+      if (d.mine) ctx.rect(d.x - r, d.y - r, 2 * r, 2 * r);
+      else ctx.arc(d.x, d.y, r, 0, Math.PI * 2);
+    };
     const showThumbs = k >= 2.4;
     if (!showThumbs) {
-      ctx.globalAlpha = 0.6;
+      ctx.fillStyle = ink;
+      ctx.strokeStyle = bg;
+      ctx.lineWidth = 0.8 / k;
       for (const d of visible) {
-        const r = (0.9 + Math.sqrt(d.r) * 0.55) / Math.sqrt(k);
-        ctx.fillStyle = d.mine ? water : ink;
-        ctx.beginPath(); ctx.arc(d.x, d.y, r, 0, Math.PI * 2); ctx.fill();
+        const r = (1 + Math.sqrt(d.r) * 0.5) / Math.sqrt(k);
+        mark(d, r); ctx.fill(); ctx.stroke();
       }
-      ctx.globalAlpha = 1;
     } else {
       const shown = visible.filter(inView).sort((a, b) => a.r - b.r);
-      const budget = 450;
-      const withThumb = shown.filter((d) => d.th).slice(-budget);
+      const withThumb = shown.filter((d) => d.th).slice(-450);
       const drawSet = new Set(withThumb);
       ctx.fillStyle = ink;
-      ctx.globalAlpha = 0.5;
       for (const d of shown) {
         if (drawSet.has(d)) continue;
-        ctx.beginPath(); ctx.arc(d.x, d.y, 1.6 / k, 0, Math.PI * 2); ctx.fill();
+        mark(d, 1.8 / k); ctx.fill();
       }
-      ctx.globalAlpha = 1;
-      const sizePx = Math.min(150, 6.5 * Math.pow(k, 0.9));
+      const sizePx = thumbSize(k);
       for (const d of withThumb) {
         const s = (sizePx * (0.7 + 0.15 * Math.min(d.r, 4))) / k;
-        const img = thumb(d);
+        const img = thumb(d, s * k);
         const ar = d.wh ? d.wh[0] / d.wh[1] : 1;
         const w = ar >= 1 ? s : s * ar, h = ar >= 1 ? s / ar : s;
-        const fr = (d.mine ? 2.5 : 1.5) / k;
-        ctx.fillStyle = d.mine ? water : paper;
+        const fr = (d.mine ? 2 : 1) / k;
+        ctx.fillStyle = d.mine ? ink : surface;
         ctx.fillRect(d.x - w / 2 - fr, d.y - h / 2 - fr, w + 2 * fr, h + 2 * fr);
-        if (img) ctx.drawImage(img, d.x - w / 2, d.y - h / 2, w, h);
-        else { ctx.fillStyle = d.col || css("--paper-2"); ctx.fillRect(d.x - w / 2, d.y - h / 2, w, h); }
+        if (img) {
+          ctx.imageSmoothingEnabled = imageMode !== "dither" || s * k < img.width;
+          ctx.drawImage(img, d.x - w / 2, d.y - h / 2, w, h);
+          ctx.imageSmoothingEnabled = true;
+        } else {
+          // Not ready yet: a hatched card rather than a blank one.
+          ctx.fillStyle = surface;
+          ctx.fillRect(d.x - w / 2, d.y - h / 2, w, h);
+          ctx.save();
+          ctx.beginPath(); ctx.rect(d.x - w / 2, d.y - h / 2, w, h); ctx.clip();
+          ctx.strokeStyle = hair; ctx.lineWidth = 1 / k;
+          ctx.beginPath();
+          for (let o = -h; o < w; o += 6 / k) { ctx.moveTo(d.x - w / 2 + o, d.y + h / 2); ctx.lineTo(d.x - w / 2 + o + h, d.y - h / 2); }
+          ctx.stroke();
+          ctx.restore();
+        }
+        if (!d.mine) { ctx.strokeStyle = ink; ctx.lineWidth = 0.75 / k; ctx.strokeRect(d.x - w / 2 - fr, d.y - h / 2 - fr, w + 2 * fr, h + 2 * fr); }
       }
-    }
-
-    if (state.selected && isVisible(state.selected)) {
-      const d = state.selected;
-      ctx.strokeStyle = water;
-      ctx.lineWidth = 2.5 / k;
-      ctx.beginPath(); ctx.arc(d.x, d.y, (showThumbs ? Math.min(150, 6.5 * Math.pow(k, 0.9)) * 0.7 : 9) / k, 0, Math.PI * 2);
-      ctx.stroke();
     }
     ctx.restore();
 
-    // Region names, like place names on a map: larger regions win collisions.
+    // Selection: viewfinder corners, in screen pixels.
+    if (state.selected && isVisible(state.selected)) {
+      const d = state.selected;
+      const [sx, sy] = transform.apply([d.x, d.y]);
+      const half = showThumbs ? thumbSize(k) * 0.5 + 8 : 10, arm = Math.max(5, half * 0.35);
+      ctx.strokeStyle = ink; ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (const [cx, cy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+        const px = sx + cx * half, py = sy + cy * half;
+        ctx.moveTo(px - cx * arm, py); ctx.lineTo(px, py); ctx.lineTo(px, py - cy * arm);
+      }
+      ctx.stroke();
+    }
+
+    // Region names: a crosshair on the peak and a label beside it; larger regions win collisions.
     labelBoxes = [];
     const fade = k > 5 ? Math.max(0, 1 - (k - 5) / 4) : 1;
     if (fade > 0) {
       const visCount = d3.rollup(visible, (v) => v.length, (d) => d.c);
       const order = [...clusters.values()].filter((c) => visCount.get(c.id)).sort((a, b) => b.n - a.n);
-      const serif = css("--serif");
-      ctx.textAlign = "center";
+      const mono = css("--mono");
       ctx.textBaseline = "middle";
-      if ("letterSpacing" in ctx) ctx.letterSpacing = "0.06em";
+      ctx.textAlign = "left";
       for (const c of order) {
         const [sx, sy] = transform.apply([c.cx, c.cy]);
         if (sx < -100 || sx > W + 100 || sy < -20 || sy > H + 20) continue;
-        const fs = Math.max(12, Math.min(24, 10 + Math.sqrt(c.n) * 0.9));
-        ctx.font = `italic ${fs}px ${serif}`;
+        const fs = c.n > 400 ? 12 : 11;
+        const count = visCount.get(c.id).toLocaleString();
+        ctx.font = `500 ${fs}px ${mono}`;
         const tw = ctx.measureText(c.label).width;
-        const box = [sx - tw / 2 - 4, sy - fs / 2 - 2, sx + tw / 2 + 4, sy + fs / 2 + 2];
+        ctx.font = `400 10px ${mono}`;
+        const cw = ctx.measureText(count).width;
+        const lx = sx + 8, total = tw + 6 + cw;
+        const box = [sx - 5, sy - fs / 2 - 3, lx + total + 4, sy + fs / 2 + 3];
         if (labelBoxes.some((b) => !(box[2] < b[0] || box[0] > b[2] || box[3] < b[1] || box[1] > b[3]))) continue;
         labelBoxes.push(Object.assign(box, { cluster: c }));
-        ctx.globalAlpha = fade * (0.35 + 0.65 * (visCount.get(c.id) / c.n));
-        ctx.lineWidth = 4;
-        ctx.strokeStyle = css("--label-halo");
-        ctx.strokeText(c.label, sx, sy);
+        ctx.globalAlpha = fade * (0.4 + 0.6 * (visCount.get(c.id) / c.n));
+        ctx.fillStyle = surface;
+        ctx.fillRect(lx - 3, sy - fs / 2 - 3, total + 7, fs + 6);
+        ctx.strokeStyle = ink; ctx.lineWidth = 1;
+        ctx.strokeRect(Math.round(lx - 3) + 0.5, Math.round(sy - fs / 2 - 3) + 0.5, Math.round(total + 7), Math.round(fs + 6));
+        ctx.beginPath();
+        ctx.moveTo(sx - 4, sy); ctx.lineTo(sx + 4, sy); ctx.moveTo(sx, sy - 4); ctx.lineTo(sx, sy + 4);
+        ctx.stroke();
         ctx.fillStyle = ink;
-        ctx.fillText(c.label, sx, sy);
+        ctx.font = `500 ${fs}px ${mono}`;
+        ctx.fillText(c.label, lx, sy + 0.5);
+        ctx.fillStyle = ink2;
+        ctx.font = `400 10px ${mono}`;
+        ctx.fillText(count, lx + tw + 6, sy + 0.5);
       }
       ctx.globalAlpha = 1;
-      if ("letterSpacing" in ctx) ctx.letterSpacing = "0px";
     }
 
-    document.getElementById("legend").textContent =
-      (items.some((d) => d.mine) ? "Blue marks things you made or posted. " : "") +
-      `${visible.length.toLocaleString()} of ${items.length.toLocaleString()} mapped items` +
-      (DATA.meta.items > items.length ? `, ${(DATA.meta.items - items.length).toLocaleString()} waiting for images` : "");
+    const legend = document.getElementById("legend");
+    legend.replaceChildren();
+    const b = document.createElement("b");
+    b.textContent = visible.length.toLocaleString();
+    legend.append(b, ` / ${items.length.toLocaleString()} mapped`);
+    if (items.some((d) => d.mine)) {
+      const sq = document.createElement("span"); sq.className = "sym sq";
+      const ci = document.createElement("span"); ci.className = "sym ci";
+      legend.append(sq, "made", ci, "kept");
+    }
+    if (DATA.meta.items > items.length) legend.append(`   ${(DATA.meta.items - items.length).toLocaleString()} waiting`);
   }
 
   // Hover and click.
@@ -316,7 +516,7 @@
   function hideTip() { tip.hidden = true; }
   function itemAt(mx, my) {
     const [wx, wy] = transform.invert([mx, my]);
-    const radius = (transform.k >= 2.4 ? Math.min(150, 6.5 * Math.pow(transform.k, 0.9)) * 0.5 : 8) / transform.k;
+    const radius = (transform.k >= 2.4 ? thumbSize(transform.k) * 0.5 : 8) / transform.k;
     return quadtree.find(wx, wy, radius);
   }
   function labelAt(mx, my) {
@@ -333,9 +533,9 @@
     if (d.th && transform.k < 2.4) {
       const img = document.createElement("img"); img.src = MEDIA(d.th); img.alt = ""; tip.appendChild(img);
     }
-    if (d.t) { const p = document.createElement("div"); p.textContent = d.t.length > 140 ? d.t.slice(0, 140) + "…" : d.t; tip.appendChild(p); }
+    if (d.t) { const p = document.createElement("div"); p.className = "text"; p.textContent = d.t.length > 140 ? d.t.slice(0, 140) + "…" : d.t; tip.appendChild(p); }
     const m = document.createElement("div"); m.className = "meta";
-    m.textContent = [d.a ? "@" + d.a : null, PLATFORM_NAMES[d.p], d.time ? fmtMonth(toDate(d.time)) : null].filter(Boolean).join(", ");
+    m.textContent = [d.a ? "@" + d.a : null, (PLATFORM_NAMES[d.p] || d.p).toLowerCase(), d.time ? fmtStamp(toDate(d.time)) : null].filter(Boolean).join("  ");
     tip.appendChild(m);
     tip.hidden = false;
     const tx = Math.min(mx + 14, W - 270), ty = Math.min(my + 14, H - tip.offsetHeight - 8);
@@ -379,59 +579,74 @@
 
   function historyLine(ix) {
     const [type, at, est, collection] = ix;
-    const verb = VERBS[type] || type;
-    let when = "";
-    if (at) when = est ? ` around ${fmtMonth(toDate(at))}` : ` on ${fmtDay(toDate(at))}`;
-    return verb + (collection ? ` to “${collection}”` : "") + when;
+    const what = (VERBS[type] || type) + (collection ? ` to “${collection}”` : "");
+    const when = at ? (est ? "~" + fmtStamp(toDate(at)) : d3.timeFormat("%Y.%m.%d")(toDate(at))) : "";
+    const li = el("li");
+    li.append(el("span", { textContent: what }), el("span", { textContent: when }));
+    return li;
+  }
+
+  function setHero(img, src) {
+    img.classList.remove("bit");
+    if (imageMode !== "dither") { img.src = src; return; }
+    const raw = new Image();
+    raw.onload = () => {
+      img.src = processImage(raw, "dither", 760).toDataURL();
+      img.classList.add("bit");
+    };
+    raw.src = src;
   }
 
   function openItem(d, pan = false) {
     state.selected = d;
     body.replaceChildren();
     if (d.im && d.im.length) {
-      const hero = el("img", { className: "hero", src: MEDIA(d.im[0]), alt: d.t ? d.t.slice(0, 120) : "" });
+      const hero = el("img", { className: "hero", alt: d.t ? d.t.slice(0, 120) : "" });
+      setHero(hero, MEDIA(d.im[0]));
       body.append(hero);
       if (d.im.length > 1) {
         const gal = el("div", { className: "gallery" });
-        d.im.forEach((p) => { const t = el("img", { src: MEDIA(p), alt: "" }); t.onclick = () => (hero.src = MEDIA(p)); gal.append(t); });
+        d.im.forEach((p) => { const t = el("img", { src: MEDIA(p), alt: "" }); t.onclick = () => setHero(hero, MEDIA(p)); gal.append(t); });
         body.append(gal);
       }
     }
-    if (d.pal && d.pal.length) {
+    if (d.pal && d.pal.length && imageMode === "color") {
       const sw = el("div", { className: "swatches", title: "Dominant colors" });
       d.pal.forEach(([hex, w]) => sw.append(el("span", { style: `background:${hex};flex:${w}` })));
       body.append(sw);
     }
     if (d.t) body.append(el("p", { className: "caption", textContent: d.t }));
     body.append(el("p", { className: "meta",
-      textContent: [d.a ? "@" + d.a : null, PLATFORM_NAMES[d.p] || d.p,
-                    d.ts ? "published " + fmtDay(toDate(d.ts)) : null].filter(Boolean).join(", ") }));
+      textContent: [d.a ? "@" + d.a : null, (PLATFORM_NAMES[d.p] || d.p).toLowerCase(),
+                    d.ts ? "published " + d3.timeFormat("%Y.%m.%d")(toDate(d.ts)) : null].filter(Boolean).join("  ") }));
+    const actions = el("div", { className: "actions" });
     if (d.p === "files") {
-      const b = el("button", { className: "chip", textContent: "Show in Finder" });
+      const b = el("button", { className: "key", textContent: "show in finder" });
       b.onclick = () => fetch("/api/reveal?id=" + encodeURIComponent(d.id)).then((r) => {
-        if (!r.ok) b.textContent = "Couldn’t find the file. It may have moved.";
+        if (!r.ok) b.textContent = "file not found: it may have moved";
       });
-      body.append(el("p", {}, b));
-      if (d.src) body.append(el("a", { className: "original", href: d.src, target: "_blank", rel: "noopener",
-        textContent: `Downloaded from ${new URL(d.src).hostname}` }));
-    } else if (d.u) body.append(el("a", { className: "original", href: d.u, target: "_blank", rel: "noopener",
-      textContent: `Open on ${PLATFORM_NAMES[d.p] || "the web"}` }));
+      actions.append(b);
+      if (d.src) actions.append(el("a", { className: "key", href: d.src, target: "_blank", rel: "noopener",
+        textContent: `source: ${new URL(d.src).hostname}` }));
+    } else if (d.u) actions.append(el("a", { className: "key", href: d.u, target: "_blank", rel: "noopener",
+      textContent: `open on ${(PLATFORM_NAMES[d.p] || "the web").toLowerCase()}` }));
+    if (actions.children.length) body.append(actions);
 
-    body.append(el("h3", { textContent: "What you did" }));
+    body.append(el("h3", { textContent: "history" }));
     const ul = el("ul", { className: "history" });
-    d.ix.forEach((ix) => ul.append(el("li", { textContent: historyLine(ix) })));
+    d.ix.forEach((ix) => ul.append(historyLine(ix)));
     body.append(ul);
 
     const c = clusters.get(d.c);
     if (c) {
-      body.append(el("h3", { textContent: "Region" }));
-      const a = el("button", { className: "chip", textContent: c.label });
+      body.append(el("h3", { textContent: "region" }));
+      const a = el("button", { className: "key", textContent: c.label });
       a.onclick = () => openRegion(c);
       body.append(a);
     }
     const nb = (d.nb || []).map((j) => items[j]).filter(Boolean);
     if (nb.length) {
-      body.append(el("h3", { textContent: "Nearest in taste" }));
+      body.append(el("h3", { textContent: "nearest in taste" }));
       body.append(gridOf(nb, (n) => openItem(n, true)));
     }
     panel.hidden = false;
@@ -444,8 +659,8 @@
     state.selected = null;
     body.replaceChildren();
     body.append(el("h2", { textContent: c.label }));
-    const words = c.terms && c.terms.length ? ` Common words: ${c.terms.slice(0, 5).join(", ")}.` : "";
-    body.append(el("p", { className: "meta", textContent: `${c.n.toLocaleString()} items.${words}` }));
+    const words = c.terms && c.terms.length ? `   words: ${c.terms.slice(0, 5).join(", ")}` : "";
+    body.append(el("p", { className: "meta", textContent: `${c.n.toLocaleString()} items${words}` }));
 
     // When this region was active.
     const times = c.members.filter((d) => d.time).map((d) => toDate(d.time));
@@ -456,13 +671,14 @@
       const y = d3.scaleLinear().domain([0, d3.max(bins, (b) => b.length) || 1]).range([h - 14, 2]);
       const svg = d3.create("svg").attr("viewBox", `0 0 ${w} ${h}`).attr("width", "100%").attr("role", "img")
         .attr("aria-label", "When you engaged with this region");
-      svg.append("path").attr("fill", css("--contour")).attr("opacity", 0.6)
-        .attr("d", d3.area().curve(d3.curveBasis).x((b) => x(b.x0)).y0(h - 14).y1((b) => y(b.length))(bins));
+      svg.append("g").selectAll("rect").data(bins).join("rect")
+        .attr("x", (b) => x(b.x0)).attr("width", (b) => Math.max(1, x(b.x1) - x(b.x0) - 1))
+        .attr("y", (b) => y(b.length)).attr("height", (b) => h - 14 - y(b.length)).attr("fill", css("--ink"));
       svg.append("g").attr("transform", `translate(0,${h - 13})`).attr("class", "timeline-axis")
         .call(d3.axisBottom(x).ticks(5).tickSize(0)).select(".domain").remove();
-      body.append(el("h3", { textContent: "When it was on your mind" }), svg.node());
+      body.append(el("h3", { textContent: "when it was on your mind" }), svg.node());
     }
-    body.append(el("h3", { textContent: "Most resonant" }));
+    body.append(el("h3", { textContent: "most resonant" }));
     const list = [...c.members].sort((a, b) => b.r - a.r || (b.time || 0) - (a.time || 0)).slice(0, 150);
     body.append(gridOf(list, (d) => openItem(d, true)));
     panel.hidden = false;
@@ -484,17 +700,21 @@
     const node = tlSvg.node();
     const w = node.getBoundingClientRect().width, h = 48;
     tlSvg.selectAll("*").remove();
-    tlX = d3.scaleTime().domain(tExtent).range([4, w - 4]);
+    tlX = d3.scaleTime().domain(tExtent).range([16, w - 16]);
     const months = d3.timeMonth.range(tExtent[0], tExtent[1]);
     const counts = d3.rollup(items.filter((d) => d.time), (v) => v.length, (d) => +d3.timeMonth.floor(toDate(d.time)));
     const y = d3.scaleLinear().domain([0, d3.max(months, (m) => counts.get(+m) || 0) || 1]).range([h - 16, 2]);
-    const bw = Math.max(1, (w - 8) / months.length - 0.5);
+    const bw = Math.max(1, Math.floor((w - 8) / months.length) - 1);
     tlSvg.append("g").selectAll("rect").data(months).join("rect").attr("class", "timeline-bar")
-      .attr("x", (m) => tlX(m)).attr("width", bw)
+      .attr("shape-rendering", "crispEdges")
+      .attr("x", (m) => Math.round(tlX(m))).attr("width", bw)
       .attr("y", (m) => y(counts.get(+m) || 0)).attr("height", (m) => h - 16 - y(counts.get(+m) || 0));
-    tlSvg.append("g").attr("class", "timeline-axis").attr("transform", `translate(0,${h - 15})`)
-      .call(d3.axisBottom(tlX).ticks(Math.max(2, Math.floor(w / 80))).tickSize(3));
-    brush = d3.brushX().extent([[4, 0], [w - 4, h - 16]]).on("brush end", onBrush);
+    // A ruler: a tick per month, a long tick and a label per year.
+    const ruler = tlSvg.append("g").attr("class", "timeline-axis").attr("transform", `translate(0,${h - 15})`);
+    ruler.append("g").attr("class", "minor").selectAll("line").data(months).join("line")
+      .attr("x1", (m) => Math.round(tlX(m)) + 0.5).attr("x2", (m) => Math.round(tlX(m)) + 0.5).attr("y1", 0).attr("y2", 2);
+    ruler.call(d3.axisBottom(tlX).ticks(d3.timeYear.every(w < 500 ? 4 : w < 900 ? 2 : 1)).tickSize(5).tickFormat(d3.timeFormat("%Y")));
+    brush = d3.brushX().extent([[16, 0], [w - 16, h - 16]]).on("brush end", onBrush);
     brushG = tlSvg.append("g").attr("class", "brush").call(brush);
     if (state.range) { settingBrush = true; brushG.call(brush.move, state.range.map(tlX)); settingBrush = false; }
     updateRangeLabel();
@@ -507,9 +727,9 @@
   }
   function updateRangeLabel() {
     const [a, b] = state.range || tExtent;
-    rangeLabel.textContent = state.range
-      ? `${fmtMonth(a)} – ${fmtMonth(d3.timeDay.offset(b, -1))}`
-      : `All time, ${a.getFullYear()}–${d3.timeDay.offset(b, -1).getFullYear()}`;
+    rangeLabel.replaceChildren(
+      state.range ? `${fmtStamp(a)} — ${fmtStamp(d3.timeDay.offset(b, -1))}` : `${a.getFullYear()} — ${d3.timeDay.offset(b, -1).getFullYear()}`,
+      Object.assign(document.createElement("small"), { textContent: state.range ? `${visible.length.toLocaleString()} items in range` : "all time" }));
   }
 
   // Play: slide a window (the current selection, or two years) through time.
@@ -521,7 +741,7 @@
     let [a, b] = state.range || [tExtent[0], d3.timeMonth.offset(tExtent[0], 24)];
     const span = b - a;
     if (+b >= +tExtent[1]) { a = tExtent[0]; b = new Date(+a + span); }
-    playBtn.textContent = "❚❚";
+    playBtn.textContent = "■";
     playBtn.setAttribute("aria-label", "Pause");
     playTimer = setInterval(() => {
       a = d3.timeMonth.offset(a, 1); b = new Date(+a + span);
@@ -533,8 +753,21 @@
   };
 
   // ---------------------------------------------------------------- strata
-  const GEO = ["#c9a66b", "#8fa47a", "#b97a56", "#7d95a8", "#d4c08a", "#9c8f7a",
-               "#a7b59a", "#c48f6a", "#6f8a83", "#b8a48c", "#8a9a6a", "#a0887a"];
+  // One 1-bit pattern per layer: screens, hatches, rules and checks, from light to dark.
+  const PATTERNS = [
+    { w: 4, h: 4, d: "M0 0h1v1h-1z" },                                   // fine dot screen
+    { w: 6, h: 6, d: "M0 6L6 0", stroke: 1 },                            // diagonal hatch
+    { w: 4, h: 3, d: "M0 0.5H4", stroke: 1 },                            // horizontal rule
+    { w: 3, h: 3, d: "M0 0h1v1h-1z" },                                   // dense dot screen
+    { w: 6, h: 6, d: "M0 6L6 0M0 0L6 6", stroke: 0.8 },                  // crosshatch
+    { w: 3, h: 4, d: "M0.5 0V4", stroke: 1 },                            // vertical rule
+    { w: 4, h: 4, d: "M0 0h2v2h-2zM2 2h2v2h-2z" },                       // checker
+    { w: 5, h: 5, d: "M0 0L5 5", stroke: 1 },                            // back hatch
+    { w: 6, h: 6, d: "M1 1h2v2h-2z" },                                   // square dots
+    { w: 8, h: 4, d: "M0 0.5H4", stroke: 1 },                            // dashes
+    { w: 2, h: 2, d: "M0 0h1v1h-1zM1 1h1v1h-1z" },                       // 50% screen
+    { w: 4, h: 4, d: "M0 0h3v1h-3zM0 2h1v1h-1z" },                       // brick
+  ];
   const strataTip = document.getElementById("strata-tip");
   function drawStrata() {
     if (state.view !== "strata") return;
@@ -576,24 +809,32 @@
     const area = d3.area().curve(d3.curveBasis).x((p) => x(p.data.date)).y0((p) => y(p[0])).y1((p) => y(p[1]));
 
     const defs = svg.append("defs");
-    defs.append("pattern").attr("id", "hatch").attr("patternUnits", "userSpaceOnUse").attr("width", 6).attr("height", 6)
-      .attr("patternTransform", "rotate(45)")
-      .append("line").attr("x1", 0).attr("y1", 0).attr("x2", 0).attr("y2", 6).attr("stroke", css("--rule")).attr("stroke-width", 3);
-    const color = (k) => k === "unmapped" ? "url(#hatch)" : GEO[keys.indexOf(k) % GEO.length];
+    const ink = css("--ink"), bgc = css("--bg");
+    PATTERNS.forEach((p, i) => {
+      const pat = defs.append("pattern").attr("id", "strat" + i).attr("patternUnits", "userSpaceOnUse")
+        .attr("width", p.w).attr("height", p.h);
+      pat.append("rect").attr("width", p.w).attr("height", p.h).attr("fill", bgc);
+      pat.append("path").attr("d", p.d).attr("shape-rendering", "crispEdges")
+        .attr("fill", p.stroke ? "none" : ink).attr("stroke", p.stroke ? ink : "none").attr("stroke-width", p.stroke || 0);
+    });
+    const unm = defs.append("pattern").attr("id", "unmapped").attr("patternUnits", "userSpaceOnUse").attr("width", 8).attr("height", 8);
+    unm.append("rect").attr("width", 8).attr("height", 8).attr("fill", bgc);
+    unm.append("path").attr("d", "M0 0h1v1h-1z").attr("fill", css("--ink-2"));
+    const color = (k) => k === "unmapped" ? "url(#unmapped)" : `url(#strat${keys.indexOf(k) % PATTERNS.length})`;
 
     if (state.range) {
       svg.append("rect").attr("x", x(state.range[0])).attr("width", Math.max(1, x(state.range[1]) - x(state.range[0])))
         .attr("y", margin.top - 8).attr("height", h - margin.top - margin.bottom + 8)
-        .attr("fill", css("--water")).attr("opacity", 0.08);
+        .attr("fill", css("--ink")).attr("opacity", 0.07);
     }
-    const label = (k) => k === "unmapped" ? "Not yet mapped (links still waiting for images)" : clusters.get(+k).label;
+    const label = (k) => k === "unmapped" ? "not yet mapped (links waiting for images)" : clusters.get(+k).label;
     svg.append("g").selectAll("path").data(series).join("path")
       .attr("class", "stratum").attr("fill", (s) => color(s.key)).attr("d", area)
       .on("mousemove", (e, s) => {
         const date = d3.timeMonth.floor(x.invert(d3.pointer(e, node)[0]));
         const i = idx.get(+date);
         const raw = i != null ? table[i][s.key] : 0;
-        strataTip.textContent = `${label(s.key)}, ${fmtMonth(date)}: ${s.key === "unmapped" ? raw + " links" : "resonance " + raw.toFixed(1)}`;
+        strataTip.textContent = `${label(s.key)}  ${fmtStamp(date)}  ${s.key === "unmapped" ? raw + " links" : "resonance " + raw.toFixed(1)}`;
         strataTip.hidden = false;
         const [px, py] = d3.pointer(e, node);
         strataTip.style.left = Math.min(px + 12, w - 270) + "px";
@@ -603,20 +844,30 @@
       .on("mouseleave", () => { strataTip.hidden = true; svg.selectAll(".stratum").classed("dim", false); })
       .on("click", (e, s) => { if (s.key !== "unmapped") openRegion(clusters.get(+s.key)); });
 
-    // Name each layer where it is thickest, if there is room.
+    // Name each layer where the whole name fits inside it: the stretch of months
+    // under the label must all be at least a line tall.
     const g = svg.append("g");
     const placed = [];
-    const byThickness = series.filter((s) => s.key !== "unmapped").map((s) => {
-      let best = -1, bi = 0;
-      s.forEach((p, i) => { const t = y(p[0]) - y(p[1]); if (t > best) { best = t; bi = i; } });
-      return { s, best, p: s[bi] };
-    }).sort((a, b) => b.best - a.best);
-    for (const { s, best, p } of byThickness) {
-      if (best < 16) continue;
-      const lx = Math.min(Math.max(x(p.data.date), margin.left + 60), w - margin.right - 60);
+    const step = (w - margin.left - margin.right) / Math.max(1, months.length - 1);
+    const candidates = [];
+    for (const s of series) {
+      if (s.key === "unmapped") continue;
+      const name = clusters.get(+s.key).label;
+      const half = Math.ceil((name.length * 6.8 + 10) / 2 / step);   // months under half the label
+      let best = -1, bi = -1;
+      for (let i = half; i < s.length - half; i++) {
+        let lo = Infinity;
+        for (let j = i - half; j <= i + half; j++) lo = Math.min(lo, y(s[j][0]) - y(s[j][1]));
+        if (lo > best) { best = lo; bi = i; }
+      }
+      if (bi >= 0 && best >= 14) candidates.push({ s, best, p: s[bi], name });
+    }
+    candidates.sort((a, b) => b.best - a.best);
+    for (const { s, p, name } of candidates) {
+      const lx = x(p.data.date);
       const ly = (y(p[0]) + y(p[1])) / 2;
       const t = g.append("text").attr("class", "stratum-label").attr("text-anchor", "middle")
-        .attr("x", lx).attr("y", ly).attr("dy", "0.35em").text(clusters.get(+s.key).label);
+        .attr("x", lx).attr("y", ly).attr("dy", "0.35em").text(name);
       const b = t.node().getBBox();
       if (placed.some((o) => !(b.x + b.width < o.x || b.x > o.x + o.width || b.y + b.height < o.y || b.y > o.y + o.height))) {
         t.remove();
@@ -625,7 +876,7 @@
       placed.push(b);
     }
     svg.append("g").attr("class", "strata-axis").attr("transform", `translate(0,${h - margin.bottom})`)
-      .call(d3.axisBottom(x).ticks(d3.timeYear.every(1)).tickSize(4));
+      .call(d3.axisBottom(x).ticks(d3.timeYear.every(1)).tickSize(5).tickFormat(d3.timeFormat("%Y")));
   }
 
   // ---------------------------------------------------------------- update loop
@@ -644,12 +895,17 @@
   }
 
   window.addEventListener("resize", () => { resizeMap(); drawTimeline(); drawStrata(); });
-  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { requestDraw(); drawTimeline(); drawStrata(); });
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+    clearProcessed(); ditherCache = null; for (const k in rgbCache) delete rgbCache[k];
+    requestDraw(); drawTimeline(); drawStrata();
+  });
 
+  setImageMode(imageMode);
   computeContours();
   buildQuadtree();
   resizeMap();
   drawTimeline();
+  document.fonts && document.fonts.ready.then(() => { requestDraw(); drawTimeline(); });
 
   // Handle for automated tests and the console.
   window.topograph = { data: DATA, clusters, openItem, openRegion, flyTo, setView };

@@ -89,8 +89,10 @@ On a Mac, install with the `xattr` package (included in the install line above).
   it was on your mind; click an image for its details, your history with it and its
   nearest neighbors in taste.
 - **Strata**: each region as a layer through time.
-- Things you made or posted are marked in blue, on the map and in thumbnail frames.
-  Your own files have a **Show in Finder** button.
+- Things you made or posted are squares on the map (and solid frames on thumbnails);
+  things you kept are circles. Your own files have a **show in finder** key.
+- **color / gray / 1-bit** switches how images are drawn. 1-bit dithers them to
+  match the terrain.
 - **Time scrubber**: drag across the bar to watch the terrain for a period, or press
   play to slide through the years.
 
@@ -126,6 +128,6 @@ pipeline/topograph/
   embed.py     CLIP (or lite) embeddings
   layout.py    UMAP map, HDBSCAN regions, region names
   export.py    viewer data + local server
-viewer/        static web viewer (d3, vendored)
+viewer/        static web viewer (d3 and IBM Plex fonts, bundled; Plex is under the SIL OFL)
 docs/SPEC.md   product spec
 ```
