@@ -56,9 +56,12 @@ PROJECT_MARKERS = {".git", "package.json", "Package.swift", "Cargo.toml", "pypro
                    "platformio.ini", "Gemfile", "composer.json", "go.mod"}
 
 SENSITIVE_PATH = re.compile(
-    r"(^|/)[^/]*\b(medical|health records?|identification|passports?|id cards?|driver'?s? licen[cs]e|"
+    # Letter boundaries rather than \b: in "JAMIE_CT_Scan" the underscore is a separator.
+    r"(?<![A-Za-z])(medical|health records?|ct[ _-]?scans?|cat[ _-]?scans?|mri|x-?rays?|ultrasounds?|"
+    r"radiology|dicom|lab[ _-]?results?|prescriptions?|patient|diagnos[ie]s|"
+    r"identification|passports?|id cards?|driver'?s? licen[cs]e|"
     r"tax(es)?|w-?9s?|1099s?|w-?2s?|bank(ing)?|statements?|insurance|legal|lease|payroll|invoices?|"
-    r"receipts?|1password|keychain|private|passwords?)\b", re.I)
+    r"receipts?|1password|keychain|private|passwords?)(?![A-Za-z])", re.I)
 SENSITIVE_HOST = re.compile(
     r"(\.gov$|\.gov\.|chase|bankofamerica|wellsfargo|citi|amex|americanexpress|capitalone|syf\.com|"
     r"synchrony|discover\.com|intuit|turbotax|irs\.|paypal|venmo|schwab|fidelity|vanguard|"
@@ -255,6 +258,8 @@ def walk(roots, opts: Options, report: Report):
             for d in dirnames:
                 if d in PRUNE_DIRS or d.startswith(".") or d.endswith(PRUNE_SUFFIXES) or d.endswith("_files"):
                     continue  # "_files": the assets folder of a saved web page
+                if d in ("wp-admin", "wp-includes") or (here.name == "wp-content" and d != "uploads"):
+                    continue  # a WordPress backup: only uploads are yours, the rest is theme code
                 if str(here / d) in excluded or (rules and ignored(here / d, True, rules)):
                     report.left_out.append(str(here / d))
                     continue
@@ -394,10 +399,11 @@ def review_groups(counts: Counter, big: int = 250, max_depth: int = 6) -> list[t
             if k[:n] == prefix and len(k) > n:
                 children[k[: n + 1]] += v
         here = t - sum(children.values())
-        if t <= big or n - 1 >= max_depth or not children:
+        shallow = n < 3                       # always show at least two folders below the root
+        if not children or n - 1 >= max_depth or (t <= big and not shallow):
             return [(prefix, t)]
         # One child holding nearly everything: descend without listing the parent.
-        if len(children) == 1 or max(children.values()) >= 0.9 * t:
+        if not shallow and (len(children) == 1 or max(children.values()) >= 0.9 * t):
             top = max(children, key=children.get)
             rest = [(prefix + ("(other)",), t - children[top])] if t - children[top] else []
             return expand(top) + rest
@@ -408,12 +414,9 @@ def review_groups(counts: Counter, big: int = 250, max_depth: int = 6) -> list[t
             out.append((prefix, here))
         return out
 
-    tops = Counter()
-    for k, v in counts.items():
-        tops[k[:3]] += v                      # root + two folders, as a starting point
     result = []
-    for prefix in tops:
-        result += expand(prefix)
+    for root in {k[:1] for k in counts}:
+        result += expand(root)
     named = [(str(Path(*[x for x in k if x != "(other)"])) + (" (other files)" if k[-1] == "(other)" else ""), n)
              for k, n in result]
     return sorted(named, key=lambda kv: -kv[1])

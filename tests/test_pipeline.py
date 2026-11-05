@@ -289,3 +289,30 @@ def test_review_groups_split_big_folders():
     assert groups["/D/napkin/MIT/people/me/projects"] == 400
     # Family splits by year only because it's big; each year stays one line.
     assert groups["/D/Personal/Family/2016"] == 310
+
+
+def test_scan_and_site_rules(tmp_path, monkeypatch):
+    from fixtures import image_bytes
+    monkeypatch.setattr(files_mod, "_getxattr", lambda p, n: None)
+    root = tmp_path / "Dropbox"
+    scans = root / "Family" / "Scans" / "PATIENT_CT_Scan_2026.04.01"
+    wp = root / "site" / "wordpress" / "wp-content"
+    for d in (scans, wp / "uploads" / "2014", wp / "themes" / "twenty", root / "site" / "wordpress" / "wp-includes"):
+        d.mkdir(parents=True)
+    for i, f in enumerate([scans / "slice001.jpg", wp / "uploads" / "2014" / "board.jpg",
+                           wp / "themes" / "twenty" / "header.jpg",
+                           root / "site" / "wordpress" / "wp-includes" / "bg.jpg"]):
+        f.write_bytes(image_bytes(30 + i, size=(1600, 1200)))
+    report = files_mod.Report()
+    seen = {p.name: d for p, st, d, _ in files_mod.walk([root], files_mod.Options(), report)}
+    assert seen["slice001.jpg"] == "skip: sensitive folder or name"
+    assert seen["board.jpg"] == "image, no signal"
+    assert "header.jpg" not in seen and "bg.jpg" not in seen
+
+
+def test_review_groups_count_each_image_once():
+    from collections import Counter
+    c = Counter({("/D", "Portfolio"): 5, ("/D", "Portfolio", "Old Site"): 225, ("/D",): 48})
+    groups = files_mod.review_groups(c)
+    assert sum(n for _, n in groups) == 278
+    assert len({name for name, _ in groups}) == len(groups)
