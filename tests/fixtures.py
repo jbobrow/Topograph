@@ -123,7 +123,14 @@ def build_instagram_export(path: Path, new_format: bool = False) -> Path:
         {"media": [{"uri": "media/posts/202105/113.jpg", "creation_timestamp": 1621000000,
                     "title": mojibake("Blue hour, Zürich")}]},
     ]
-    (act / "content" / "posts_1.json").write_text(json.dumps(posts))
+    if new_format:
+        (act / "media").mkdir()
+        (act / "media" / "posts_1.json").write_text(json.dumps(posts))
+        # posts.json in the new layout is metadata about the same posts, not more posts.
+        (act / "media" / "posts.json").write_text(json.dumps([{"timestamp": 1620000000, "media": [],
+                                                              "label_values": [{"label": "Caption"}]}]))
+    else:
+        (act / "content" / "posts_1.json").write_text(json.dumps(posts))
 
     if not new_format:
         likes = {"likes_media_likes": [
@@ -138,27 +145,44 @@ def build_instagram_export(path: Path, new_format: bool = False) -> Path:
                 "href": f"https://www.instagram.com/p/{IG_CODES[2]}/", "timestamp": 1680000000}}},
         ]}
     else:
+        # The 2025 layout, as seen in a real export.
+        owner = lambda u: {"dict": [{"dict": [{"label": "URL", "value": f"https://example.com/@{u}"},
+                                              {"label": "Name", "value": mojibake(u.title() + "™️")},
+                                              {"label": "Username", "value": u}], "title": ""}],
+                           "title": "Owner"}
+        tags = lambda *t: {"dict": [{"dict": [{"label": "Name", "value": x}], "title": ""} for x in t],
+                           "title": "Hashtags"}
+        post = lambda code, kind, caption, user, *t: [
+            {"label": "URL", "value": f"https://www.instagram.com/{kind}/{code}/",
+             "href": f"https://www.instagram.com/{kind}/{code}/"},
+            {"label": "Caption", "value": mojibake(caption)}, {"label": "Title", "value": ""},
+            tags(*t), owner(user), {"dict": [], "title": "Brand partner"}]
         likes = [
-            {"timestamp": 1610000000, "media": [], "label_values": [
-                {"label": "URL", "value": f"https://www.instagram.com/p/{IG_CODES[0]}/",
-                 "href": f"https://www.instagram.com/p/{IG_CODES[0]}/"},
-                {"label": "Owner", "title": "", "dict": [{"dict": [
-                    {"label": "Username", "value": "photographer_a"}]}]}]},
-            {"timestamp": 1650000000, "media": [], "label_values": [
-                {"label": "URL", "value": f"https://www.instagram.com/reel/{IG_CODES[1]}/",
-                 "href": f"https://www.instagram.com/reel/{IG_CODES[1]}/"}]},
+            {"timestamp": 1610000000, "media": [], "fbid": "1",
+             "label_values": post(IG_CODES[0], "p", "Fog on the ridge ⛰", "photographer_a", "fog")},
+            {"timestamp": 1650000000, "media": [], "fbid": "2",
+             "label_values": post(IG_CODES[1], "reel", "", "studio_b", "ceramics", "glaze")},
         ]
-        saved = {"saved_saved_media": [
-            {"title": "architect_c", "string_map_data": {"Saved on": {
-                "href": f"https://www.instagram.com/p/{IG_CODES[2]}/", "timestamp": 1680000000}}}]}
-    collections = {"saved_saved_collections": [
+        saved = [
+            {"timestamp": 1680000000, "media": [], "fbid": "3",
+             "label_values": post(IG_CODES[2], "p", "Concrete stairs", "architect_c")}]
+        collections = [
+            {"timestamp": 1679000000, "media": [], "fbid": "4", "label_values": [
+                {"label": "Name", "value": "Spaces"}, {"label": "Type", "value": "Default"},
+                {"label": "Privacy", "value": "Private"},
+                {"label": "Update time", "timestamp_value": 1679000000},
+                {"dict": [{"dict": post(IG_CODES[2], "p", "Concrete stairs", "architect_c"), "title": ""},
+                          {"dict": post(IG_CODES[3], "reel", "Warm kitchen", "interiors_d"), "title": ""}],
+                 "title": "Media"}]}]
+    if not new_format:
+      collections = {"saved_saved_collections": [
         {"title": "Collection", "string_map_data": {"Name": {"value": "Spaces"},
                                                     "Creation Time": {"timestamp": 1679000000}}},
         {"title": "architect_c", "string_map_data": {"Name": {"value": "architect_c"}, "Added Time": {
             "href": f"https://www.instagram.com/p/{IG_CODES[2]}/", "timestamp": 1680000000}}},
         {"title": "interiors_d", "string_map_data": {"Name": {"value": "interiors_d"}, "Added Time": {
             "href": f"https://www.instagram.com/p/{IG_CODES[3]}/", "timestamp": 1690000000}}},
-    ]}
+      ]}
     comments = [{"string_map_data": {
         "Comment": {"value": mojibake("This light is unreal ✨")},
         "Media Owner": {"value": "photographer_a"},

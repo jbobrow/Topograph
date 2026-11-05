@@ -87,12 +87,85 @@ def _flatten_record(rec) -> dict:
             "name": clean_text(name), "text": clean_text(text)}
 
 
+def _labels(rec) -> dict | None:
+    """Read a 2025-style record: label_values with URL, Caption, Hashtags and Owner.
+
+    Returns None for older shapes, which go through _flatten_record instead.
+    """
+    if not isinstance(rec, dict) or not isinstance(rec.get("label_values"), list):
+        return None
+    out = {"url": None, "caption": None, "author": None, "hashtags": [], "name": None, "items": []}
+    for lv in rec["label_values"]:
+        label = (lv.get("label") or "").lower()
+        title = (lv.get("title") or "").lower()
+        if label == "url" and isinstance(lv.get("value"), str):
+            out["url"] = lv.get("href") or lv["value"]
+        elif label == "caption":
+            out["caption"] = clean_text(lv.get("value"))
+        elif label == "name":
+            out["name"] = clean_text(lv.get("value"))
+        elif title == "hashtags":
+            out["hashtags"] = [clean_text(v.get("value")) for d in lv.get("dict") or []
+                               for v in d.get("dict") or [] if v.get("value")]
+        elif title == "owner" or label == "owner":
+            for d in lv.get("dict") or []:
+                for v in d.get("dict") or []:
+                    if (v.get("label") or "").lower() == "username" and v.get("value"):
+                        out["author"] = clean_text(v["value"])
+        elif "dict" in lv and title in ("", "media"):
+            # A saved collection lists its posts as nested records (titled "Media").
+            out["items"] += [{"label_values": d.get("dict") or [], "timestamp": rec.get("timestamp")}
+                             for d in lv.get("dict") or [] if isinstance(d, dict)]
+    return out
+
+
+def _post_text(caption, hashtags):
+    if caption:
+        return caption
+    return " ".join("#" + h for h in hashtags if h) or None
+
+
+def _link_record(code, at, estimated, author, text, ix_type, collection, source):
+    created = instagram_shortcode_time(code)
+    return Record(
+        id=f"ig:{code}",
+        platform="instagram",
+        kind="text" if text else "link",
+        url=f"https://www.instagram.com/p/{code}/",
+        author=author,
+        text=text,
+        created_at=created,
+        created_estimated=created is not None,
+        interactions=[{"type": ix_type, "at": at, "estimated": estimated,
+                       "collection": collection, "source": source}],
+    )
+
+
 def _link_records(archive, name, ix_type, collection_aware=False):
     data = _load(archive, name)
     if data is None:
         return
     current_collection = None
     for rec in _main_list(data):
+        at_rec = rec.get("timestamp") if isinstance(rec, dict) and plausible_ts(rec.get("timestamp")) else 0
+        lab = _labels(rec)
+        if lab is not None:
+            if lab["items"] and lab["name"]:          # a collection with its posts inside
+                for item in lab["items"]:
+                    il = _labels(item)
+                    code = instagram_shortcode(il["url"] or "") if il else None
+                    if code:
+                        yield _link_record(code, at_rec, False, il["author"],
+                                           _post_text(il["caption"], il["hashtags"]),
+                                           ix_type, lab["name"], name)
+                continue
+            code = instagram_shortcode(lab["url"] or "")
+            if code:
+                yield _link_record(code, at_rec, not at_rec, lab["author"],
+                                   _post_text(lab["caption"], lab["hashtags"]),
+                                   ix_type, None, name)
+            continue
+        # Older shapes: string_list_data / string_map_data, and header rows for collections.
         f = _flatten_record(rec)
         code = next((instagram_shortcode(u) for u in f["urls"] if instagram_shortcode(u)), None)
         if collection_aware and not code and f["name"]:
@@ -101,18 +174,8 @@ def _link_records(archive, name, ix_type, collection_aware=False):
         if not code:
             continue
         at = max(f["stamps"]) if f["stamps"] else 0
-        created = instagram_shortcode_time(code)
-        yield Record(
-            id=f"ig:{code}",
-            platform="instagram",
-            url=f"https://www.instagram.com/p/{code}/",
-            author=f["author"],
-            created_at=created,
-            created_estimated=created is not None,
-            interactions=[{"type": ix_type, "at": at, "estimated": not f["stamps"],
-                           "collection": current_collection if collection_aware else None,
-                           "source": name}],
-        )
+        yield _link_record(code, at, not f["stamps"], f["author"], f["text"], ix_type,
+                           current_collection if collection_aware else None, name)
 
 
 def _media_entries(obj):
@@ -124,12 +187,13 @@ def _media_entries(obj):
 
 def _own_posts(archive: Archive, username: str | None):
     profile = f"https://www.instagram.com/{username}/" if username else None
-    files = archive.find(r"(^|/)content/(posts_\d+|reels|stories|igtv_videos)\.json$")
+    # Older exports keep your posts in content/, newer ones in your_instagram_activity/media/.
+    files = archive.find(r"(^|/)(content|media)/(posts_\d+|reels|stories|igtv_videos|profile_photos)\.json$")
     for name in files:
         data = _load(archive, name)
         if data is None:
             continue
-        collection = {"stories": "stories", "reels": "reels"}.get(
+        collection = {"stories": "stories", "reels": "reels", "profile_photos": "profile photos"}.get(
             PurePosixPath(name).stem, None)
         for post in _main_list(data):
             entries = list(_media_entries(post))

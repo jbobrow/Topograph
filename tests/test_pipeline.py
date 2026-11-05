@@ -79,6 +79,10 @@ def test_instagram_parse(tmp_path, new_format):
     assert {r.id for r in likes} == {f"ig:{IG_CODES[0]}", f"ig:{IG_CODES[1]}"}
     assert likes[0].author == "photographer_a"
     assert likes[0].interactions[0]["at"] == 1610000000
+    if new_format:
+        # Newer exports carry captions and hashtags, so likes can be mapped before hydration.
+        assert likes[0].text == "Fog on the ridge ⛰" and likes[0].kind == "text"
+        assert likes[1].text == "#ceramics #glaze"
     saves = [r for r in recs if r.interactions[0]["type"] == "save"]
     cols = {r.id: r.interactions[0]["collection"] for r in saves if r.interactions[0]["collection"]}
     assert cols == {f"ig:{IG_CODES[2]}": "Spaces", f"ig:{IG_CODES[3]}": "Spaces"}
