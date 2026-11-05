@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Topograph</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Cg fill=%27none%27 stroke=%27%239a6b3f%27 stroke-width=%272%27%3E%3Cellipse cx=%2716%27 cy=%2716%27 rx=%2714%27 ry=%2711%27/%3E%3Cellipse cx=%2716%27 cy=%2715%27 rx=%279%27 ry=%277%27/%3E%3Cellipse cx=%2716%27 cy=%2714%27 rx=%274%27 ry=%273%27/%3E%3C/g%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+  <script src="vendor/d3.min.js"></script>
+</head>
+<body>
+  <header class="bar">
+    <h1 class="wordmark">Topograph</h1>
+    <nav class="views" aria-label="Views">
+      <button data-view="terrain" aria-pressed="true">Terrain</button>
+      <button data-view="strata" aria-pressed="false">Strata</button>
+    </nav>
+    <div class="filters">
+      <div class="chips" id="platforms" aria-label="Platforms"></div>
+      <div class="chips" id="actions" aria-label="What you did"></div>
+      <input id="query" type="search" placeholder="Filter by words or @author" autocomplete="off">
+    </div>
+  </header>
+
+  <main>
+    <section id="terrain" class="view">
+      <canvas id="map" aria-label="Map of everything you've posted, liked and saved"></canvas>
+      <div id="tip" class="tip" hidden></div>
+      <div class="legend" id="legend"></div>
+      <div class="zoom">
+        <button id="zoom-in" aria-label="Zoom in">+</button>
+        <button id="zoom-out" aria-label="Zoom out">−</button>
+        <button id="zoom-fit" aria-label="Show everything">⤢</button>
+      </div>
+    </section>
+
+    <section id="strata" class="view" hidden>
+      <svg id="strata-svg" role="img" aria-label="Regions of your taste over time"></svg>
+      <div id="strata-tip" class="tip" hidden></div>
+    </section>
+
+    <aside id="panel" class="panel" hidden aria-live="polite">
+      <button class="close" id="panel-close" aria-label="Close">×</button>
+      <div id="panel-body"></div>
+    </aside>
+  </main>
+
+  <footer class="time">
+    <button id="play" aria-label="Play through time">▶</button>
+    <svg id="timeline" aria-label="Time range"></svg>
+    <output id="range-label"></output>
+  </footer>
+
+  <div id="empty" class="empty" hidden>
+    <h2>No map yet</h2>
+    <p>Import an export, then build the map:</p>
+    <pre>topograph import ~/Downloads/instagram-export.zip
+topograph build
+topograph serve</pre>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

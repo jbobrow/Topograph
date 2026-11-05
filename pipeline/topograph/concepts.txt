@@ -1,0 +1,146 @@
+# Vocabulary for naming clusters with CLIP (one phrase per line).
+# Edit freely; more specific phrases give more specific names.
+architecture
+brutalist architecture
+modernist interiors
+cozy interiors
+minimalist interiors
+furniture design
+lighting design
+gardens
+houseplants
+landscapes
+mountains
+the ocean and coastline
+forests
+deserts
+night skies
+weather and clouds
+cities at night
+street photography
+urban signage
+travel photography
+portrait photography
+film photography
+black and white photography
+fashion
+streetwear
+sneakers
+jewelry
+hair and makeup
+tattoos
+typography
+graphic design
+posters
+logos and branding
+book covers
+editorial layout
+packaging design
+product design
+industrial design
+user interface design
+data visualization
+maps and cartography
+diagrams
+illustration
+comics
+anime illustration
+pixel art
+3d renders
+generative art
+glitch art
+abstract art
+painting
+watercolor
+drawing and sketches
+sculpture
+ceramics
+textiles and weaving
+woodworking
+crafts and handmade objects
+art installations
+museums and galleries
+film stills
+cinematography
+music and musicians
+concerts
+vinyl records
+musical instruments
+synthesizers
+dance
+theater
+food
+baking
+coffee
+cocktails
+restaurants
+cooking at home
+fruits and vegetables
+dogs
+cats
+birds
+wildlife
+insects
+flowers
+plants and botany
+science
+space and astronomy
+physics
+biology
+mathematics
+technology
+computers and code
+electronics and circuits
+robots
+3d printing
+cars
+motorcycles
+bicycles
+aviation
+boats
+trains
+sports
+running
+skateboarding
+surfing
+climbing
+hiking
+yoga and fitness
+games
+video games
+board games
+toys
+memes
+jokes and humor
+screenshots of text
+tweets and social media posts
+quotes
+news
+politics
+history
+old photographs
+vintage advertising
+retro computing
+children
+family
+friends
+weddings
+selfies
+parties
+holidays
+the sea at sunset
+golden hour light
+pastel colors
+neon colors
+monochrome
+vivid colors
+earth tones
+patterns and textures
+geometric shapes
+nature close-ups
+water
+light and shadow
+reflections
+fog and mist
+snow
+rain

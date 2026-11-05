@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "topograph"
+version = "0.1.0"
+description = "A private, on-device atlas of your online taste."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "pillow>=10",
+  "imagehash>=4.3",
+  "scikit-learn>=1.3",
+  "umap-learn>=0.5.5",
+]
+
+[project.optional-dependencies]
+# CLIP embeddings (recommended). Uses Apple's Metal (MPS) automatically on a Mac.
+clip = ["torch>=2.1", "open_clip_torch>=2.24"]
+# Read HEIC/HEIF images (common in iPhone exports).
+heif = ["pillow-heif>=0.16"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+topograph = "topograph.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["pipeline"]
+
+[tool.setuptools.package-data]
+topograph = ["concepts.txt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

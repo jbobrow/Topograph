@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+.pytest_cache/
+.DS_Store
+# Personal data never belongs in the repo.
+*.sqlite
+*.sqlite-*
+topograph.json
+media/
+exports/
