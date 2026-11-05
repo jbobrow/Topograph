@@ -16,14 +16,17 @@
   }
 
   const MEDIA = (p) => "/library/" + p;
-  const PLATFORM_NAMES = { instagram: "Instagram", x: "X", youtube: "YouTube", google: "Google", bluesky: "Bluesky" };
+  const PLATFORM_NAMES = { instagram: "Instagram", x: "X", facebook: "Facebook", files: "Your files", youtube: "YouTube", google: "Google", bluesky: "Bluesky" };
   const GROUPS = [
-    { key: "made", label: "Posted", types: ["post", "repost", "reply", "comment"] },
-    { key: "liked", label: "Liked", types: ["like"] },
-    { key: "kept", label: "Saved", types: ["save", "bookmark"] },
+    { key: "made", label: "Made or posted", types: ["post", "repost", "reply", "comment", "made", "capture"] },
+    { key: "liked", label: "Liked", types: ["like", "react"] },
+    { key: "kept", label: "Saved", types: ["save", "bookmark", "download"] },
   ];
   const VERBS = { post: "Posted", repost: "Reposted", reply: "Replied", comment: "Commented",
-                  like: "Liked", save: "Saved", bookmark: "Bookmarked", view: "Watched", search: "Searched" };
+                  like: "Liked", save: "Saved", bookmark: "Bookmarked", view: "Watched", search: "Searched",
+                  made: "Made", capture: "Took this screenshot", download: "Downloaded", open: "Opened",
+                  react: "Reacted" };
+  const MINE = new Set(["post", "repost", "reply", "comment", "made", "capture"]);
 
   const items = DATA.items;
   items.forEach((d, i) => {
@@ -31,6 +34,7 @@
     d.time = d.at || d.ts || null;
     d.types = new Set(d.ix.map((x) => x[0]));
     d.search = ((d.t || "") + " @" + (d.a || "")).toLowerCase();
+    d.mine = d.ix.some((x) => MINE.has(x[0]));
   });
   const clusters = new Map(DATA.clusters.map((c) => [c.id, c]));
   for (const c of clusters.values()) {
@@ -229,10 +233,10 @@
 
     const showThumbs = k >= 2.4;
     if (!showThumbs) {
-      ctx.fillStyle = ink;
-      ctx.globalAlpha = 0.55;
+      ctx.globalAlpha = 0.6;
       for (const d of visible) {
         const r = (0.9 + Math.sqrt(d.r) * 0.55) / Math.sqrt(k);
+        ctx.fillStyle = d.mine ? water : ink;
         ctx.beginPath(); ctx.arc(d.x, d.y, r, 0, Math.PI * 2); ctx.fill();
       }
       ctx.globalAlpha = 1;
@@ -254,8 +258,9 @@
         const img = thumb(d);
         const ar = d.wh ? d.wh[0] / d.wh[1] : 1;
         const w = ar >= 1 ? s : s * ar, h = ar >= 1 ? s / ar : s;
-        ctx.fillStyle = paper;
-        ctx.fillRect(d.x - w / 2 - 1.5 / k, d.y - h / 2 - 1.5 / k, w + 3 / k, h + 3 / k);
+        const fr = (d.mine ? 2.5 : 1.5) / k;
+        ctx.fillStyle = d.mine ? water : paper;
+        ctx.fillRect(d.x - w / 2 - fr, d.y - h / 2 - fr, w + 2 * fr, h + 2 * fr);
         if (img) ctx.drawImage(img, d.x - w / 2, d.y - h / 2, w, h);
         else { ctx.fillStyle = d.col || css("--paper-2"); ctx.fillRect(d.x - w / 2, d.y - h / 2, w, h); }
       }
@@ -301,6 +306,7 @@
     }
 
     document.getElementById("legend").textContent =
+      (items.some((d) => d.mine) ? "Blue marks things you made or posted. " : "") +
       `${visible.length.toLocaleString()} of ${items.length.toLocaleString()} mapped items` +
       (DATA.meta.items > items.length ? `, ${(DATA.meta.items - items.length).toLocaleString()} waiting for images` : "");
   }
@@ -400,7 +406,15 @@
     body.append(el("p", { className: "meta",
       textContent: [d.a ? "@" + d.a : null, PLATFORM_NAMES[d.p] || d.p,
                     d.ts ? "published " + fmtDay(toDate(d.ts)) : null].filter(Boolean).join(", ") }));
-    if (d.u) body.append(el("a", { className: "original", href: d.u, target: "_blank", rel: "noopener",
+    if (d.p === "files") {
+      const b = el("button", { className: "chip", textContent: "Show in Finder" });
+      b.onclick = () => fetch("/api/reveal?id=" + encodeURIComponent(d.id)).then((r) => {
+        if (!r.ok) b.textContent = "Couldn’t find the file. It may have moved.";
+      });
+      body.append(el("p", {}, b));
+      if (d.src) body.append(el("a", { className: "original", href: d.src, target: "_blank", rel: "noopener",
+        textContent: `Downloaded from ${new URL(d.src).hostname}` }));
+    } else if (d.u) body.append(el("a", { className: "original", href: d.u, target: "_blank", rel: "noopener",
       textContent: `Open on ${PLATFORM_NAMES[d.p] || "the web"}` }));
 
     body.append(el("h3", { textContent: "What you did" }));

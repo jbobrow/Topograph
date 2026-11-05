@@ -12,7 +12,12 @@ INTERACTION_WEIGHTS = {
     "repost": 2.0,
     "reply": 1.5,
     "comment": 1.5,
+    "made": 2.5,       # your own files: working files, your photos
+    "capture": 1.5,    # screenshots
     "like": 1.0,
+    "download": 1.0,
+    "open": 0.5,       # you opened a file again
+    "react": 0.5,
     "view": 0.3,
     "search": 0.2,
 }

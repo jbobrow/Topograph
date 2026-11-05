@@ -20,6 +20,7 @@ They can take a day or two to arrive.
 |---|---|---|
 | Instagram | Accounts Center → Your information and permissions → Download your information | **JSON**, All time, High media quality |
 | X | Settings → Your account → Download an archive of your data | (one format) |
+| Facebook | Accounts Center → Your information and permissions → Download your information | **JSON**, All time, High media quality |
 
 YouTube and Google (Takeout) are next on the roadmap.
 
@@ -41,6 +42,9 @@ pip install -e ".[clip,heif]"
 ```sh
 topograph import ~/Downloads/instagram-yourname-2026-11-06-*.zip   # all parts at once
 topograph import ~/Downloads/twitter-2026-11-06-*.zip
+topograph import ~/Downloads/facebook-yourname-*.zip
+topograph files ~/Desktop ~/Downloads --dry-run   # see what it would take from your folders
+topograph files ~/Desktop ~/Downloads             # then read them
 topograph hydrate          # fetch images for liked/saved posts (slow and polite; resumable)
 topograph build            # embeddings + layout + region names
 topograph serve            # opens http://127.0.0.1:8732
@@ -53,6 +57,21 @@ The library lives in `~/Library/Application Support/Topograph/` on a Mac (overri
 with `--library PATH` or `TOPOGRAPH_LIBRARY`). It's one SQLite file plus a `media/`
 folder of optimized copies. Nothing is uploaded anywhere.
 
+## Your files
+
+`topograph files` reads folders on your Mac in place (it stores previews, not copies)
+and keeps only what macOS says is yours: screenshots, downloads (with the address they
+came from), files you've opened, and working files like PSD, Sketch, Procreate, STL and
+video. It skips icons, assets inside code projects, saved web pages, files that are only
+in the cloud, PDFs, and anything in folders named like medical, ID, tax or banking.
+
+Always start with `--dry-run`. It ends with a list of folders full of images that show
+no sign of being yours; leave out the ones that aren't your work with
+`--exclude ~/path/to/folder` (remembered for next time). Run `topograph files` again
+later with no folders to pick up what's new.
+
+On a Mac, install with the `xattr` package (included in the install line above).
+
 ## The viewer
 
 - **Terrain**: everything you've engaged with, placed by visual and semantic
@@ -61,6 +80,8 @@ folder of optimized copies. Nothing is uploaded anywhere.
   it was on your mind; click an image for its details, your history with it and its
   nearest neighbors in taste.
 - **Strata**: each region as a layer through time.
+- Things you made or posted are marked in blue, on the map and in thumbnail frames.
+  Your own files have a **Show in Finder** button.
 - **Time scrubber**: drag across the bar to watch the terrain for a period, or press
   play to slide through the years.
 
@@ -88,7 +109,8 @@ with the `lite` embedder (no model download).
 
 ```
 pipeline/topograph/
-  importers/   x.py, instagram.py: export parsers
+  importers/   x.py, instagram.py, facebook.py: export parsers
+               files.py: your own folders, read in place
   db.py        library schema (shared with the future native app)
   media.py     display copies, thumbnails, palettes, perceptual hashes
   hydrate.py   fetch media for links

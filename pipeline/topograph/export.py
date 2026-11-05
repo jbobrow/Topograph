@@ -62,6 +62,7 @@ def export(lib, model: str) -> Path:
             "ts": it["created_at"], "at": taste_time(iid),
             "ix": [[r["type"], r["at"], r["at_estimated"], r["collection"]] for r in ixs[iid]],
             "r": resonance(iid),
+            "src": ms[0]["original_url"] if ms and it["platform"] == "files" else None,
             "col": pal[0][0] if pal else None,
             "pal": pal,
             "nb": [index[n] for n in json.loads(row["neighbors"] or "[]") if n in index],
@@ -101,6 +102,30 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, library: Path, **kwargs):
         self.library = library
         super().__init__(*args, directory=str(VIEWER_DIR), **kwargs)
+
+    def do_GET(self):
+        if self.path.startswith("/api/reveal"):
+            return self._reveal()
+        return super().do_GET()
+
+    def _reveal(self):
+        """Show a local file in Finder. Only for files that are items in the library."""
+        import sqlite3
+        import subprocess
+        import sys
+        from urllib.parse import parse_qs, unquote, urlparse
+        item_id = (parse_qs(urlparse(self.path).query).get("id") or [""])[0]
+        conn = sqlite3.connect(self.library / "topograph.sqlite")
+        row = conn.execute("select url from item where id=? and platform='files'", (item_id,)).fetchone()
+        conn.close()
+        path = unquote(row[0][len("file://"):]) if row and row[0] and row[0].startswith("file://") else None
+        if not path or not Path(path).exists():
+            self.send_error(404, "File not found")
+            return
+        if sys.platform == "darwin":
+            subprocess.run(["open", "-R", path], check=False)
+        self.send_response(204)
+        self.end_headers()
 
     def translate_path(self, path):
         clean = path.split("?", 1)[0].split("#", 1)[0]

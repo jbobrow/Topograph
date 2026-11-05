@@ -169,3 +169,43 @@ def build_instagram_export(path: Path, new_format: bool = False) -> Path:
     (act / "saved" / "saved_collections.json").write_text(json.dumps(collections))
     (act / "comments" / "post_comments_1.json").write_text(json.dumps(comments))
     return path
+
+
+def build_facebook_export(path: Path) -> Path:
+    """A Facebook export folder in the 2024-style layout."""
+    act = path / "your_facebook_activity"
+    posts = act / "posts"
+    (posts / "media" / "Timeline_123").mkdir(parents=True)
+    (posts / "album").mkdir()
+    (act / "saved_items_and_collections").mkdir()
+    (act / "comments_and_reactions").mkdir()
+    (act / "pages").mkdir()
+    (posts / "media" / "Timeline_123" / "p1.jpg").write_bytes(image_bytes(21, "warm"))
+    (posts / "media" / "Timeline_123" / "p2.jpg").write_bytes(image_bytes(22, "cool"))
+    uri1 = "your_facebook_activity/posts/media/Timeline_123/p1.jpg"
+    uri2 = "your_facebook_activity/posts/media/Timeline_123/p2.jpg"
+    (posts / "your_posts__check_ins__photos_and_videos_1.json").write_text(json.dumps([
+        {"timestamp": 1262304000, "data": [{"post": mojibake("First snow on the stoop ❄️")}],
+         "attachments": [{"data": [{"media": {"uri": uri1, "creation_timestamp": 1262304000, "title": ""}}]}],
+         "title": "Jon updated his status."},
+        {"timestamp": 1300000000, "data": [{"post": "Thinking about kinetic sculpture"}], "title": ""},
+    ]))
+    (posts / "album" / "0.json").write_text(json.dumps({
+        "name": "Mobile Uploads",
+        "photos": [{"uri": uri1, "creation_timestamp": 1262304000, "title": "Mobile Uploads"},
+                   {"uri": uri2, "creation_timestamp": 1270000000, "title": "Mobile Uploads",
+                    "description": "Workshop wall"}]}))
+    (act / "saved_items_and_collections" / "your_saved_items.json").write_text(json.dumps({"saves_v2": [
+        {"timestamp": 1400000000, "title": "Jon saved a link.", "attachments": [{"data": [{"external_context": {
+            "name": "The Shape of Design", "source": "frankchimero.com",
+            "url": "https://shapeofdesignbook.com/"}}]}]}]}))
+    (act / "pages" / "pages_you've_liked.json").write_text(json.dumps({"page_likes_v2": [
+        {"name": "Hand Lettering Daily", "timestamp": 1350000000}]}))
+    (act / "comments_and_reactions" / "comments.json").write_text(json.dumps({"comments_v2": [
+        {"timestamp": 1310000000, "data": [{"comment": {"timestamp": 1310000000,
+                                                        "comment": "That joinery!", "author": "Jon"}}],
+         "title": "Jon commented on Ann's photo."}]}))
+    (act / "comments_and_reactions" / "likes_and_reactions_1.json").write_text(json.dumps([
+        {"timestamp": 1320000000, "data": [{"reaction": {"reaction": "LIKE", "actor": "Jon"}}],
+         "title": "Jon liked Ann's photo."}]))
+    return path

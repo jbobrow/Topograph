@@ -20,7 +20,7 @@ from ..util import (Archive, VIDEO_EXT, clean_text, deep_fix_mojibake, ext_of,
 def detect(archive: Archive) -> bool:
     return bool(archive.find(
         r"(your_instagram_activity/|liked_posts\.json$|saved_posts\.json$|"
-        r"(^|/)content/posts_\d+\.json$|personal_information/personal_information\.json$)"))
+        r"(^|/)content/posts_\d+\.json$)"))
 
 
 def _load(archive: Archive, name: str):

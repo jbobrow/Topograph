@@ -45,6 +45,49 @@ def video_poster(data: bytes) -> bytes | None:
     return None
 
 
+VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm"}
+
+
+def _quicklook(path: Path, size: int = 1600) -> bytes | None:
+    """macOS Quick Look renders previews for PSD, AI, Sketch, PDF, STL, 3MF and more."""
+    ql = shutil.which("qlmanage")
+    if not ql:
+        return None
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run([ql, "-t", "-s", str(size), "-o", tmp, str(path)],
+                       capture_output=True, timeout=60)
+        outs = list(Path(tmp).glob("*.png"))
+        return outs[0].read_bytes() if outs else None
+
+
+def preview_from_path(path: Path) -> tuple[bytes | None, str]:
+    """An image to represent any local file: the file itself, a video frame, or a Quick Look preview.
+
+    Returns (bytes or None, kind).
+    """
+    path = Path(path)
+    suffix = path.suffix.lower()
+    if suffix in VIDEO_SUFFIXES:
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg:
+            with tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp) / "poster.jpg"
+                for seek in ("1", "0"):
+                    subprocess.run([ffmpeg, "-loglevel", "error", "-y", "-ss", seek, "-i", str(path),
+                                    "-frames:v", "1", "-q:v", "3", str(out)], capture_output=True, timeout=60)
+                    if out.exists() and out.stat().st_size:
+                        return out.read_bytes(), "video"
+        return _quicklook(path), "video"
+    if suffix != ".svg":
+        try:
+            with Image.open(path) as im:
+                im.verify()
+            return path.read_bytes(), "image"
+        except Exception:
+            pass
+    return _quicklook(path), "image"
+
+
 def palette(img: Image.Image, n: int = 5) -> list[list]:
     """Dominant colors as [[hex, weight], ...], heaviest first."""
     small = img.copy()

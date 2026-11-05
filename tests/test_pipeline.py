@@ -152,3 +152,103 @@ def test_end_to_end(tmp_path, capsys):
     for it in data["items"]:
         if it["th"]:
             assert (libdir / it["th"]).exists()
+
+
+# --- Facebook -------------------------------------------------------------------
+
+from fixtures import build_facebook_export  # noqa: E402
+from topograph.importers import facebook  # noqa: E402
+
+
+def test_facebook_parse(tmp_path):
+    arch = Archive([build_facebook_export(tmp_path / "fb")])
+    assert detect(arch) == ["facebook"]
+    recs = list(facebook.parse(arch))
+    own = [r for r in recs if r.id.startswith("fb:own:")]
+    # The album repeats the first post's photo: same item, so it merges on import.
+    ids = [r.id for r in own]
+    assert len(set(ids)) == 3
+    first = next(r for r in own if r.text and r.text.startswith("First snow"))
+    assert first.text == "First snow on the stoop ❄️" and first.media[0]["data"]
+    assert any(r.text == "Workshop wall" for r in own)
+    assert any(r.kind == "text" and r.text == "Thinking about kinetic sculpture" for r in own)
+    saved = next(r for r in recs if r.interactions[0]["type"] == "save")
+    assert saved.url == "https://shapeofdesignbook.com/" and saved.text == "The Shape of Design"
+    assert any(r.text == "Hand Lettering Daily" for r in recs)
+    assert any(r.text == "That joinery!" for r in recs)
+    trace = next(r for r in recs if r.kind == "trace")
+    assert trace.interactions[0]["type"] == "react"
+
+
+# --- your files --------------------------------------------------------------------
+
+from topograph.importers import files as files_mod  # noqa: E402
+
+
+def test_files_classification(tmp_path, monkeypatch):
+    from fixtures import image_bytes
+    root = tmp_path / "Desktop"
+    (root / "Screenshots").mkdir(parents=True)
+    (root / "Poster Drafts").mkdir()
+    (root / "Taxes 2023").mkdir()
+    (root / "my-app" / "assets").mkdir(parents=True)
+    (root / "my-app" / "package.json").write_text("{}")
+    (root / "Saved Page_files").mkdir()
+    big = image_bytes(1, size=(1600, 1200), fmt="PNG")
+    # Distinct content: the same bytes in two places are one item.
+    (root / "Screenshots" / "Screenshot 2024-05-01 at 10.00.00.png").write_bytes(image_bytes(5, size=(1600, 1200), fmt="PNG"))
+    (root / "Poster Drafts" / "poster v2.png").write_bytes(image_bytes(6, "warm", size=(1600, 1200), fmt="PNG"))
+    (root / "Poster Drafts" / "from-web.jpg").write_bytes(image_bytes(7, "green", size=(1600, 1200)))
+    (root / "Poster Drafts" / "pattern.jpg").write_bytes(big)
+    (root / "Taxes 2023" / "w2.png").write_bytes(big)
+    (root / "my-app" / "assets" / "hero.png").write_bytes(big)
+    (root / "Saved Page_files" / "banner.png").write_bytes(big)
+    (root / "icon.png").write_bytes(image_bytes(2, size=(16, 16), fmt="PNG"))
+
+    def fake_xattr(path, name):
+        if path.endswith("from-web.jpg") and name.endswith("kMDItemWhereFroms"):
+            import plistlib
+            return plistlib.dumps(["https://images.example.com/a.jpg", "https://example.com/post"],
+                                  fmt=plistlib.FMT_BINARY)
+        if path.endswith("from-web.jpg") and name == "com.apple.quarantine":
+            return b"0081;6316bc7c;Chrome;ABC"
+        if path.endswith("pattern.jpg") and name.endswith("kMDItemWhereFroms"):
+            import plistlib
+            return plistlib.dumps(["https://secure.chase.com/statement.jpg"], fmt=plistlib.FMT_BINARY)
+        if path.endswith("poster v2.png") and name == "com.apple.lastuseddate#PS":
+            import struct
+            return struct.pack("<qq", 1714557600, 0)
+        return None
+    monkeypatch.setattr(files_mod, "_getxattr", fake_xattr)
+
+    report = files_mod.Report()
+    seen = {p.name: decision for p, st, decision, d in files_mod.walk([root], files_mod.Options(), report)}
+    assert seen["Screenshot 2024-05-01 at 10.00.00.png"] == "screenshot"
+    assert seen["poster v2.png"] == "opened image"
+    assert seen["from-web.jpg"] == "download"
+    assert seen["pattern.jpg"].startswith("skip: download from a bank")
+    assert seen["w2.png"] == "skip: sensitive folder or name"
+    assert seen["hero.png"] == "skip: asset inside a code project"
+    assert seen["icon.png"].startswith("skip: tiny")
+    assert "banner.png" not in seen                       # saved web page assets are pruned
+
+    # Excluding a folder is honored.
+    report = files_mod.Report()
+    opts = files_mod.Options(exclude=[str(root / "Poster Drafts")])
+    seen = {p.name for p, *_ in files_mod.walk([root], opts, report)}
+    assert "poster v2.png" not in seen
+
+    # Importing: the download keeps where it came from.
+    libdir = tmp_path / "lib"
+    monkeypatch.setattr(files_mod, "_getxattr", fake_xattr)
+    cli.main(["--library", str(libdir), "files", str(root)])
+    lib = Library(libdir)
+    rows = {r["text"]: r for r in lib.conn.execute("select * from item where platform='files'")}
+    lib.conn.row_factory = None
+    assert "from-web, in Poster Drafts" in rows
+    src = lib.conn.execute("select original_url from media m join item i on i.id=m.item_id "
+                           "where i.text='from-web, in Poster Drafts'").fetchone()[0]
+    assert src == "https://images.example.com/a.jpg"
+    types = {r[0] for r in lib.conn.execute("select type from interaction")}
+    assert {"capture", "made", "download", "open"} <= types
+    lib.close()

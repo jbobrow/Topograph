@@ -41,6 +41,41 @@ def cmd_import(args, lib):
     _stats(lib)
 
 
+def cmd_files(args, lib):
+    import json
+    from .importers.files import Options, Report, format_report, parse, walk
+    from .media import preview_from_path
+    roots = [str(Path(r).expanduser()) for r in args.paths] or json.loads(lib.get_meta("files_roots", "[]"))
+    if not roots:
+        sys.exit("Name the folders to read, e.g. topograph files ~/Desktop ~/Downloads")
+    excludes = sorted(set(json.loads(lib.get_meta("files_excludes", "[]")) +
+                          [str(Path(e).expanduser()) for e in args.exclude]))
+    opts = Options(include_code=args.include_code, include_pdf=args.include_pdf,
+                   include_cloud_only=args.include_cloud_only, exclude=excludes)
+    report = Report()
+    if args.dry_run:
+        print(f"Looking through {', '.join(roots)} (nothing will be imported)")
+        for _ in walk(roots, opts, report):
+            pass
+        print(format_report(report))
+        return
+    lib.set_meta("files_roots", json.dumps(roots))
+    lib.set_meta("files_excludes", json.dumps(excludes))
+    print(f"Reading {', '.join(roots)}")
+    new = total = 0
+    t0 = time.time()
+    for rec in parse(roots, opts, report, preview_from_path):
+        new += upsert_record(lib, rec, media_mod.ingest)
+        total += 1
+        if total % 250 == 0:
+            lib.conn.commit()
+            print(f"  {total} files…")
+    lib.conn.commit()
+    print(f"  {total} files, {new} new ({time.time() - t0:.0f}s)\n")
+    print(format_report(report))
+    _stats(lib)
+
+
 def cmd_hydrate(args, lib):
     from .hydrate import download_pending_media, hydrate
     print("Fetching media for links (Ctrl-C to pause; run again to resume)")
@@ -133,6 +168,17 @@ def main(argv=None):
     p.add_argument("paths", nargs="+")
     p.add_argument("--platform", choices=sorted(IMPORTERS))
     p.set_defaults(fn=cmd_import)
+
+    p = sub.add_parser("files", help="read screenshots, downloads and working files from folders")
+    p.add_argument("paths", nargs="*", help="folders (default: the ones used last time)")
+    p.add_argument("--dry-run", action="store_true", help="report what would be imported")
+    p.add_argument("--exclude", action="append", default=[], metavar="FOLDER",
+                   help="leave a folder out (remembered for next time)")
+    p.add_argument("--include-code", action="store_true", help="include images inside code projects")
+    p.add_argument("--include-pdf", action="store_true")
+    p.add_argument("--include-cloud-only", action="store_true",
+                   help="also read files that are only in the cloud (downloads them)")
+    p.set_defaults(fn=cmd_files)
 
     p = sub.add_parser("hydrate", help="fetch media and text for liked/saved links")
     p.add_argument("--limit", type=int)

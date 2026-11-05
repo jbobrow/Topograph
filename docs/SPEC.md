@@ -3,8 +3,9 @@
 > A private, on-device atlas of your online taste.
 
 Topograph gathers everything you have posted, liked, saved and bookmarked across the
-platforms you use, keeps a local copy of the visual material, and lets you explore it
-as a landscape. Things you keep coming back to rise into mountain ranges; passing
+platforms you use, plus the screenshots, downloads and working files on your own
+computer, keeps a local copy of the visual material, and lets you explore it as a
+landscape. Things you keep coming back to rise into mountain ranges; passing
 interests are foothills; the terrain shifts as the years go by.
 
 ---
@@ -51,6 +52,58 @@ Format notes the parsers handle:
   (emoji show as `Ã°Â\x9f…`) and must be repaired. Topograph parses by walking each
   file for records that carry a URL and a timestamp rather than trusting one schema.
 
+### Phase 1b — Facebook (archive import)
+
+Same Accounts Center as Instagram, same JSON quirks (mis-encoded text, shifting record
+shapes), so the importer reuses Instagram's tolerant walker.
+
+| In the export | Becomes |
+|---|---|
+| Your posts, photos and albums (with media files) | Items with images, often your oldest |
+| Saved items | Links you saved |
+| Pages you liked | Short text items (a page name says something) |
+| Comments | Your words |
+| Likes and reactions | Usually just "You liked Ann's photo": no link, no image. Kept as **traces** that count in Strata but are not placed on the map |
+
+### Phase 1c — Your files (folders on this computer)
+
+The other half of taste: what you **made** and grabbed, not just what you kept from
+other people. Folders are read in place; Topograph stores only previews and thumbnails,
+and each item links back to the file.
+
+Most images on a disk were never made or seen by you (app assets, icon sets, code
+dependencies, saved web pages). macOS records signals that separate yours from the
+rest, as extended attributes on the file itself:
+
+| Signal | Where macOS keeps it | Means |
+|---|---|---|
+| Screen capture | `kMDItemIsScreenCapture`, or the file name | You took this screenshot |
+| Where from | `kMDItemWhereFroms` (the source URLs) | You downloaded it; links back to the original |
+| Quarantine | `com.apple.quarantine` (time + app that saved it) | Downloaded or received; "Photos" means your own camera |
+| Last used | `com.apple.lastuseddate#PS` | You opened it |
+| Working file | PSD, AI, Sketch, Procreate, STL, 3MF, video… | Something you saved yourself |
+
+Rules, in order: skip PDFs (opt-in), sensitive places (medical, ID, tax, banking,
+passwords; by folder or file name), files that live only in the cloud (opt-in: reading
+downloads them), images under 12 KB (icons, sprites), downloads from banks and
+government sites, platform exports (suggested for `topograph import` instead), saved
+web page folders (`*_files`), and assets inside code projects (a folder with `.git`,
+`package.json`, `Package.swift`…) unless you opened them. Images with **no** signal are
+kept only if they're reasonably large, and the importer lists them by folder so you can
+exclude folders that aren't your work (`--exclude`, remembered).
+
+Previews: images directly; videos by a frame; everything else through macOS Quick Look
+(PSD, AI, Sketch, PDF, STL, 3MF…).
+
+A first read-only scan of four folders on the author's Mac (Desktop, Downloads,
+Developer, Dropbox) found about 139,000 images, working files, videos and PDFs. The rules
+kept about 23,700: 5,000 images saved from the Photos app, 4,100 downloads with their source address,
+2,400 screenshots, 1,900 working files, the rest unsignaled images in creative folders.
+They skipped 88,000 icons and sprites, 11,000 code-project assets, 650 files in
+sensitive folders and 2,900 PDFs. They also found a 2025 X archive sitting in Downloads.
+The largest unsignaled group was a mirror of a class website, other people's
+documentation, which is exactly what the folder review is for.
+
 ### Phase 2 — YouTube and Google activity (Takeout)
 
 - **YouTube** (Takeout → YouTube and YouTube Music): watch history, likes playlist,
@@ -78,8 +131,8 @@ interactions.
 ```
 item
   id              text  primary key   -- "<platform>:<native id>", e.g. "x:1764…", "ig:CxYz…"
-  platform        text                -- instagram | x | youtube | google | bluesky | …
-  kind            text                -- image | video | text | link | carousel
+  platform        text                -- instagram | x | facebook | files | youtube | google | bluesky | …
+  kind            text                -- image | video | text | link | trace (no content to map)
   url             text                -- canonical link to the original
   author          text  nullable
   text            text  nullable      -- caption / tweet text / title
@@ -88,7 +141,8 @@ item
 
 interaction
   item_id         text  → item.id
-  type            text                -- post | reply | like | save | bookmark | comment | view | search
+  type            text                -- post | reply | repost | comment | like | react | save | bookmark
+                                      -- made | capture | download | open | view | search
   at              int                 -- when YOU did it (unix seconds)
   collection      text  nullable      -- Instagram collection, X bookmark folder, …
   source_file     text                -- which export file it came from (provenance)
@@ -121,8 +175,13 @@ layout                                -- recomputed on demand; cheap to throw aw
 | bookmark / save | 3.0 | Deliberate act of keeping |
 | post (your own) | 2.5 | What you chose to put out |
 | repost | 2.0 | Amplified, in public |
+| made (your files, your photos) | 2.5 | You made it |
 | reply / comment | 1.5 | Engaged, but often conversational |
+| capture (screenshot) | 1.5 | Worth keeping a copy of, right then |
 | like | 1.0 | Cheap, frequent, still meaningful in aggregate |
+| download | 1.0 | Kept, but often for a task |
+| open (a file, again) | 0.5 | It mattered enough to return to |
+| react (Facebook trace) | 0.5 | Presence without content |
 | view / watch | 0.3 | Passive |
 | search | 0.2 | Curiosity, not taste |
 
@@ -181,6 +240,20 @@ far out you see regions and names, closer in the peaks resolve into thumbnails, 
 closest level you see full images. A **time scrubber** along the bottom filters the map
 to a window of years and can play, so you watch ranges rise and erode.
 Filters: platform, interaction type, media kind, collection.
+
+### Made and kept
+Everything you made or posted is marked on the terrain (blue dots, blue frames), with a
+filter for only your work, only what you collected, or both. The interesting question is
+whether you make things where you look, or somewhere else entirely.
+
+### Process
+Near-duplicate images (`poster-v1`, `v2`, `final`, the twelve screenshots of the same
+layout) are grouped by perceptual hash and time into a **sequence**, shown as one item
+on the map. Opening it plays the piece's evolution in order.
+
+### Tributaries
+For anything you made: the things you saved in the months before it that sit nearest to
+it in taste. A map of your influences.
 
 ### Strata
 Time on the horizontal axis, clusters stacked as geological layers (a streamgraph).
@@ -243,6 +316,10 @@ prototype built.
 - Optional AI labeling via an external model is off by default; when enabled, only
   thumbnails and captions of the cluster being named are sent, and the app says so.
 - "Forget" removes an item, its media, embedding and interactions everywhere.
+- Your files are read where they are; only previews are stored. Sensitive folders and
+  downloads from financial and government sites are skipped by default, and the native
+  app will run on-device text recognition on screenshots to flag likely-private ones
+  (messages, account pages) for review before they appear on the map.
 
 ---
 
@@ -253,8 +330,10 @@ prototype built.
 | **M0 — Prototype** (now) | Instagram + X import, hydration, media cache, CLIP embeddings, UMAP + clusters, web viewer with Terrain and Strata |
 | **M1 — Native shell** | SwiftUI app opening the prototype's library: Terrain (Metal), Strata, item detail, search |
 | **M2 — Native pipeline** | Import, hydration (incl. signed-in web view), Core ML embeddings, in-app layout |
-| **M3 — More sources** | YouTube + Google Takeout, Bluesky + Are.na live sync |
-| **M4 — Depth** | Echoes, Palette, Drift, AI cluster names, collections, export a region as a moodboard |
+| **M0.5 — Facebook, your files** (now) | Facebook importer, files importer with folder review, made/kept on the map |
+| **M3 — More sources** | YouTube + Google Takeout, Photos library, Bluesky + Are.na live sync |
+| **M4 — Depth** | Process sequences, Tributaries, Echoes, Palette, Drift, AI cluster names, export a region as a moodboard |
+| **M5 — Watching** | The native app watches your folders (FSEvents) and adds new screenshots and downloads as they appear |
 
 ## 9. Open questions
 

@@ -1,8 +1,11 @@
-"""Platform importers. Each module exposes detect(archive) and parse(archive)."""
+"""Platform importers. Each module exposes detect(archive) and parse(archive).
 
-from . import instagram, x
+`files` is different: it reads folders on this computer in place (see files.py).
+"""
 
-IMPORTERS = {"x": x, "instagram": instagram}
+from . import facebook, instagram, x
+
+IMPORTERS = {"x": x, "instagram": instagram, "facebook": facebook}
 
 
 def detect(archive):

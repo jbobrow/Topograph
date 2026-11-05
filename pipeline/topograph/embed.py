@@ -126,7 +126,7 @@ def embed_library(lib, backend, log=print, force: bool = False) -> int:
     if force:
         c.execute("delete from embedding where model=?", (backend.name,))
     rows = c.execute(
-        "select i.id, i.text from item i where not exists "
+        "select i.id, i.text from item i where i.kind != 'trace' and not exists "
         "(select 1 from embedding e where e.item_id=i.id and e.model=?)", (backend.name,)).fetchall()
     media = defaultdict(list)
     for m in c.execute("select item_id, local_path from media where status='ok' order by ord"):
