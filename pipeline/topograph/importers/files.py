@@ -10,6 +10,10 @@ so each file is kept only when macOS has recorded a signal that it is yours:
   opened         has a "last used" date: you opened it
   working file   a design, 3D or video file you saved yourself
 
+To leave folders out for good, put a `.topographignore` file in any folder: one
+relative path or glob per line (a trailing / means folders only, and a leading !
+keeps something an earlier line left out), like .gitignore.
+
 Files are referenced, not copied: the library stores a preview and a thumbnail,
 and the item's link points back to the file. Sensitive places (medical, ID,
 tax, banking) are skipped by default, and so are downloads from banks and
@@ -27,6 +31,7 @@ import sys
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
@@ -143,6 +148,7 @@ class Report:
     sources: Counter = field(default_factory=Counter)
     # Images with no signal, by folder: the ones worth a human look before importing.
     unsignaled_folders: Counter = field(default_factory=Counter)
+    left_out: list = field(default_factory=list)  # folders skipped by --exclude or an ignore file
 
 
 def _created(st) -> int | None:
@@ -234,8 +240,12 @@ def walk(roots, opts: Options, report: Report):
     excluded = {str(Path(e).expanduser()) for e in opts.exclude}
     for root in roots:
         root = Path(root).expanduser()
+        rules: dict[Path, list[str]] = {}
         for dirpath, dirnames, filenames in os.walk(root):
             here = Path(dirpath)
+            patterns = read_ignore(here)
+            if patterns:
+                rules[here] = patterns
             # A folder is part of a code project if it, or any folder above it, has a marker.
             in_project = str(here.parent) in report_project_dirs or \
                 any((here / m).exists() for m in PROJECT_MARKERS)
@@ -245,8 +255,8 @@ def walk(roots, opts: Options, report: Report):
             for d in dirnames:
                 if d in PRUNE_DIRS or d.startswith(".") or d.endswith(PRUNE_SUFFIXES) or d.endswith("_files"):
                     continue  # "_files": the assets folder of a saved web page
-                if str(here / d) in excluded:
-                    report.skipped["skip: folder you excluded"] += 1
+                if str(here / d) in excluded or (rules and ignored(here / d, True, rules)):
+                    report.left_out.append(str(here / d))
                     continue
                 if EXPORT_DIR.match(d):
                     report.archives.append(str(here / d))
@@ -259,7 +269,9 @@ def walk(roots, opts: Options, report: Report):
                     st = p.lstat()
                 except OSError:
                     continue
-                if not p.is_file():
+                if not p.is_file() or f == IGNORE_FILE:
+                    continue
+                if rules and ignored(p, False, rules):
                     continue
                 decision, details = classify(p, st, in_project, opts)
                 if decision is None:
@@ -276,6 +288,58 @@ def walk(roots, opts: Options, report: Report):
 
 
 report_project_dirs: set[str] = set()
+
+IGNORE_FILE = ".topographignore"
+
+
+def read_ignore(folder: Path) -> list[str]:
+    """Patterns from a .topographignore in this folder: one path or glob per line, relative
+    to the folder; a trailing / matches folders only; # starts a comment."""
+    f = folder / IGNORE_FILE
+    if not f.is_file():
+        return []
+    try:
+        lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    return [ln.strip() for ln in lines if ln.strip() and not ln.lstrip().startswith("#")]
+
+
+@lru_cache(maxsize=512)
+def _glob(pat: str):
+    """Glob to regex where * and ? stay within one folder and ** crosses folders."""
+    out, i = "", 0
+    while i < len(pat):
+        c = pat[i]
+        if pat.startswith("**", i):
+            out += ".*"
+            i += 2
+            continue
+        out += "[^/]*" if c == "*" else "[^/]" if c == "?" else re.escape(c)
+        i += 1
+    return re.compile(out)
+
+
+def ignored(path: Path, is_dir: bool, rules: dict) -> bool:
+    """Later lines win, and a line starting with ! keeps what an earlier line left out."""
+    for base, patterns in rules.items():
+        try:
+            rel = path.relative_to(base).as_posix()
+        except ValueError:
+            continue
+        verdict = None
+        for raw in patterns:
+            keep = raw.startswith("!")
+            pat = raw[1:] if keep else raw
+            dir_only = pat.endswith("/")
+            pat = pat.rstrip("/").lstrip("/")
+            if dir_only and not is_dir:
+                continue
+            if _glob(pat).fullmatch(rel) or ("/" not in pat and _glob(pat).fullmatch(path.name)):
+                verdict = not keep
+        if verdict:
+            return True
+    return False
 
 
 def parse(roots, opts: Options, report: Report, preview):
@@ -326,9 +390,12 @@ def format_report(report: Report) -> str:
     if report.sources:
         lines.append("Most common download sources: " +
                      ", ".join(f"{h} ({n})" for h, n in report.sources.most_common(8)))
+    if report.left_out:
+        lines.append(f"Left out {len(report.left_out)} folder(s) you excluded:")
+        lines += [f"  {f}" for f in report.left_out[:20]]
     if report.unsignaled_folders:
-        lines.append("Images with no sign of being yours, by folder. Leave a folder out with "
-                     "--exclude PATH if it isn't your work:")
+        lines.append("Images with no sign of being yours, by folder. If one isn't your work, leave it "
+                     "out with --exclude PATH, or list it in a .topographignore file in a folder above it:")
         lines += [f"  {n:7,}  {f}" for f, n in report.unsignaled_folders.most_common(12)]
     if report.archives:
         lines.append("Platform exports found (import these with `topograph import`):")

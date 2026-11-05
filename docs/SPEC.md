@@ -90,7 +90,8 @@ government sites, platform exports (suggested for `topograph import` instead), s
 web page folders (`*_files`), and assets inside code projects (a folder with `.git`,
 `package.json`, `Package.swift`…) unless you opened them. Images with **no** signal are
 kept only if they're reasonably large, and the importer lists them by folder so you can
-exclude folders that aren't your work (`--exclude`, remembered).
+exclude folders that aren't your work (`--exclude`, remembered, or a `.topographignore`
+file beside them that works like .gitignore).
 
 Previews: images directly; videos by a frame; everything else through macOS Quick Look
 (PSD, AI, Sketch, PDF, STL, 3MF…).

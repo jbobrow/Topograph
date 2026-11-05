@@ -252,3 +252,24 @@ def test_files_classification(tmp_path, monkeypatch):
     types = {r[0] for r in lib.conn.execute("select type from interaction")}
     assert {"capture", "made", "download", "open"} <= types
     lib.close()
+
+
+def test_files_ignore_file(tmp_path, monkeypatch):
+    from fixtures import image_bytes
+    monkeypatch.setattr(files_mod, "_getxattr", lambda p, n: None)
+    root = tmp_path / "Dropbox"
+    (root / "napkin" / "class" / "people" / "someone").mkdir(parents=True)
+    (root / "napkin" / "class" / "mine").mkdir(parents=True)
+    (root / "napkin" / "class" / "people" / "someone" / "their-work.png").write_bytes(
+        image_bytes(8, size=(1600, 1200), fmt="PNG"))
+    (root / "napkin" / "class" / "mine" / "my-work.png").write_bytes(image_bytes(9, size=(1600, 1200), fmt="PNG"))
+    (root / "napkin" / "class" / "mine" / "scratch.tmp.png").write_bytes(image_bytes(10, size=(1600, 1200), fmt="PNG"))
+    (root / "napkin" / "class" / "people" / "me" / "projects").mkdir(parents=True)
+    (root / "napkin" / "class" / "people" / "me" / "projects" / "my-page.png").write_bytes(
+        image_bytes(11, size=(1600, 1200), fmt="PNG"))
+    (root / "napkin" / ".topographignore").write_text(
+        "# classmates' pages, not mine\nclass/people/*/\n!class/people/me/\n*.tmp.png\n")
+    report = files_mod.Report()
+    names = {p.name for p, *_ in files_mod.walk([root], files_mod.Options(), report)}
+    assert names == {"my-work.png", "my-page.png"}
+    assert report.left_out == [str(root / "napkin" / "class" / "people" / "someone")]

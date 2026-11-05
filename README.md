@@ -67,8 +67,17 @@ in the cloud, PDFs, and anything in folders named like medical, ID, tax or banki
 
 Always start with `--dry-run`. It ends with a list of folders full of images that show
 no sign of being yours; leave out the ones that aren't your work with
-`--exclude ~/path/to/folder` (remembered for next time). Run `topograph files` again
-later with no folders to pick up what's new.
+`--exclude ~/path/to/folder` (remembered for next time), or put a `.topographignore`
+file in a folder above it. It works like .gitignore: one path or pattern per line,
+relative to that folder, and `!` keeps one back:
+
+```
+# a mirrored class site: leave out everyone's page but mine
+863.14/people/*/
+!863.14/people/jonathan_bobrow/
+```
+
+Run `topograph files` again later with no folders to pick up what's new.
 
 On a Mac, install with the `xattr` package (included in the install line above).
 
