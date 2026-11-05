@@ -591,15 +591,24 @@
 
     // Name each layer where it is thickest, if there is room.
     const g = svg.append("g");
-    for (const s of series) {
-      if (s.key === "unmapped") continue;
+    const placed = [];
+    const byThickness = series.filter((s) => s.key !== "unmapped").map((s) => {
       let best = -1, bi = 0;
       s.forEach((p, i) => { const t = y(p[0]) - y(p[1]); if (t > best) { best = t; bi = i; } });
+      return { s, best, p: s[bi] };
+    }).sort((a, b) => b.best - a.best);
+    for (const { s, best, p } of byThickness) {
       if (best < 16) continue;
-      const p = s[bi];
-      g.append("text").attr("class", "stratum-label").attr("text-anchor", "middle")
-        .attr("x", Math.min(Math.max(x(p.data.date), margin.left + 60), w - margin.right - 60))
-        .attr("y", (y(p[0]) + y(p[1])) / 2).attr("dy", "0.35em").text(clusters.get(+s.key).label);
+      const lx = Math.min(Math.max(x(p.data.date), margin.left + 60), w - margin.right - 60);
+      const ly = (y(p[0]) + y(p[1])) / 2;
+      const t = g.append("text").attr("class", "stratum-label").attr("text-anchor", "middle")
+        .attr("x", lx).attr("y", ly).attr("dy", "0.35em").text(clusters.get(+s.key).label);
+      const b = t.node().getBBox();
+      if (placed.some((o) => !(b.x + b.width < o.x || b.x > o.x + o.width || b.y + b.height < o.y || b.y > o.y + o.height))) {
+        t.remove();
+        continue;
+      }
+      placed.push(b);
     }
     svg.append("g").attr("class", "strata-axis").attr("transform", `translate(0,${h - margin.bottom})`)
       .call(d3.axisBottom(x).ticks(d3.timeYear.every(1)).tickSize(4));
