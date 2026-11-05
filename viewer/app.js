@@ -416,6 +416,7 @@
       }
       const sizePx = thumbSize(k);
       for (const d of withThumb) {
+        if (d === hovered) continue;   // drawn last, in color
         const s = (sizePx * (0.7 + 0.15 * Math.min(d.r, 4))) / k;
         const img = thumb(d, s * k);
         const ar = d.wh ? d.wh[0] / d.wh[1] : 1;
@@ -440,6 +441,18 @@
           ctx.restore();
         }
         if (!d.mine) { ctx.strokeStyle = ink; ctx.lineWidth = 0.75 / k; ctx.strokeRect(d.x - w / 2 - fr, d.y - h / 2 - fr, w + 2 * fr, h + 2 * fr); }
+      }
+      // The thumbnail under the cursor: lifted a little and shown in full color.
+      if (hovered && drawSet.has(hovered)) {
+        const d = hovered, e = images.get(d.id);
+        const s = (sizePx * (0.7 + 0.15 * Math.min(d.r, 4)) * 1.18) / k;
+        const ar = d.wh ? d.wh[0] / d.wh[1] : 1;
+        const w = ar >= 1 ? s : s * ar, h = ar >= 1 ? s / ar : s;
+        const fr = 2 / k;
+        ctx.fillStyle = ink;
+        ctx.fillRect(d.x - w / 2 - fr, d.y - h / 2 - fr, w + 2 * fr, h + 2 * fr);
+        const img = e && e.ok ? e.img : thumb(d, s * k);
+        if (img) ctx.drawImage(img, d.x - w / 2, d.y - h / 2, w, h);
       }
     }
     ctx.restore();
@@ -513,7 +526,13 @@
 
   // Hover and click.
   const tip = document.getElementById("tip");
-  function hideTip() { tip.hidden = true; }
+  let hovered = null;
+  function setHovered(d) {
+    if (d === hovered) return;
+    hovered = d;
+    requestDraw();
+  }
+  function hideTip() { tip.hidden = true; setHovered(null); }
   function itemAt(mx, my) {
     const [wx, wy] = transform.invert([mx, my]);
     const radius = (transform.k >= 2.4 ? thumbSize(transform.k) * 0.5 : 8) / transform.k;
@@ -529,8 +548,9 @@
     const d = lab ? null : itemAt(mx, my);
     canvas.style.cursor = d || lab ? "pointer" : "";
     if (!d) { hideTip(); return; }
+    setHovered(d);
     tip.replaceChildren();
-    if (d.th && transform.k < 2.4) {
+    if (d.th) {   // always in full color
       const img = document.createElement("img"); img.src = MEDIA(d.th); img.alt = ""; tip.appendChild(img);
     }
     if (d.t) { const p = document.createElement("div"); p.className = "text"; p.textContent = d.t.length > 140 ? d.t.slice(0, 140) + "…" : d.t; tip.appendChild(p); }
@@ -588,10 +608,19 @@
 
   function setHero(img, src) {
     img.classList.remove("bit");
+    img.dataset.color = src;
+    delete img.dataset.mono;
+    if (!img.dataset.hover) {
+      // Hovering any image shows it in full color; the 1-bit copy swaps back on leave.
+      img.dataset.hover = "1";
+      img.addEventListener("mouseenter", () => { if (img.dataset.mono) img.src = img.dataset.color; });
+      img.addEventListener("mouseleave", () => { if (img.dataset.mono) img.src = img.dataset.mono; });
+    }
     if (imageMode !== "dither") { img.src = src; return; }
     const raw = new Image();
     raw.onload = () => {
-      img.src = processImage(raw, "dither", 760).toDataURL();
+      img.dataset.mono = processImage(raw, "dither", 760).toDataURL();
+      if (!img.matches(":hover")) img.src = img.dataset.mono;
       img.classList.add("bit");
     };
     raw.src = src;

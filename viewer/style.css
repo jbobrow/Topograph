@@ -166,9 +166,12 @@ main { position: relative; min-height: 0; }
 .grid .text { padding: 5px; display: block; height: 100%; overflow: hidden; font-family: var(--sans); }
 
 /* Image modes for DOM images; canvas thumbnails are processed in app.js. */
-body[data-images="gray"] .panel img:not(.bit), body[data-images="gray"] .tip img,
-body[data-images="dither"] .grid img, body[data-images="dither"] .tip img,
-body[data-images="dither"] .gallery img { filter: grayscale(1) contrast(1.05); }
+body[data-images="gray"] .panel img:not(.bit),
+body[data-images="dither"] .grid img,
+body[data-images="dither"] .gallery img { filter: grayscale(1) contrast(1.05); transition: filter 120ms ease-out; }
+/* Hovering an image shows it in full color (the hover card always does). */
+body .panel img:hover, body .grid button:hover img, body .grid button:focus-visible img { filter: none; }
+.panel .hero.bit:hover { image-rendering: auto; }
 
 /* --- timeline ------------------------------------------------------------ */
 .time {
