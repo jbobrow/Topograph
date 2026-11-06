@@ -20,6 +20,8 @@ dependencies = [
 [project.optional-dependencies]
 # CLIP embeddings (recommended). Uses Apple's Metal (MPS) automatically on a Mac.
 clip = ["torch>=2.1", "open_clip_torch>=2.24"]
+# The text model for the words and blended maps.
+words = ["sentence-transformers>=3"]
 # Read HEIC/HEIF images (common in iPhone exports).
 heif = ["pillow-heif>=0.16"]
 dev = ["pytest>=8"]

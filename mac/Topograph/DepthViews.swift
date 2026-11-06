@@ -493,8 +493,9 @@ struct DriftScreen: View {
         .background(theme.ground.color)
         .onAppear { if trail.isEmpty { start() } }
         .task(id: trail.last) {
-            guard let current = trail.last, let library = model.library, let id = model.map?.items[Int(current)].id else { return }
-            detail = try? await Task.detached { try library.detail(of: id) }.value
+            guard let current = trail.last, let library = model.library, let map = model.map else { return }
+            let (id, recipe) = (map.items[Int(current)].id, map.recipe)
+            detail = try? await Task.detached { try library.detail(of: id, in: recipe) }.value
             if !Task.isCancelled { detailOf = current }
         }
     }

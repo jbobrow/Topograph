@@ -223,7 +223,11 @@ terrain, sizes thumbnails, and orders "most resonant" lists.
 5. **Layout.** UMAP reduces vectors to 2D (cosine metric, `n_neighbors≈30`,
    `min_dist≈0.05`). HDBSCAN finds fine regions; Ward linkage on their centers nests
    them into larger ones (about 7 at the top, roughly 3 children each, down to the
-   fine regions), so every region sits inside one parent. A Gaussian kernel density
+   fine regions), so every region sits inside one parent. A library can keep several
+   maps side by side, each laid out from different vectors (`maps.py`): pictures uses the
+   CLIP vectors alone, words adds a text model after lining up text and picture vectors,
+   and blended, the suggested one, also moves files toward posts about the same thing using
+   mutual nearest neighbors. A Gaussian kernel density
    estimate over the 2D points, weighted by resonance, becomes the terrain's elevation
    field; contour lines are drawn at fixed density quantiles.
 6. **Label.** Each region is named by the phrase that best tells it apart from its

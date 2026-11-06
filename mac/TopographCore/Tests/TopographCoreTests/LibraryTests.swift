@@ -48,6 +48,69 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(items.map(\.groups), [[.liked, .kept], [.made]])
     }
 
+    /// Two arrangements of one item, with a region and a neighbor on each.
+    private func placeOnTwoMaps() throws {
+        try place("x:1", x: 10, y: 10)
+        try place("x:2", x: 20, y: 20)
+        try writer.write { db in
+            try db.execute(sql: """
+                insert into layout(item_id, model, x, y, cluster, neighbors) values
+                  ('x:1', 'clip-vit-b-32+blended', 700, 800, 5, '["x:2"]');
+                insert into cluster(model, id, label) values ('clip-vit-b-32', 0, 'by look'), ('clip-vit-b-32+blended', 5, 'by subject');
+                update layout set neighbors = '["x:9"]' where model = 'clip-vit-b-32' and item_id = 'x:1';
+                """)
+        }
+    }
+
+    func testEachMapHasItsOwnPlacesRegionsAndNeighbors() throws {
+        try placeOnTwoMaps()
+        let library = try Library(root: root)
+        let pictures = try library.map(.pictures)
+        XCTAssertEqual(pictures.recipe, .pictures)
+        XCTAssertEqual(pictures.items.count, 2)
+        XCTAssertEqual(pictures.regions.regions[0]?.label, "by look")
+
+        let blended = try library.map(.blended)
+        XCTAssertEqual(blended.recipe, .blended)
+        XCTAssertEqual(blended.items.map(\.x), [700])
+        XCTAssertEqual(blended.regions.regions[5]?.label, "by subject")
+        XCTAssertEqual(blended.waiting, 1, "the item only on the other map is still waiting on this one")
+
+        XCTAssertEqual(try library.detail(of: "x:1", in: .blended).neighbors, ["x:2"])
+        XCTAssertEqual(try library.detail(of: "x:1", in: .pictures).neighbors, ["x:9"])
+    }
+
+    func testAMapThatIsNotBuiltFallsBackToTheOneBuiltLast() throws {
+        try placeOnTwoMaps()
+        XCTAssertEqual(try Library(root: root).map().recipe, .pictures, "a library from before there was a choice")
+        XCTAssertEqual(try Library(root: root).map(.words).recipe, .pictures)
+        try writer.write { try $0.execute(sql: "insert into meta values ('map', 'blended')") }
+        XCTAssertEqual(try Library(root: root).map().recipe, .blended)
+        XCTAssertEqual(try Library(root: root).map(.words).recipe, .blended)
+        XCTAssertEqual(try Library(root: root).map(.pictures).recipe, .pictures, "what you asked for wins")
+    }
+
+    func testSourcesSayWhichMapsAreBuiltAndWhatIsMissingFromEach() throws {
+        try placeOnTwoMaps()
+        let library = try Library(root: root)
+        let onBlended = try library.sources(showing: .blended)
+        XCTAssertEqual(onBlended.shownMap, .blended)
+        XCTAssertEqual(onBlended.maps, [.pictures: 2, .blended: 1])
+        XCTAssertEqual(onBlended.unplaced, 1)
+        XCTAssertEqual(onBlended.waiting(on: .blended), 1)
+        XCTAssertEqual(onBlended.waiting(on: .pictures), 0)
+        XCTAssertEqual(try library.sources(showing: .pictures).unplaced, 0)
+    }
+
+    func testFindsTheTextModelWhereThePipelineKeepsIt() throws {
+        XCTAssertFalse(MapRecipe.wordsModelIsDownloaded(environment: ["HF_HOME": root.path], home: root))
+        let snapshot = root.appending(path: "hub/models--sentence-transformers--all-MiniLM-L6-v2/snapshots/abc")
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        XCTAssertFalse(MapRecipe.wordsModelIsDownloaded(environment: ["HF_HOME": root.path], home: root))
+        try Data().write(to: snapshot.appending(path: "model.safetensors"))
+        XCTAssertTrue(MapRecipe.wordsModelIsDownloaded(environment: ["HF_HOME": root.path], home: root))
+    }
+
     func testRepeatedInteractionsCountOnce() throws {
         try place("x:1", types: ["open", "open", "open"])
         XCTAssertEqual(try Library(root: root).map().items.first?.resonance, 0.5)

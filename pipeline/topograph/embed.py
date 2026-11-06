@@ -115,22 +115,54 @@ def get_backend(name: str):
     raise ValueError(f"Unknown backend {name!r} (use 'clip' or 'lite')")
 
 
+class WordsBackend:
+    """A small text model for the maps that read words (see maps.py). CLIP reads text too, but
+    it's built to match captions to pictures, not to tell what a sentence is about."""
+    name = "minilm-l6-v2"
+    dim = 384
+
+    def __init__(self):
+        from sentence_transformers import SentenceTransformer
+        self.model = SentenceTransformer(WORDS_REPO)
+
+    def texts(self, texts):
+        return self.model.encode(texts, batch_size=256, normalize_embeddings=True, show_progress_bar=False)
+
+
+class LiteWords(LiteBackend):
+    name = "lite-words-v1"
+
+
 CLIP_REPO = "laion/CLIP-ViT-B-32-laion2B-s34B-b79K"
+WORDS_REPO = "sentence-transformers/all-MiniLM-L6-v2"
 
 
-def clip_is_cached() -> bool:
-    """Whether the CLIP weights are already on disk (then no download, and no network)."""
+def _is_cached(repo: str, fnames: tuple[str, ...]) -> bool:
     try:
         from huggingface_hub import try_to_load_from_cache
     except ImportError:
         return False
-    for fname in ("open_clip_model.safetensors", "open_clip_pytorch_model.bin"):
+    for fname in fnames:
         try:
-            if isinstance(try_to_load_from_cache(CLIP_REPO, fname), str):
+            if isinstance(try_to_load_from_cache(repo, fname), str):
                 return True
         except Exception:
             pass
     return False
+
+
+def clip_is_cached() -> bool:
+    """Whether the CLIP weights are already on disk (then no download, and no network)."""
+    return _is_cached(CLIP_REPO, ("open_clip_model.safetensors", "open_clip_pytorch_model.bin"))
+
+
+def words_is_cached() -> bool:
+    return _is_cached(WORDS_REPO, ("model.safetensors",))
+
+
+def words_is_installed() -> bool:
+    from importlib.util import find_spec
+    return find_spec("sentence_transformers") is not None
 
 
 def auto_backend() -> str:

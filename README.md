@@ -32,7 +32,7 @@ Requires Python 3.10+. On a Mac with Apple silicon, CLIP runs on the GPU via Met
 git clone https://github.com/jbobrow/Topograph.git
 cd Topograph
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[clip,heif]"
+pip install -e ".[clip,words,heif]"
 ```
 
 `ffmpeg` (e.g. `brew install ffmpeg`) is optional; with it, videos get a poster frame.
@@ -48,13 +48,20 @@ topograph files ~/Desktop ~/Downloads             # then read them
 topograph import ~/Downloads/takeout-*.zip        # YouTube and Google searches (choose JSON)
 topograph sync bluesky your.handle                # or: sync arena your-username (public data, no login)
 topograph hydrate          # fetch images for liked/saved posts (slow and polite; resumable)
-topograph build            # embeddings + layout + region names
+topograph build            # embeddings + layout + region names (a new library gets the blended map)
+topograph build --map words  # build another map: blended, words or pictures
 topograph regions          # print the region tree and names
 topograph serve            # opens http://127.0.0.1:8732
 ```
 
 `topograph stats` summarizes the library at any time. Re-importing a newer export
 only adds what's new.
+
+A map is one way of arranging your items, and a library can keep several. **Blended**, the
+suggested one, reads pictures and words and draws your files in beside posts about the same
+thing. **Words** reads pictures and words without moving your files. **Pictures** is mostly how
+things look. Blended and words download a text model once (about 90 MB, from Hugging Face), and
+nothing of yours is sent. Your other commands act on the map built last.
 
 The library lives in `~/Library/Application Support/Topograph/` on a Mac (override
 with `--library PATH` or `TOPOGRAPH_LIBRARY`). It's one SQLite file plus a `media/`
@@ -128,7 +135,8 @@ to bottom: drag to turn it. **Through time** is Strata's chart with bands of col
 
 **Sources** adds your history by running the `topograph` commands below for you, only
 when you ask. It finds them in this repo's `.venv`, or at `TOPOGRAPH_CLI`. Folders get a
-dry run first, so you see what would be read.
+dry run first, so you see what would be read. It's also where you build maps and switch
+between them.
 
 Find matches words in captions and names. The **by meaning** key next to it finds what
 things are about, using CLIP on your Mac. It needs a model of about 600 MB, which is too

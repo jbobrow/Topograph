@@ -178,8 +178,8 @@ private struct ItemPanel: View {
             }
         }
         .task(id: index) {
-            let (library, id) = (library, item.id)
-            detail = try? await Task.detached { try library.detail(of: id) }.value
+            let (library, id, recipe) = (library, item.id, model.map?.recipe)
+            detail = try? await Task.detached { try library.detail(of: id, in: recipe) }.value
             guard item.mine else { return }
             findingTributaries = true
             defer { findingTributaries = false }

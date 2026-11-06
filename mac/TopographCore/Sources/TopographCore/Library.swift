@@ -58,14 +58,16 @@ public struct LibraryMap: Sendable {
     /// images). They count in Strata. Gone items don't.
     public let waitingTimes: [Int]
     public let waiting: Int
+    /// Which arrangement of the library this is.
+    public let recipe: MapRecipe
     /// Where each item id sits in `items`.
     public let indexOfID: [String: Int32]
 
     public func withRegions(_ regions: RegionTree) -> LibraryMap {
-        LibraryMap(items: items, regions: regions, waitingTimes: waitingTimes, waiting: waiting)
+        LibraryMap(items: items, regions: regions, waitingTimes: waitingTimes, waiting: waiting, recipe: recipe)
     }
 
-    public init(items: [MapItem], regions: RegionTree, waitingTimes: [Int] = [], waiting: Int = 0) {
+    public init(items: [MapItem], regions: RegionTree, waitingTimes: [Int] = [], waiting: Int = 0, recipe: MapRecipe = .pictures) {
         var ids: [String: Int32] = [:]
         ids.reserveCapacity(items.count)
         for index in items.indices { ids[items[index].id] = Int32(index) }
@@ -74,6 +76,7 @@ public struct LibraryMap: Sendable {
         self.regions = regions
         self.waitingTimes = waitingTimes
         self.waiting = waiting
+        self.recipe = recipe
     }
 }
 
@@ -188,9 +191,10 @@ public struct Library: Sendable {
         root.appending(path: relative)
     }
 
-    public func map() throws -> LibraryMap {
+    /// The map you asked for if it's been built, or else the one built last.
+    public func map(_ asked: MapRecipe? = nil) throws -> LibraryMap {
         try db.read { db in
-            guard let model = try String.fetchOne(db, sql: "select value from meta where key = 'embedding_model'") else {
+            guard let (recipe, model) = try Self.resolve(asked, db) else {
                 throw LibraryError.noMap
             }
 
@@ -259,11 +263,26 @@ public struct Library: Sendable {
                                          x: row[5], y: row[6], r: row[7])
             }
             return LibraryMap(items: items, regions: RegionTree(records: regions, items: items),
-                              waitingTimes: waitingTimes, waiting: waiting)
+                              waitingTimes: waitingTimes, waiting: waiting, recipe: recipe)
         }
     }
 
-    public func detail(of id: String) throws -> ItemDetail {
+    /// Which map to read, and the name it's stored under. nil when nothing has been embedded.
+    private static func resolve(_ asked: MapRecipe?, _ db: Database) throws -> (MapRecipe, String)? {
+        guard let base = try String.fetchOne(db, sql: "select value from meta where key = 'embedding_model'") else {
+            return nil
+        }
+        let last = try String.fetchOne(db, sql: "select value from meta where key = 'map'").flatMap(MapRecipe.init)
+        for recipe in [asked, last, .pictures].compactMap({ $0 }) + MapRecipe.allCases {
+            let model = recipe.layoutModel(base: base)
+            if try Bool.fetchOne(db, sql: "select exists(select 1 from layout where model = ?)", arguments: [model]) == true {
+                return (recipe, model)
+            }
+        }
+        return (asked ?? last ?? .pictures, (asked ?? last ?? .pictures).layoutModel(base: base))
+    }
+
+    public func detail(of id: String, in recipe: MapRecipe? = nil) throws -> ItemDetail {
         try db.read { db in
             let item = try Row.fetchOne(db, sql: "select url, created_at from item where id = ?", arguments: [id])
             let interactions = try Row.fetchAll(db, sql: """
@@ -277,7 +296,7 @@ public struct Library: Sendable {
                 """, arguments: [id]).map {
                 MediaFile(kind: $0[0], display: $0[1], thumb: $0[2], originalURL: $0[3], palette: PaletteColor.parse($0[4]))
             }
-            let model = try String.fetchOne(db, sql: "select value from meta where key = 'embedding_model'")
+            let model = try Self.resolve(recipe, db)?.1
             let neighbors = try String.fetchOne(db, sql: "select neighbors from layout where item_id = ? and model = ?",
                                                 arguments: [id, model])
             return ItemDetail(url: item?[0], createdAt: item?[1], interactions: interactions, media: media,
@@ -375,12 +394,24 @@ public struct LibrarySources: Sendable, Equatable {
     public let fileRoots: [String]
     /// Accounts set up for live sync, by source.
     public let syncAccounts: [String: String]
-    /// Not placed on the map yet: they need `topograph build`.
+    /// Not placed on the map being shown yet: they need `topograph build`.
     public let unplaced: Int
+    /// How many items each built map has.
+    public let maps: [MapRecipe: Int]
+    /// The map `unplaced` is about.
+    public let shownMap: MapRecipe?
+
+    /// Items missing from a map. Exact for the map being shown. For others it's the difference
+    /// in counts, which is enough to say a map has fallen behind.
+    public func waiting(on recipe: MapRecipe) -> Int {
+        if recipe == shownMap { return unplaced }
+        return max(0, platforms.reduce(0) { $0 + $1.items } - (maps[recipe] ?? 0))
+    }
 }
 
 extension Library {
-    public func sources() throws -> LibrarySources {
+    /// `showing` is the map you've asked for, which decides what counts as not on it yet.
+    public func sources(showing: MapRecipe? = nil) throws -> LibrarySources {
         try db.read { db in
             let newest = try Row.fetchAll(db, sql: """
                 select item.platform, max(interaction.at) from interaction join item on item.id = interaction.item_id
@@ -396,11 +427,21 @@ extension Library {
             let roots = meta["files_roots"].flatMap { try? JSONDecoder().decode([String].self, from: Data($0.utf8)) } ?? []
             var accounts: [String: String] = [:]
             for (key, value) in meta where key.hasPrefix("sync_") { accounts[String(key.dropFirst(5))] = value }
+            let shown = try Self.resolve(showing, db)
             let unplaced = try Int.fetchOne(db, sql: """
                 select count(*) from item where not (\(Self.goneSQL))
-                and not exists (select 1 from layout where layout.item_id = item.id)
-                """) ?? 0
-            return LibrarySources(platforms: platforms, fileRoots: roots, syncAccounts: accounts, unplaced: unplaced)
+                and not exists (select 1 from layout where layout.item_id = item.id and layout.model = ?)
+                """, arguments: [shown?.1 ?? ""]) ?? 0
+            let counts = try Row.fetchAll(db, sql: "select model, count(*) from layout group by model")
+                .reduce(into: [String: Int]()) { $0[$1[0] as String] = $1[1] as Int }
+            var maps: [MapRecipe: Int] = [:]
+            if let base = meta["embedding_model"] {
+                for recipe in MapRecipe.allCases {
+                    if let count = counts[recipe.layoutModel(base: base)] { maps[recipe] = count }
+                }
+            }
+            return LibrarySources(platforms: platforms, fileRoots: roots, syncAccounts: accounts, unplaced: unplaced,
+                                  maps: maps, shownMap: shown?.0)
         }
     }
 }

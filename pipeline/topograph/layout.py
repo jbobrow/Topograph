@@ -106,14 +106,19 @@ def phrase_embedder(lib, backend, model: str):
     return embed
 
 
-def compute_layout(lib, model: str, backend=None, log=print) -> int:
+def compute_layout(lib, model: str, backend=None, log=print, map_name: str = "pictures",
+                   words_model: str | None = None) -> int:
+    """Lay out and name one map (see maps.py). Other maps in the library are left alone."""
     ids, vecs = load_vectors(lib, model)
     if not ids:
         log("Nothing embedded yet; run `topograph embed` first.")
         return 0
+    from .maps import layout_model, map_vectors
     from .progress import step
+    with step(f"Arranging the {map_name} map"):
+        arranged = map_vectors(lib, map_name, ids, vecs, words_model)
     with step(f"Laying out {len(ids):,} items on the map"):
-        xy = project(vecs)
+        xy = project(arranged)
     # Fit into a 1000x1000 square for the viewer, keeping the aspect ratio
     # (distances on the map mean something) with a margin for the terrain.
     lo, hi = xy.min(0), xy.max(0)
@@ -122,7 +127,7 @@ def compute_layout(lib, model: str, backend=None, log=print) -> int:
     with step("Finding regions"):
         labels = cluster(xy)
     with step("Finding nearest neighbors"):
-        nbrs = neighbors(vecs) if len(ids) > 1 else np.zeros((len(ids), 0), int)
+        nbrs = neighbors(arranged) if len(ids) > 1 else np.zeros((len(ids), 0), int)
 
     texts = {r["id"]: r["text"] for r in lib.conn.execute("select id, text from item")}
     visual = {r[0] for r in lib.conn.execute("select distinct item_id from media where status='ok'")}
@@ -135,17 +140,19 @@ def compute_layout(lib, model: str, backend=None, log=print) -> int:
                   embed_phrases=phrase_embedder(lib, backend, model), modifiers=load_modifiers())
 
     c = lib.conn
-    c.execute("delete from layout where model=?", (model,))
-    c.execute("delete from cluster where model=?", (model,))
+    stored = layout_model(model, map_name)
+    c.execute("delete from layout where model=?", (stored,))
+    c.execute("delete from cluster where model=?", (stored,))
     c.executemany(
         "insert into layout(item_id, model, x, y, cluster, neighbors) values (?,?,?,?,?,?)",
-        [(iid, model, float(xy[k, 0]), float(xy[k, 1]), int(labels[k]),
+        [(iid, stored, float(xy[k, 0]), float(xy[k, 1]), int(labels[k]),
           json.dumps([ids[j] for j in nbrs[k]])) for k, iid in enumerate(ids)])
     for rid, r in regions.items():
         x, y, rad = anchor(xy, r.members)
         c.execute("insert into cluster(model, id, label, terms, parent, depth, x, y, r) "
                   "values (?,?,?,?,?,?,?,?,?)",
-                  (model, int(rid), r.label, json.dumps(r.terms), r.parent, r.depth, x, y, rad))
+                  (stored, int(rid), r.label, json.dumps(r.terms), r.parent, r.depth, x, y, rad))
+    lib.set_meta("map", map_name)
     c.commit()
     top = sorted(roots, key=lambda k: -len(regions[k].members))
     log(f"  {len(regions)} regions in {max(r.depth for r in regions.values()) + 1 if regions else 0} "

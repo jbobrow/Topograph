@@ -27,7 +27,8 @@ pipeline/topograph/
   sync.py         Bluesky and Are.na: public data, no login, at a human pace
   hydrate.py      fetch text and media for liked or saved links (polite, resumable)
   media.py        display copies, thumbnails, palettes, perceptual hashes, video posters
-  embed.py        CLIP (OpenCLIP ViT-B-32, laion2b_s34b_b79k) or "lite" fallback
+  embed.py        CLIP (OpenCLIP ViT-B-32, laion2b_s34b_b79k) or "lite" fallback; the text model
+  maps.py         the recipes for each map (blended, words, pictures)
   layout.py       UMAP to 2D, HDBSCAN fine regions, neighbors
   regions.py      nest regions into a tree and name them (see the module docstring)
   concepts.txt    vocabulary for region names; "look and feel" section is qualifiers
@@ -66,6 +67,12 @@ Details that matter for compatibility:
   caption (first 300 characters). Text-only items embed their text. A Core ML port
   has to use the same weights and recipe, or the vectors won't be comparable.
 - Layout coordinates are in a 1000 × 1000 square, aspect preserved.
+- A library can hold several maps (`maps.py`): `layout` and `cluster` rows are stored under
+  `clip-vit-b-32` for pictures and `clip-vit-b-32+<map>` for the others, and `meta.map` says
+  which was built last. `embedding_model` stays `clip-vit-b-32`, because search by meaning,
+  region names and Tributaries all read those vectors on every map. The text model's vectors
+  (`minilm-l6-v2`, 384 dimensions) are in `embedding` too, so filter by model. Region numbers
+  are per map, so `Library.detail`, `sources` and your region names all take the map.
 - An item is "gone" when it's unreachable (`hydrated = -1`) with no text and no
   `ok` media. It stays in the database so it isn't re-imported or re-fetched, and
   it's left off the map and out of counts (`GONE_SQL` in `db.py`). X's
@@ -137,7 +144,7 @@ The plan is in SPEC §6 and §8:
   - `EmbeddingStore.nearest` doesn't rank by plain cosine, which fails on real data: see
     its comment before changing it. Judge changes on real searches, not on tests.
   - M2 is partly done: the Sources page runs the Python pipeline. Still to port to Swift:
-    importers, writing embeddings (`CLIPEncoder.embedItem` computes them), layout and naming, and hydration through a signed-in
+    importers, writing embeddings (`CLIPEncoder.embedItem` computes them), the text model, layout and naming, and hydration through a signed-in
     `WKWebView`. Python stays the reference until then. Port the files importer's privacy
     rules with their tests, not from memory.
   - M3: YouTube and Google Takeout importers and Bluesky and Are.na sync exist in Python,
@@ -149,7 +156,11 @@ The plan is in SPEC §6 and §8:
   connection. Strict read-only can't open a WAL file with no `-wal` or `-shm`, which is
   how the Python tools leave it on exit, so `Library` handles that. `query_only` isn't
   enough: GRDB resets it after each read.
-- **Testing anything that writes:** set `TOPOGRAPH_LIBRARY` to a throwaway folder.
+- **Testing anything that writes:** set `TOPOGRAPH_LIBRARY` to a throwaway folder. The app's
+  preferences are shared across libraries, so clear what a test sets (`mapRecipe`).
+- **Maps:** the Sources page offers them, with blended suggested. The choice is an app preference, and
+  building one runs `topograph build --map <name>`. Judge a recipe by eye on the real library
+  as well as by numbers: its subject-spread numbers got worse while its neighbors looked right.
 - **Approach:**
   - Open the SQLite file read-only. It's in WAL mode and the Python tools may be
     writing at the same time.
@@ -171,7 +182,7 @@ The Xcode project is `mac/Topograph.xcodeproj`, beside the Python pipeline:
 mac/
   TopographCore/    Swift package with no UI: Library (read-only GRDB), DensityField
                     (d3.contourDensity port), Regions, Strata, Depth (Echoes, Palette,
-                    Tributaries, Process), PaletteSpace (camera, places), MapFilter, Minimap,
+                    Tributaries, Process), PaletteSpace (camera, places), MapFilter, MapRecipe, Minimap,
                     Moodboard, RegionNamer, CLIP (encoder,
                     tokenizer, image preparation), and tests
   Topograph/        SwiftUI shell, TerrainView (MTKView), PaletteView (MTKView), TerrainRenderer, Terrain.metal,

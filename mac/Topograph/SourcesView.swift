@@ -14,6 +14,7 @@ struct SourcesScreen: View {
     @State private var connecting: String?
     @State private var account = ""
     @AppStorage("requestedSources") private var requested = ""
+    @State private var wordsModelReady = MapRecipe.wordsModelIsDownloaded()
 
     var body: some View {
         ScrollView {
@@ -30,6 +31,7 @@ struct SourcesScreen: View {
             while !Task.isCancelled {
                 await model.refreshSources()
                 await model.pipeline.checkHydrateElsewhere()
+                wordsModelReady = MapRecipe.wordsModelIsDownloaded()
                 try? await Task.sleep(for: .seconds(4))
             }
         }
@@ -48,6 +50,7 @@ struct SourcesScreen: View {
                 .padding(.top, 10)
             dropZone.padding(.top, 22)
             jobStatus.padding(.top, 12)
+            mapChoice.padding(.top, 36)
         }
     }
 
@@ -110,7 +113,9 @@ struct SourcesScreen: View {
             }
             if let sources = model.sources, sources.unplaced > 0, model.pipeline.running == nil, folderCheck == nil {
                 HStack(spacing: 8) {
-                    Button("update the map") { start(title: "updating the map", ["build"]) }
+                    Button("update the map") {
+                        start(title: "updating the map", ["build"] + (sources.shownMap.map { ["--map", $0.rawValue] } ?? []))
+                    }
                         .buttonStyle(KeyStyle(theme: theme))
                     Text("\(sources.unplaced.formatted()) items aren’t on it yet")
                         .font(PlexMono.font(.regular, size: 11)).foregroundStyle(theme.secondary.color)
@@ -148,6 +153,89 @@ struct SourcesScreen: View {
         model.pipeline.run(.init(title: title, arguments: arguments), library: model.libraryRoot) { _ in
             Task { await model.refreshSources() }
             model.load()
+        }
+    }
+
+    // MARK: The map
+
+    private var mapChoice: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("how the map is made").font(PlexMono.font(.semibold, size: 18)).foregroundStyle(theme.ink.color)
+            Text("The same items, arranged different ways. Build as many as you like and switch between them. All of it happens on this Mac.")
+                .font(PlexSans.font(size: 14))
+                .lineSpacing(5)
+                .foregroundStyle(theme.secondary.color)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 10)
+            Rectangle().fill(theme.ink.color).frame(height: 1).padding(.top, 16)
+            ForEach(Array(MapRecipe.allCases.enumerated()), id: \.element) { position, recipe in
+                mapRow(recipe, position: position)
+                Rectangle().fill(theme.rule.color).frame(height: 1)
+            }
+        }
+    }
+
+    private func mapRow(_ recipe: MapRecipe, position: Int) -> some View {
+        let built = model.sources?.maps[recipe] != nil
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Button(recipe.title) { model.showMap(recipe) }
+                    .buttonStyle(KeyStyle(theme: theme, led: model.map?.recipe == recipe))
+                    .disabled(!built || model.openingMap != nil)
+                if recipe == .suggested {
+                    Text("suggested").font(PlexMono.font(.regular, size: 10)).foregroundStyle(theme.secondary.color)
+                }
+                Spacer(minLength: 8)
+                mapStatus(recipe, position: position)
+            }
+            Text(recipe.summary)
+                .font(PlexSans.font(size: 13))
+                .foregroundStyle(theme.secondary.color)
+                .fixedSize(horizontal: false, vertical: true)
+            if !built, recipe.readsWords, !wordsModelReady {
+                Text(MapRecipe.wordsDownloadNote)
+                    .font(PlexMono.font(.regular, size: 10))
+                    .foregroundStyle(theme.secondary.color)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.vertical, 12)
+    }
+
+    /// How far along a map is, and the key that moves it on.
+    @ViewBuilder
+    private func mapStatus(_ recipe: MapRecipe, position: Int) -> some View {
+        let number = PlexMono.font(.semibold, size: 13)
+        let note = PlexMono.font(.regular, size: 11)
+        let busy = model.pipeline.running != nil
+        if model.pipeline.running?.arguments.contains(recipe.rawValue) == true {
+            LoadingNote(text: "building", theme: theme)
+        } else if model.openingMap == recipe {
+            LoadingNote(text: "opening", theme: theme)
+        } else if !model.sourcesAreKnown {
+            LoadingNote(text: "checking", theme: theme, delay: Double(position) * 0.1)
+        } else if let placed = model.sources?.maps[recipe] {
+            let waiting = model.sources?.waiting(on: recipe) ?? 0
+            if waiting > 0, model.map?.recipe != recipe {
+                Text("\(waiting.formatted()) not on it").font(note).foregroundStyle(theme.secondary.color)
+                Button("update") { build(recipe) }
+                    .buttonStyle(KeyStyle(theme: theme, led: false))
+                    .disabled(busy)
+            }
+            Text(placed.formatted()).font(number).foregroundStyle(theme.ink.color)
+        } else {
+            Text("not built").font(note).foregroundStyle(theme.secondary.color)
+            Button("build") { build(recipe) }
+                .buttonStyle(KeyStyle(theme: theme, led: false))
+                .disabled(busy)
+        }
+    }
+
+    private func build(_ recipe: MapRecipe) {
+        model.pipeline.run(.init(title: "building the \(recipe.title) map", arguments: ["build", "--map", recipe.rawValue]),
+                           library: model.libraryRoot) { succeeded in
+            Task { await model.refreshSources() }
+            if succeeded { model.showMap(recipe) }
         }
     }
 

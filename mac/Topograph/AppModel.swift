@@ -100,8 +100,26 @@ final class AppModel {
         let root = libraryRoot
         checkingSources = true
         defer { checkingSources = false }
-        sources = await Task.detached(priority: .utility) { try? Library(root: root).sources() }.value
+        let shown = map?.recipe ?? chosenMap
+        sources = await Task.detached(priority: .utility) { try? Library(root: root).sources(showing: shown) }.value
         sourcesAreKnown = true
+    }
+
+    /// The map you picked. Kept by this app, so the library stays read-only. With no pick,
+    /// or one that isn't built, the library says which it built last.
+    private(set) var chosenMap = UserDefaults.standard.string(forKey: "mapRecipe").flatMap(MapRecipe.init)
+    /// The map on its way in, while the one before it stays on screen.
+    private(set) var openingMap: MapRecipe?
+
+    func showMap(_ recipe: MapRecipe) {
+        chosenMap = recipe
+        UserDefaults.standard.set(recipe.rawValue, forKey: "mapRecipe")
+        guard map?.recipe != recipe else {
+            Task { await refreshSources() }
+            return
+        }
+        openingMap = recipe
+        load()
     }
 
     /// Whether the library's been asked yet. Until then, no source can be said to be missing.
@@ -161,9 +179,11 @@ final class AppModel {
         Task {
             do {
                 let filter = self.filter
+                let chosen = chosenMap
+                defer { openingMap = nil }
                 let (library, loaded, search, peak, scene, slicer) = try await Task.detached(priority: .userInitiated) {
                     let library = try Library()
-                    let map = try library.map()
+                    let map = try library.map(chosen)
                     let search = SearchIndex(items: map.items)
                     // Contour heights come from what shows by default, not what starts hidden.
                     let shown = map.items.indices.filter { map.items[$0].platform != "google" }.map(Int32.init)
@@ -172,7 +192,9 @@ final class AppModel {
                     return (library, map, search, peak, scene, TimeSlicer(filter: filter, items: map.items, search: search))
                 }.value
                 self.library = library
-                let map = loaded.withRegions(loaded.regions.renamed(regionNames))
+                let map = loaded.withRegions(loaded.regions.renamed(regionNames(on: loaded.recipe)))
+                // Places mean nothing from one map to the next, so don't stay zoomed in on one.
+                if let before = self.map, before.recipe != map.recipe { controller.fit() }
                 self.map = map
                 embeddingsTask = nil
                 let times = map.items.compactMap(\.time)
@@ -189,6 +211,7 @@ final class AppModel {
                 self.scene = TerrainScene(map: map, visible: scene.visible, fullPeak: peak)
                 selection = nil
                 phase = .ready
+                Task { await refreshSources() }
             } catch {
                 phase = .failed(error.localizedDescription)
                 // With no library yet, the way forward is adding your history.
@@ -202,20 +225,23 @@ final class AppModel {
     // MARK: Your names for regions
 
     /// Kept by this app, not in the library, so the library stays read-only. They're matched
-    /// by region number, so a new layout, which renumbers regions, clears them.
-    private var regionNames: [Int: String] {
-        get {
-            let stored = UserDefaults.standard.dictionary(forKey: "regionNames") as? [String: String] ?? [:]
-            return Dictionary(uniqueKeysWithValues: stored.compactMap { key, value in Int(key).map { ($0, value) } })
-        }
-        set {
-            UserDefaults.standard.set(Dictionary(uniqueKeysWithValues: newValue.map { (String($0.key), $0.value) }), forKey: "regionNames")
-        }
+    /// by region number, so a new layout, which renumbers regions, clears them. Each map
+    /// numbers its regions separately, so each keeps its own names.
+    private func regionNames(on recipe: MapRecipe) -> [Int: String] {
+        let stored = UserDefaults.standard.dictionary(forKey: Self.regionNamesKey(recipe)) as? [String: String] ?? [:]
+        return Dictionary(uniqueKeysWithValues: stored.compactMap { key, value in Int(key).map { ($0, value) } })
+    }
+
+    private static func regionNamesKey(_ recipe: MapRecipe) -> String {
+        recipe == .pictures ? "regionNames" : "regionNames.\(recipe.rawValue)"
     }
 
     func rename(region id: Int, to name: String) {
-        regionNames[id] = name
         guard let map else { return }
+        var names = regionNames(on: map.recipe)
+        names[id] = name
+        UserDefaults.standard.set(Dictionary(uniqueKeysWithValues: names.map { (String($0.key), $0.value) }),
+                                  forKey: Self.regionNamesKey(map.recipe))
         adopt(map.withRegions(map.regions.renamed([id: name])))
     }
 

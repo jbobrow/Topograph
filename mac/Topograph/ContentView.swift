@@ -467,25 +467,26 @@ struct KeyStyle: ButtonStyle {
         let on: Bool
         let led: Bool?
         @State private var hovering = false
+        @Environment(\.isEnabled) private var enabled
 
         var body: some View {
             HStack(spacing: 6) {
                 if let led {
                     Rectangle()
                         .fill(led ? (on ? theme.ground.color : theme.ink.color) : Color.clear)
-                        .overlay(Rectangle().strokeBorder(on ? theme.ground.color : theme.ink.color, lineWidth: 1))
+                        .overlay(Rectangle().strokeBorder(on ? theme.ground.color : enabled ? theme.ink.color : theme.rule.color, lineWidth: 1))
                         .frame(width: 7, height: 7)
                 }
                 configuration.label
                     .lineLimit(1)
                     .font(PlexMono.font(.medium, size: 11))
-                    .foregroundStyle(on ? theme.ground.color : theme.ink.color)
+                    .foregroundStyle(on ? theme.ground.color : enabled ? theme.ink.color : theme.secondary.color)
             }
             .padding(.horizontal, 9)
             .frame(height: 26)
             .background(on ? theme.ink.color : theme.surface.color)
             .overlay(RoundedRectangle(cornerRadius: 3)
-                .strokeBorder(on || hovering ? theme.ink.color : theme.rule.color, lineWidth: 1))
+                .strokeBorder(on || (hovering && enabled) ? theme.ink.color : theme.rule.color, lineWidth: 1))
             .clipShape(RoundedRectangle(cornerRadius: 3))
             .contentShape(Rectangle())
             .offset(y: configuration.isPressed ? 1 : 0)

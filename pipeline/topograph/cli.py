@@ -4,6 +4,7 @@
     topograph import ~/Downloads/twitter-2026-11-05-*.zip
     topograph hydrate            # fetch media for likes/saves (slow, polite, resumable)
     topograph build              # embed + layout + export
+    topograph build --map words  # build another way of arranging the same items
     topograph serve              # open the viewer
     topograph regions            # list the map's regions and their names
 """
@@ -18,6 +19,7 @@ from . import media as media_mod
 from .config import default_library
 from .db import Library, upsert_record
 from .importers import IMPORTERS, detect
+from .maps import MAPS
 from .progress import Progress, step
 from .util import Archive
 
@@ -117,7 +119,45 @@ def cmd_hydrate(args, lib):
     _stats(lib)
 
 
-def _backend(args):
+def _chosen_map(args, lib, base: str) -> str:
+    """The map to build: the one you asked for, then the one you built last. A library mapped
+    before there was a choice keeps its map until you pick another. A new one gets the suggested
+    one, if this machine can make it."""
+    from .embed import words_is_installed
+    from .maps import DEFAULT_MAP
+    asked = getattr(args, "map", None) or lib.get_meta("map")
+    if not asked:
+        mapped = lib.conn.execute("select 1 from layout limit 1").fetchone()
+        ready = base.startswith("clip") and words_is_installed()
+        return DEFAULT_MAP if ready and not mapped else "pictures"
+    if asked != "pictures" and base.startswith("clip") and not words_is_installed():
+        sys.exit(f"The {asked} map reads words, which needs the text model. "
+                 "Install it with pip install -e \".[words]\".")
+    return asked
+
+
+def _words_backend(base: str):
+    from .embed import LiteWords, WordsBackend, words_is_cached
+    if not base.startswith("clip"):
+        return LiteWords()
+    if words_is_cached():
+        with step("Loading the text model"):
+            return WordsBackend()
+    print("Downloading the text model (about 90 MB from Hugging Face, first run only). Nothing of yours is sent.")
+    return WordsBackend()
+
+
+def _prepare_words(lib, base: str, map_name: str) -> str | None:
+    """A vector for each item's words, for the maps that read them. Returns the text model's name."""
+    if map_name == "pictures":
+        return None
+    from .maps import embed_words
+    backend = _words_backend(base)
+    embed_words(lib, backend, base)
+    return backend.name
+
+
+def _backend(args, map_name: str = "pictures"):
     from .embed import auto_backend, get_backend
     name = args.backend or auto_backend()
     if name == "lite":
@@ -126,11 +166,14 @@ def _backend(args):
     import logging
     import os
     import warnings
+    os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
     logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
     warnings.filterwarnings("ignore", module="huggingface_hub")
-    from .embed import clip_is_cached
+    from .embed import clip_is_cached, words_is_cached
     if clip_is_cached():
-        os.environ.setdefault("HF_HUB_OFFLINE", "1")   # no network, no warnings
+        # Offline is settled when the hub first loads, so it has to allow for the text model too.
+        if map_name == "pictures" or words_is_cached():
+            os.environ.setdefault("HF_HUB_OFFLINE", "1")   # no network, no warnings
         with step("Loading the image model (CLIP)"):
             return get_backend(name)
     print("Downloading the image model (CLIP, about 600 MB, first run only)")
@@ -149,28 +192,39 @@ def cmd_layout(args, lib, backend=None):
     model = lib.get_meta("embedding_model")
     if not model:
         sys.exit("Nothing embedded yet; run `topograph embed` first.")
+    map_name = _chosen_map(args, lib, model)
     if backend is None and model.startswith("clip"):
-        backend = _backend(args)
-    compute_layout(lib, model, backend=backend)
+        backend = _backend(args, map_name)
+    words = _prepare_words(lib, model, map_name)
+    compute_layout(lib, model, backend=backend, map_name=map_name, words_model=words)
+
+
+def _shown_model(args, lib) -> str:
+    """Where the current map is stored."""
+    from .maps import layout_model
+    return layout_model(lib.get_meta("embedding_model"), getattr(args, "map", None) or lib.get_meta("map") or "pictures")
 
 
 def cmd_export(args, lib):
     from .export import export
-    model = lib.get_meta("embedding_model")
     with step("Writing the map for the viewer"):
-        path = export(lib, model)
+        path = export(lib, _shown_model(args, lib))
     print(f"Wrote {path}")
 
 
 def cmd_build(args, lib):
-    from .embed import embed_library
+    from .embed import auto_backend, embed_library
     from .export import export
     from .layout import compute_layout
-    backend = _backend(args)
+    from .maps import layout_model
+    name = args.backend or auto_backend()
+    map_name = _chosen_map(args, lib, "clip-vit-b-32" if name == "clip" else "lite-v1")
+    backend = _backend(args, map_name)
     embed_library(lib, backend, force=args.force)
-    compute_layout(lib, backend.name, backend=backend)
+    words = _prepare_words(lib, backend.name, map_name)
+    compute_layout(lib, backend.name, backend=backend, map_name=map_name, words_model=words)
     with step("Writing the map for the viewer"):
-        path = export(lib, backend.name)
+        path = export(lib, layout_model(backend.name, map_name))
     print(f"Done. Open it with `topograph serve`. ({path})")
 
 
@@ -204,7 +258,7 @@ def cmd_regions(args, lib):
     import numpy as np
 
     from .regions import Region, outline
-    model = lib.get_meta("embedding_model")
+    model = _shown_model(args, lib)
     rows = lib.conn.execute("select * from cluster where model=?", (model,)).fetchall()
     if not rows:
         sys.exit("No regions yet; run `topograph build` first.")
@@ -270,6 +324,7 @@ def main(argv=None):
         p = sub.add_parser(name, help=help_)
         p.add_argument("--backend", choices=["clip", "lite"])
         p.add_argument("--force", action="store_true", help="recompute embeddings")
+        p.add_argument("--map", choices=MAPS, help="which map to make (see maps.py; default: the last one built)")
         p.set_defaults(fn=fn)
 
     p = sub.add_parser("serve", help="open the viewer")
