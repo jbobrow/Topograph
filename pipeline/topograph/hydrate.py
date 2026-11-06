@@ -184,7 +184,6 @@ def hydrate_instagram(item) -> dict | None:
     return None
 
 
-HYDRATORS = {"x": hydrate_x, "instagram": hydrate_instagram}
 
 
 # --- driver -----------------------------------------------------------------
@@ -221,6 +220,16 @@ def download_pending_media(lib, item_id: str | None = None, delay: float = 0.3, 
         time.sleep(delay)
     lib.conn.commit()
     return done
+
+
+def hydrate_youtube(item) -> dict | None:
+    """A video's thumbnail needs only its id; nothing is asked of YouTube but the picture."""
+    video_id = item["id"].split(":", 1)[1]
+    return {"text": None, "author": None, "created_at": None,
+            "media": [{"url": f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg", "video": True}]}
+
+
+HYDRATORS = {"x": hydrate_x, "instagram": hydrate_instagram, "youtube": hydrate_youtube}
 
 
 def hydrate(lib, limit: int | None = None, delay: float = 1.5, platforms=None, log=print,

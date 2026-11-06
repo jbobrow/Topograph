@@ -2,7 +2,10 @@ import SwiftUI
 import TopographCore
 
 enum Section: String, CaseIterable, Sendable {
-    case terrain, strata
+    case terrain, strata, echoes, palette, drift, process, sources
+
+    /// The views that follow the filters and the time scrubber.
+    var isFiltered: Bool { self == .terrain || self == .strata || self == .palette || self == .echoes }
 }
 
 enum Selection: Equatable {
@@ -36,15 +39,35 @@ final class AppModel {
     var imageMode: ImageMode {
         didSet { UserDefaults.standard.set(imageMode.rawValue, forKey: "imageMode") }
     }
-    var filter = MapFilter() {
+    var filter: MapFilter = {
+        var filter = MapFilter()
+        // Searches show curiosity more than taste, so they start hidden.
+        filter.hiddenPlatforms = ["google"]
+        return filter
+    }() {
         didSet { if filter != oldValue { applyFilter() } }
     }
     let controller = TerrainController()
+    let pipeline = PipelineRunner()
+    /// Read fresh from the file every few seconds while the Sources page is showing.
+    var sources: LibrarySources?
+    var sourcesSummary: String? {
+        guard let sources else { return nil }
+        let active = sources.platforms.filter { $0.items > 0 }.count
+        return "\(sources.platforms.reduce(0) { $0 + $1.items }.formatted()) items · \(active) sources"
+    }
+    var libraryRoot: URL { library?.root ?? Library.defaultRoot }
+
+    func refreshSources() async {
+        let root = libraryRoot
+        sources = await Task.detached(priority: .utility) { try? Library(root: root).sources() }.value
+    }
 
     private var search: SearchIndex?
     private var fullPeak = 0.0
     private var filtering = 0
     private var player: Timer?
+    private var embeddingsTask: Task<EmbeddingStore?, Never>?
 
     init() {
         imageMode = UserDefaults.standard.string(forKey: "imageMode").flatMap(ImageMode.init) ?? .gray
@@ -58,12 +81,15 @@ final class AppModel {
                     let library = try Library()
                     let map = try library.map()
                     let search = SearchIndex(items: map.items)
-                    let peak = DensityField(items: map.items).peak
+                    // Contour heights come from what shows by default, not what starts hidden.
+                    let shown = map.items.indices.filter { map.items[$0].platform != "google" }.map(Int32.init)
+                    let peak = DensityField(items: map.items, visible: shown).peak
                     let scene = TerrainScene(map: map, visible: filter.visible(in: map.items, search: search), fullPeak: peak)
                     return (library, map, search, peak, scene)
                 }.value
                 self.library = library
                 self.map = map
+                embeddingsTask = nil
                 let times = map.items.compactMap(\.time)
                 axis = MonthAxis(times: times + map.waitingTimes)
                 monthCounts = axis?.counts(of: times) ?? []
@@ -82,6 +108,15 @@ final class AppModel {
     }
 
     func fail(_ message: String) { phase = .failed(message) }
+
+    /// Every item's vector, read the first time something needs one. About 100 MB.
+    func embeddings() async -> EmbeddingStore? {
+        guard let library, let map else { return nil }
+        if let embeddingsTask { return await embeddingsTask.value }
+        let task = Task.detached(priority: .userInitiated) { try? library.embeddings(map: map) }
+        embeddingsTask = task
+        return await task.value
+    }
 
     func setWhere(_ path: [Int]) { whereYouAre = path }
 

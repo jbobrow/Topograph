@@ -39,7 +39,7 @@ def cmd_import(args, lib):
     kinds = [args.platform] if args.platform else detect(archive)
     if not kinds:
         sys.exit("Couldn't recognize this export. Use --platform x|instagram to force it.")
-    names = {"x": "X", "instagram": "Instagram", "facebook": "Facebook"}
+    names = {"x": "X", "instagram": "Instagram", "facebook": "Facebook", "youtube": "YouTube", "google": "Google searches"}
     for kind in kinds:
         new = 0
         with Progress(f"Importing {names.get(kind, kind)}", unit="records") as prog:
@@ -223,6 +223,14 @@ def cmd_regions(args, lib):
     print(outline(regions, roots, max_depth=args.depth))
 
 
+def cmd_sync(args, lib):
+    from .sync import run
+    with Progress(f"Syncing {args.source}", unit="records") as prog:
+        seen, new = run(lib, args.source, args.account, limit=args.limit, progress=prog)
+        prog.close(f"{seen:,} records, {new:,} new items")
+    _stats(lib)
+
+
 def cmd_stats(args, lib):
     _stats(lib)
 
@@ -272,6 +280,12 @@ def main(argv=None):
     p = sub.add_parser("regions", help="list the map's regions and their names")
     p.add_argument("--depth", type=int, default=9, help="how many levels to show")
     p.set_defaults(fn=cmd_regions)
+
+    p = sub.add_parser("sync", help="read your public activity from Bluesky or Are.na")
+    p.add_argument("source", choices=["bluesky", "arena"])
+    p.add_argument("account", help="your Bluesky handle or Are.na username")
+    p.add_argument("--limit", type=int)
+    p.set_defaults(fn=cmd_sync)
 
     sub.add_parser("stats", help="summarize the library").set_defaults(fn=cmd_stats)
 

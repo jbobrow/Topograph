@@ -160,6 +160,43 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(try Library(root: root).map().items.first?.x, 999)
     }
 
+    func testSourcesCountWhatsFetchedWaitingAndUnplaced() throws {
+        try place("x:1", hydrated: 1, types: ["post"])
+        try writer.write { db in
+            try db.execute(sql: """
+                insert into item(id, platform, hydrated, hydrate_attempts) values
+                  ('x:waiting', 'x', 0, 0), ('x:gaveup', 'x', 0, 3), ('x:gone', 'x', -1, 3), ('ig:1', 'instagram', 1, 0);
+                insert into meta values ('files_roots', '["/a", "/b"]'), ('sync_bluesky', 'ann.test');
+                """)
+        }
+        let sources = try Library(root: root).sources()
+        let x = try XCTUnwrap(sources.platforms.first { $0.platform == "x" })
+        XCTAssertEqual(x.items, 3, "gone items aren't counted")
+        XCTAssertEqual(x.waiting, 1)
+        XCTAssertEqual(x.fetched, 1)
+        XCTAssertEqual(x.newest, 0)
+        XCTAssertEqual(sources.fileRoots, ["/a", "/b"])
+        XCTAssertEqual(sources.syncAccounts, ["bluesky": "ann.test"])
+        XCTAssertEqual(sources.unplaced, 3)
+    }
+
+    func testDroppedThingsAreClassified() throws {
+        let zip = root.appending(path: "export.zip")
+        try Data().write(to: zip)
+        let note = root.appending(path: "note.txt")
+        try Data().write(to: note)
+        let export = root.appending(path: "export/data")
+        try FileManager.default.createDirectory(at: export, withIntermediateDirectories: true)
+        try Data().write(to: export.appending(path: "tweets.js"))
+        let plain = root.appending(path: "pictures")
+        try FileManager.default.createDirectory(at: plain, withIntermediateDirectories: true)
+        XCTAssertEqual(DroppedSource.classify(zip), .export)
+        XCTAssertEqual(DroppedSource.classify(note), .unknown)
+        XCTAssertEqual(DroppedSource.classify(root.appending(path: "export")), .export)
+        XCTAssertEqual(DroppedSource.classify(plain), .folder)
+        XCTAssertEqual(DroppedSource.classify(root.appending(path: "nowhere")), .unknown)
+    }
+
     func testColorAndHashComeFromTheFirstPicture() throws {
         try place("x:1")
         try writer.write { db in

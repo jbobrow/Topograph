@@ -9,7 +9,9 @@ struct ContentView: View {
         let theme = Theme.of(scheme)
         VStack(spacing: 0) {
             TopBar(model: model, theme: theme)
-            FilterBar(model: model, theme: theme)
+            if model.section.isFiltered {
+                FilterBar(model: model, theme: theme)
+            }
             Rectangle().fill(theme.ink.color).frame(height: 1)
             ZStack(alignment: .topTrailing) {
                 // The map stays alive under other views so it keeps your place.
@@ -25,16 +27,24 @@ struct ContentView: View {
                 if model.section == .terrain {
                     MapChrome(model: model, theme: theme)
                 }
-                if model.section == .strata {
-                    StrataScreen(model: model, theme: theme)
+                switch model.section {
+                case .terrain: EmptyView()
+                case .strata: StrataScreen(model: model, theme: theme)
+                case .echoes: EchoesScreen(model: model, theme: theme)
+                case .palette: PaletteScreen(model: model, theme: theme)
+                case .drift: DriftScreen(model: model, theme: theme)
+                case .process: ProcessScreen(model: model, theme: theme)
+                case .sources: SourcesScreen(model: model, theme: theme)
                 }
-                status(theme)
+                if model.section != .sources { status(theme) }
                 if model.selection != nil, let library = model.library, let map = model.map {
                     DetailPanel(model: model, library: library, map: map, theme: theme)
                 }
             }
-            Rectangle().fill(theme.ink.color).frame(height: 1)
-            TimeBar(model: model, theme: theme)
+            if model.section.isFiltered {
+                Rectangle().fill(theme.ink.color).frame(height: 1)
+                TimeBar(model: model, theme: theme)
+            }
         }
         .ignoresSafeArea(edges: .top)
         .background(theme.ground.color)
@@ -48,6 +58,7 @@ struct ContentView: View {
 
     @ViewBuilder
     private func status(_ theme: Theme) -> some View {
+        // With no library yet, the way forward is the Sources page.
         switch model.phase {
         case .ready:
             EmptyView()
@@ -89,6 +100,9 @@ struct TopBar: View {
                     .buttonStyle(KeyStyle(theme: theme, on: model.section == section, led: model.section == section))
             }
             Spacer()
+            if model.section == .sources, let summary = model.sourcesSummary {
+                Text(summary).font(PlexMono.font(.regular, size: 11)).foregroundStyle(theme.ink.color)
+            }
             Lamp(text: "on this mac only", theme: theme)
         }
         .padding(.leading, 84)

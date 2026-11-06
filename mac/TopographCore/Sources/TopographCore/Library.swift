@@ -260,7 +260,7 @@ public struct Library: Sendable {
 
     // `GONE_SQL` in db.py: unreachable, with no text and no picture. Gone items stay
     // in the file but are left off the map and out of counts.
-    private static let goneSQL = """
+    fileprivate static let goneSQL = """
         item.hydrated = -1 and coalesce(item.text, '') = '' and not exists
         (select 1 from media m where m.item_id = item.id and m.status = 'ok')
         """
@@ -328,5 +328,71 @@ public enum Interactions {
         case "react": "Reacted"
         default: type
         }
+    }
+}
+
+/// What each source has brought in so far, for the Sources page.
+public struct LibrarySources: Sendable, Equatable {
+    public struct Platform: Sendable, Equatable {
+        public let platform: String
+        public let items: Int
+        /// Arrived as links with something still to fetch.
+        public let waiting: Int
+        /// Have been fetched, or came complete.
+        public let fetched: Int
+        /// The newest thing you did there.
+        public let newest: Int?
+    }
+
+    public let platforms: [Platform]
+    public let fileRoots: [String]
+    /// Accounts set up for live sync, by source.
+    public let syncAccounts: [String: String]
+    /// Not placed on the map yet: they need `topograph build`.
+    public let unplaced: Int
+}
+
+extension Library {
+    public func sources() throws -> LibrarySources {
+        try db.read { db in
+            let newest = try Row.fetchAll(db, sql: """
+                select item.platform, max(interaction.at) from interaction join item on item.id = interaction.item_id
+                group by item.platform
+                """).reduce(into: [String: Int]()) { $0[$1[0] as String] = $1[1] as Int? }
+            let platforms = try Row.fetchAll(db, sql: """
+                select platform, count(*), sum(hydrated = 0 and hydrate_attempts < 3), sum(hydrated = 1) from item
+                where not (\(Self.goneSQL)) group by platform
+                """).map {
+                LibrarySources.Platform(platform: $0[0], items: $0[1], waiting: $0[2] ?? 0, fetched: $0[3] ?? 0, newest: newest[$0[0] as String])
+            }
+            let meta = try Row.fetchAll(db, sql: "select key, value from meta").reduce(into: [String: String]()) { $0[$1[0] as String] = $1[1] as String? }
+            let roots = meta["files_roots"].flatMap { try? JSONDecoder().decode([String].self, from: Data($0.utf8)) } ?? []
+            var accounts: [String: String] = [:]
+            for (key, value) in meta where key.hasPrefix("sync_") { accounts[String(key.dropFirst(5))] = value }
+            let unplaced = try Int.fetchOne(db, sql: """
+                select count(*) from item where not (\(Self.goneSQL))
+                and not exists (select 1 from layout where layout.item_id = item.id)
+                """) ?? 0
+            return LibrarySources(platforms: platforms, fileRoots: roots, syncAccounts: accounts, unplaced: unplaced)
+        }
+    }
+}
+
+/// How something dropped on the Sources page gets read.
+public enum DroppedSource: Equatable, Sendable {
+    /// A platform's export: `topograph import`.
+    case export
+    /// A folder of your own files: `topograph files`, which skips what's sensitive.
+    case folder
+    case unknown
+
+    public static func classify(_ url: URL) -> DroppedSource {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else { return .unknown }
+        guard isDirectory.boolValue else { return url.pathExtension.lowercased() == "zip" ? .export : .unknown }
+        let markers = ["data/tweets.js", "data/like.js", "data/account.js", "your_instagram_activity", "personal_information",
+                       "your_facebook_activity", "Takeout", "YouTube and YouTube Music", "My Activity"]
+        let looksLikeExport = markers.contains { FileManager.default.fileExists(atPath: url.appending(path: $0).path) }
+        return looksLikeExport ? .export : .folder
     }
 }

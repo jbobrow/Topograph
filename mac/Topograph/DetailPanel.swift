@@ -61,6 +61,7 @@ private struct ItemPanel: View {
     @State private var detail: ItemDetail?
     @State private var hero = 0
     @State private var fileMissing = false
+    @State private var tributaries: [Int32] = []
 
     private var item: MapItem { map.items[Int(index)] }
 
@@ -140,6 +141,12 @@ private struct ItemPanel: View {
                 PanelHeading(text: "region", theme: theme)
                 RegionPath(path: path, map: map, theme: theme) { model.openRegion($0) }
             }
+            if !tributaries.isEmpty {
+                PanelHeading(text: "tributaries: kept in the months before", theme: theme)
+                ItemGrid(items: tributaries, map: map, library: library, mode: model.imageMode, theme: theme) {
+                    model.openItem($0, pan: true)
+                }
+            }
             let neighbors = (detail?.neighbors ?? []).compactMap { map.indexOfID[$0] }
             if !neighbors.isEmpty {
                 PanelHeading(text: "nearest in taste", theme: theme)
@@ -151,6 +158,9 @@ private struct ItemPanel: View {
         .task(id: index) {
             let (library, id) = (library, item.id)
             detail = try? await Task.detached { try library.detail(of: id) }.value
+            guard item.mine, let store = await model.embeddings() else { return }
+            let (index, map) = (index, map)
+            tributaries = await Task.detached { Tributaries.find(of: index, map: map, embeddings: store) }.value
         }
     }
 
@@ -196,6 +206,25 @@ private struct RegionPanel: View {
     let theme: Theme
     let id: Int
     @State private var mostResonant: [Int32] = []
+    @State private var exporting = false
+
+    /// Ask where it goes first: nothing is written anywhere you didn't choose.
+    private func exportMoodboard(_ region: Region) {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.png]
+        panel.nameFieldStringValue = "\(region.label.prefix(60)).png"
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        exporting = true
+        let (map, library, id, title) = (map, library, region.id, region.label)
+        Task {
+            let data = await Task.detached(priority: .userInitiated) { () -> Data? in
+                let files = Moodboard.picks(region: id, map: map).compactMap { map.items[Int($0)].thumb }.map(library.file)
+                return Moodboard.render(title: title, files: files)
+            }.value
+            try? data?.write(to: destination, options: .atomic)
+            exporting = false
+        }
+    }
 
     var body: some View {
         if let region = map.regions.regions[id] {
@@ -225,6 +254,10 @@ private struct RegionPanel: View {
                         QuarterBars(times: times, axis: axis, theme: theme)
                     }
                 }
+                Button(exporting ? "exporting…" : "export moodboard") { exportMoodboard(region) }
+                    .buttonStyle(KeyStyle(theme: theme))
+                    .disabled(exporting)
+                    .padding(.top, 14)
                 PanelHeading(text: "most resonant", theme: theme)
                 ItemGrid(items: mostResonant, map: map, library: library, mode: model.imageMode, theme: theme) {
                     model.openItem($0, pan: true)

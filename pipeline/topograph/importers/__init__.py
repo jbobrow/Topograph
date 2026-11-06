@@ -3,9 +3,9 @@
 `files` is different: it reads folders on this computer in place (see files.py).
 """
 
-from . import facebook, instagram, x
+from . import facebook, google, instagram, x, youtube
 
-IMPORTERS = {"x": x, "instagram": instagram, "facebook": facebook}
+IMPORTERS = {"x": x, "instagram": instagram, "facebook": facebook, "youtube": youtube, "google": google}
 
 
 def detect(archive):
