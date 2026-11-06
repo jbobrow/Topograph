@@ -159,6 +159,15 @@ final class AppModel {
             MainActor.assumeIsolated { self?.commandHeld = held }
             return event
         }
+        // Clicking anywhere but a text field ends typing there. Otherwise the field keeps the
+        // keyboard, and space goes into it rather than moving the map.
+        NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
+            if let window = event.window, window.firstResponder is NSText {
+                let hit = window.contentView?.hitTest(event.locationInWindow)
+                if !(hit is NSText || hit is NSTextField) { window.makeFirstResponder(nil) }
+            }
+            return event
+        }
         // While it's playing, space pauses. It's for moving the map the rest of the time.
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard event.keyCode == 49, !(NSApp.keyWindow?.firstResponder is NSText) else { return event }
