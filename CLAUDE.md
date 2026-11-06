@@ -79,6 +79,10 @@ Details that matter for compatibility:
   "this post is unavailable" notices are not content (`util.is_unavailable`).
 - Timestamps are unix seconds. X likes carry no "liked at" time, so they use the
   post's own time and are flagged `at_estimated`.
+- A file's date depends on what it is (`_dates` in `importers/files.py`). A download's arrival
+  is when you kept it. Your own photo is dated by its camera date, then its creation date, never
+  its arrival: exporting from Photos stamps every file with that day, and marks each as used.
+  `topograph files --fix-dates` corrects files already imported and adds none.
 
 ## Rules that must hold
 

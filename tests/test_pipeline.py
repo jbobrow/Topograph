@@ -331,6 +331,111 @@ def test_scan_and_site_rules(neutral_tmp, monkeypatch):
     assert "header.jpg" not in seen and "bg.jpg" not in seen
 
 
+def _photo(path, taken=None):
+    """A picture big enough to count, with a camera date if it has one."""
+    from PIL import Image
+    im = Image.effect_noise((900, 700), 60).convert("RGB")
+    exif = Image.Exif()
+    if taken:
+        exif.get_ifd(0x8769)[36867] = taken
+    im.save(path, quality=95, exif=exif)
+
+
+def _arrived(export_at, agents, used_at=None):
+    """The macOS record of how files got here. `agents` maps a file name to the app that saved it."""
+    import struct
+
+    def fake(path, name):
+        agent = agents.get(Path(path).name)
+        if name == "com.apple.quarantine" and agent:
+            return f"0083;{export_at:x};{agent};".encode()
+        if name == "com.apple.lastuseddate#PS" and used_at:
+            return struct.pack("<qq", used_at, 0)
+        return None
+    return fake
+
+
+def _history(libdir):
+    lib = Library(libdir)
+    out = {}
+    for text, created, kind, at in lib.conn.execute(
+            "select i.text, i.created_at, ix.type, ix.at from item i join interaction ix on ix.item_id=i.id"):
+        out.setdefault(text.split(",")[0], {"created": created})[kind] = at
+    lib.close()
+    return out
+
+
+EXPORT = 1778500000   # 2026-05-11
+
+
+def test_your_photos_are_dated_when_taken_not_when_they_arrived(neutral_tmp, monkeypatch):
+    from datetime import datetime
+    root = neutral_tmp / "Downloads"
+    root.mkdir()
+    _photo(root / "beach.jpg", "2015:10:03 12:00:00")
+    _photo(root / "no camera date.jpg")
+    _photo(root / "from-web.jpg", "2015:10:03 12:00:00")
+    monkeypatch.setattr(files_mod, "_getxattr", _arrived(
+        EXPORT, {"beach.jpg": "Photos", "no camera date.jpg": "Photos", "from-web.jpg": "Safari"}, used_at=EXPORT + 60))
+    libdir = neutral_tmp / "lib"
+    cli.main(["--library", str(libdir), "files", str(root)])
+    seen = _history(libdir)
+
+    taken = int(datetime(2015, 10, 3, 12).timestamp())
+    assert seen["beach"]["made"] == taken and seen["beach"]["created"] == taken
+    assert "open" not in seen["beach"], "the export marked it as used; you didn't open it"
+    assert abs(seen["no camera date"]["made"] - EXPORT) > 86400, "falls back to when the file was created"
+    assert seen["from-web"]["download"] == EXPORT, "a download's arrival is when you kept it"
+    assert seen["from-web"]["open"] == EXPORT + 60, "opening a download the same day is real"
+
+
+def test_fix_dates_repairs_what_is_stored_and_adds_nothing(neutral_tmp, monkeypatch):
+    from datetime import datetime
+    root = neutral_tmp / "Downloads"
+    root.mkdir()
+    for name in ("beach", "moved away", "left out"):
+        _photo(root / f"{name}.jpg", "2015:10:03 12:00:00")
+    monkeypatch.setattr(files_mod, "_getxattr", _arrived(
+        EXPORT, {n: "Photos" for n in ("beach.jpg", "moved away.jpg", "left out.jpg", "new.jpg")}))
+    libdir = neutral_tmp / "lib"
+    cli.main(["--library", str(libdir), "files", str(root)])
+
+    # As the old importer left things: dated by the export, and marked as opened that day.
+    created = 1444000000
+    lib = Library(libdir)
+    lib.conn.execute("update interaction set at=? where type='made'", (EXPORT,))
+    lib.conn.execute("update item set created_at=?", (created,))
+    ids = [r[0] for r in lib.conn.execute("select id from item")]
+    lib.conn.executemany("insert into interaction(item_id, type, at) values (?, 'open', ?)",
+                         [(i, EXPORT + 60) for i in ids])
+    lib.conn.executemany("insert into interaction(item_id, type, at) values (?, 'open', ?)",
+                         [(i, EXPORT - 86400 * 400) for i in ids])
+    count = lib.conn.execute("select count(*) from item").fetchone()[0]
+    lib.close()
+
+    (root / "moved away.jpg").unlink()
+    (root / ".topographignore").write_text("left out.jpg\n")
+    _photo(root / "new.jpg", "2020:01:01 12:00:00")
+    read = []
+    real = files_mod.camera_time
+    monkeypatch.setattr(files_mod, "camera_time", lambda p: read.append(Path(p).name) or real(p))
+    for _ in range(2):   # a second run changes nothing
+        cli.main(["--library", str(libdir), "files", "--fix-dates", str(root)])
+        seen = _history(libdir)
+        taken = int(datetime(2015, 10, 3, 12).timestamp())
+        assert seen["beach"]["made"] == taken and seen["beach"]["created"] == taken
+        assert seen["moved away"]["made"] == created, "gone from disk, so the stored creation date"
+        assert seen["left out"]["made"] == created
+        for name in ("beach", "moved away", "left out"):
+            assert seen[name]["open"] == EXPORT - 86400 * 400, "a real opening stays; the export's goes"
+
+    assert "left out.jpg" not in read, "an ignore file still means it isn't read"
+    lib = Library(libdir)
+    assert lib.conn.execute("select count(*) from item").fetchone()[0] == count, "nothing new is imported"
+    assert lib.conn.execute("select count(*) from interaction where type='open'").fetchone()[0] == count
+    lib.close()
+
+
 def test_review_groups_count_each_image_once():
     from collections import Counter
     c = Counter({("/D", "Portfolio"): 5, ("/D", "Portfolio", "Old Site"): 225, ("/D",): 48})

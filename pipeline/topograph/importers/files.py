@@ -31,6 +31,7 @@ import sys
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import quote, urlparse
@@ -163,6 +164,43 @@ def _created(st) -> int | None:
         if ts and plausible_ts(ts) and ts <= now + 86400:
             return int(ts)
     return None
+
+
+def camera_time(path) -> int | None:
+    """When a picture was taken, by its own record of it (EXIF)."""
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            exif = im.getexif()
+            shot = exif.get_ifd(0x8769)
+            raw = shot.get(36867) or shot.get(36868) or exif.get(306)
+        ts = int(datetime.strptime(str(raw).strip()[:19], "%Y:%m:%d %H:%M:%S").timestamp())
+    except Exception:  # most files have no such record, and an odd one must not stop anything
+        return None
+    return ts if plausible_ts(ts) and ts <= time.time() + 86400 else None
+
+
+def _made_time(p: Path, st, family: str) -> int | None:
+    return (camera_time(p) if family == "image" else None) or _created(st)
+
+
+def _same_day(a: int | None, b: int | None) -> bool:
+    return bool(a and b) and abs(a - b) < 86400
+
+
+def _dates(p: Path, st, decision: str, d: dict) -> tuple[int | None, int | None, int | None]:
+    """(made or kept, created, opened), read from the file.
+
+    A download's arrival is when you kept it. For something of yours it only says when it
+    got here: exporting from Photos stamps every file with that day, even a photo from 2012.
+    The same export marks each file as used, which isn't you opening it either.
+    """
+    if TYPE_FOR[decision] == "made":
+        made = _made_time(p, st, d["family"])
+        arrived = d.get("downloaded_at") if decision == "your photo" else None
+        return made, made, None if _same_day(d.get("used"), arrived) else d.get("used")
+    created = _created(st)
+    return d.get("downloaded_at") or created, created, d.get("used")
 
 
 def _display_name(p: Path) -> str | None:
@@ -377,7 +415,7 @@ def parse(candidates, report: Report, preview, done_ids=frozenset(), on_skip=Non
             report.already[decision] += 1
             on_skip and on_skip(p)
             continue
-        created = _created(st)
+        at, created, used = _dates(p, st, decision, d)
         try:
             data, kind = preview(p)
         except Exception:  # one odd file must never stop the whole import
@@ -387,10 +425,10 @@ def parse(candidates, report: Report, preview, done_ids=frozenset(), on_skip=Non
             report.skipped["skip: no preview available"] += 1
             report.kept[decision] -= 1
             continue
-        ix = [{"type": TYPE_FOR[decision], "at": d.get("downloaded_at") or created or 0,
+        ix = [{"type": TYPE_FOR[decision], "at": at or 0,
                "collection": p.parent.name, "source": str(p)}]
-        if d.get("used"):
-            ix.append({"type": "open", "at": d["used"], "source": str(p)})
+        if used:
+            ix.append({"type": "open", "at": used, "source": str(p)})
         yield Record(
             id=f"file:{fid}",
             platform="files",
@@ -404,6 +442,57 @@ def parse(candidates, report: Report, preview, done_ids=frozenset(), on_skip=Non
             media=[{"ord": 0, "kind": "image", "data": data, "name": p.name,
                     "url": d.get("url")}],
         )
+
+
+def fix_dates(lib, candidates, on_file=None) -> Counter:
+    """Correct the dates of your own files that are already in the library.
+
+    `candidates` comes from `collect`, so this reads only what an import may read. A file
+    that's moved or now left out isn't read at all: for those, a date that differs from
+    the stored creation date can only be an arrival date, so the stored one takes its place.
+    Downloads keep their dates, and nothing is imported or added.
+    """
+    c = lib.conn
+    stats: Counter = Counter()
+    seen = set()
+
+    def apply(iid, made, created, arrived):
+        moved = c.execute("update or replace interaction set at=? where item_id=? and type='made' and at!=?",
+                          (made, iid, made)).rowcount
+        stats["dates corrected"] += moved > 0
+        if created:
+            c.execute("update item set created_at=? where id=?", (created, iid))
+        if arrived:
+            stats["opened records dropped"] += c.execute(
+                "delete from interaction where item_id=? and type='open' and abs(at-?)<86400", (iid, arrived)).rowcount
+
+    for p, st, decision, d in candidates:
+        on_file and on_file(p)
+        if TYPE_FOR[decision] != "made":
+            continue
+        try:
+            iid = f"file:{_file_id(p, st.st_size)}"
+        except OSError:
+            continue
+        have = c.execute("select at from interaction where item_id=? and type='made'", (iid,)).fetchall()
+        if not have:
+            continue
+        seen.add(iid)
+        made = _dates(p, st, decision, d)[0]
+        if made:
+            arrived = d.get("downloaded_at") if decision == "your photo" else None
+            apply(iid, made, made, arrived)
+        if len(seen) % 200 == 0:
+            c.commit()
+
+    rows = c.execute("select ix.item_id, ix.at, i.created_at from interaction ix join item i on i.id=ix.item_id "
+                     "where i.platform='files' and ix.type='made' and i.created_at is not null and ix.at!=0 "
+                     "and ix.at!=i.created_at").fetchall()
+    for iid, at, created in (tuple(r) for r in rows):
+        if iid not in seen:
+            apply(iid, created, None, at)
+    c.commit()
+    return stats
 
 
 def review_groups(counts: Counter, big: int = 250, max_depth: int = 6) -> list[tuple[str, int]]:

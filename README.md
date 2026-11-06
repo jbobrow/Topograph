@@ -57,6 +57,9 @@ topograph serve            # opens http://127.0.0.1:8732
 `topograph stats` summarizes the library at any time. Re-importing a newer export
 only adds what's new.
 
+Your own photos are dated by when they were taken, not when they reached your Mac. If you
+imported files before this was so, `topograph files --fix-dates` corrects them and adds nothing.
+
 A map is one way of arranging your items, and a library can keep several. **Blended**, the
 suggested one, reads pictures and words and draws your files in beside posts about the same
 thing. **Words** reads pictures and words without moving your files. **Pictures** is mostly how

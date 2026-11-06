@@ -58,7 +58,7 @@ def cmd_import(args, lib):
 
 def cmd_files(args, lib):
     import json
-    from .importers.files import Options, Report, collect, format_report, parse
+    from .importers.files import Options, Report, collect, fix_dates, format_report, parse
     from .media import preview_from_path
     roots = [str(Path(r).expanduser()) for r in args.paths] or json.loads(lib.get_meta("files_roots", "[]"))
     if not roots:
@@ -80,6 +80,12 @@ def cmd_files(args, lib):
         prog.close(f"{prog.done:,} files checked, {len(candidates):,} to keep")
     if args.dry_run:
         print(format_report(report))
+        return
+    if args.fix_dates:
+        with Progress("Correcting dates", total=len(candidates), unit="files") as prog:
+            stats = fix_dates(lib, candidates, on_file=lambda path: prog.advance(note=_short(path.parent)))
+            prog.close(f"{stats['dates corrected']:,} dates corrected, "
+                        f"{stats['opened records dropped']:,} opened records dropped")
         return
     lib.set_meta("files_roots", json.dumps(roots))
     lib.set_meta("files_excludes", json.dumps(excludes))
@@ -304,6 +310,8 @@ def main(argv=None):
     p = sub.add_parser("files", help="read screenshots, downloads and working files from folders")
     p.add_argument("paths", nargs="*", help="folders (default: the ones used last time)")
     p.add_argument("--dry-run", action="store_true", help="report what would be imported")
+    p.add_argument("--fix-dates", action="store_true",
+                   help="correct the dates of files already imported, without adding any")
     p.add_argument("--exclude", action="append", default=[], metavar="FOLDER",
                    help="leave a folder out (remembered for next time)")
     p.add_argument("--include-code", action="store_true", help="include images inside code projects")
