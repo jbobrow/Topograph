@@ -19,7 +19,7 @@ final class DepthTests: XCTestCase {
         for m in 18..<21 { items += Array(repeating: item(monthsIn: m), count: 4) }
         let map = map(items)
         let axis = try XCTUnwrap(MonthAxis(times: items.compactMap(\.time)))
-        let echoes = Echoes.find(map: map, visible: Array(items.indices.map(Int32.init)), axis: axis)
+        let echoes = Echoes.find(map: map, visible: Array(items.indices.map(Int32.init)), axis: axis, stripLength: 10)
         let echo = try XCTUnwrap(echoes.first)
         XCTAssertEqual(echo.region, 1)
         XCTAssertGreaterThanOrEqual(echo.silentMonths, 14)
@@ -50,6 +50,15 @@ final class DepthTests: XCTestCase {
         XCTAssertGreaterThan(hypot(dark.x, dark.y), hypot(light.x, light.y))
         let white = PaletteLayout.position(rgb: 0xffffff)
         XCTAssertEqual(hypot(white.x, white.y), 0, accuracy: 1e-6)
+    }
+
+    func testDurationsUseYearsAndMonths() {
+        XCTAssertEqual(Echoes.duration(months: 1), "1 month")
+        XCTAssertEqual(Echoes.duration(months: 11), "11 months")
+        XCTAssertEqual(Echoes.duration(months: 12), "1 year")
+        XCTAssertEqual(Echoes.duration(months: 13), "1 year, 1 month")
+        XCTAssertEqual(Echoes.duration(months: 24), "2 years")
+        XCTAssertEqual(Echoes.duration(months: 83), "6 years, 11 months")
     }
 
     func testCylinderRunsLightToDarkWithColorOnTheOutside() {

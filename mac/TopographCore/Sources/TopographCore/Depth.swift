@@ -17,12 +17,20 @@ public struct Echo: Sendable, Identifiable {
 }
 
 public enum Echoes {
+    /// A number of months as people say it: "8 months", "1 year", "6 years, 11 months".
+    public static func duration(months: Int) -> String {
+        func count(_ number: Int, _ unit: String) -> String { "\(number) \(unit)\(number == 1 ? "" : "s")" }
+        let (years, rest) = months.quotientAndRemainder(dividingBy: 12)
+        if years == 0 { return count(rest, "month") }
+        return rest == 0 ? count(years, "year") : "\(count(years, "year")), \(count(rest, "month"))"
+    }
+
     private static func peakLimit(_ busy: [Int]) -> Int { max(8, busy[busy.count / 2] * 8) }
 
     /// Finest regions only: a large region is almost never silent for long, and it's the
     /// specific interests whose return is worth noticing.
     public static func find(map: LibraryMap, visible: [Int32], axis: MonthAxis, minimumGap: Int = 9,
-                            minimumItems: Int = 5, stripLength: Int = 10) -> [Echo] {
+                            minimumItems: Int = 5, stripLength: Int = 28) -> [Echo] {
         var byRegion: [Int: [Int32]] = [:]
         for index in visible {
             if let region = map.items[Int(index)].region { byRegion[region, default: []].append(index) }

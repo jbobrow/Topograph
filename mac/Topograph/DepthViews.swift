@@ -9,15 +9,20 @@ struct EchoesScreen: View {
     @State private var echoes: [Echo]?
     /// The scene `echoes` were found in. A newer one means they're being looked for again.
     @State private var foundIn: UUID?
+    @State private var width = 900.0
+    /// The region whose echo is showing in color.
+    @State private var colored: Int?
 
     var body: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 28) {
+            LazyVStack(alignment: .leading, spacing: 0) {
                 Text("themes that came back")
                     .font(PlexMono.font(.semibold, size: 16))
                     .foregroundStyle(theme.ink.color)
+                    .padding(.bottom, 20)
                 if foundIn != model.scene?.id {
                     LoadingNote(text: "looking for themes that came back", theme: theme)
+                        .padding(.bottom, 20)
                 } else if let echoes, echoes.isEmpty {
                     Text("Nothing here has gone quiet for nine months and come back.")
                         .font(PlexSans.font(size: 13)).foregroundStyle(theme.secondary.color)
@@ -26,9 +31,12 @@ struct EchoesScreen: View {
                     row(echo)
                 }
             }
-            .padding(24)
+            .padding(Self.padding)
             .frame(maxWidth: .infinity, alignment: .leading)
+            // The rows stay clear of the side panel.
+            .padding(.trailing, model.selection == nil ? 0 : DetailPanel.width)
         }
+        .onGeometryChange(for: CGFloat.self, of: \.size.width) { width = $0 }
         .background(theme.ground.color)
         .task(id: model.scene?.id) {
             guard let scene = model.scene, let axis = model.axis else { return }
@@ -43,39 +51,116 @@ struct EchoesScreen: View {
     @ViewBuilder
     private func row(_ echo: Echo) -> some View {
         if let map = model.map, let library = model.library, let axis = model.axis, let region = map.regions.regions[echo.region] {
-            VStack(alignment: .leading, spacing: 8) {
-                Button(region.label) { model.openRegion(echo.region) }
-                    .buttonStyle(KeyStyle(theme: theme))
-                strip(label: "then  \(Format.month(axis.edges[echo.then.lowerBound]))", items: echo.thenItems, map: map, library: library)
-                HStack(spacing: 8) {
-                    Rectangle().fill(theme.rule.color).frame(width: 24, height: 1)
-                    Text("\(echo.silentMonths) months of near-silence")
-                        .font(PlexMono.font(.regular, size: 11))
-                        .foregroundStyle(theme.secondary.color)
+            HStack(alignment: .top, spacing: Self.gutter) {
+                // Each side is only as wide as its pictures, and the middle takes what's left. That
+                // keeps the silence halfway between the images on either side of it.
+                VStack(alignment: .leading, spacing: Self.titleSpacing) {
+                    Button(region.label) { model.openRegion(echo.region) }
+                        .buttonStyle(KeyStyle(theme: theme))
+                        .onHover { colored = $0 ? echo.region : nil }
+                    side(label: "then  \(Format.month(axis.edges[echo.then.lowerBound]))", items: echo.thenItems,
+                         width: picturesWidth(min(echo.thenItems.count, columns)), mode: mode(of: echo), map: map, library: library)
                 }
-                strip(label: "now   \(Format.month(axis.edges[echo.now.lowerBound]))", items: echo.nowItems, map: map, library: library)
+                .frame(width: picturesWidth(min(echo.thenItems.count, columns)), alignment: .leading)
+                silence(echo)
+                VStack(alignment: .leading, spacing: Self.titleSpacing) {
+                    Color.clear.frame(height: Self.titleHeight)
+                    side(label: "now  \(Format.month(axis.edges[echo.now.lowerBound]))", items: echo.nowItems,
+                         width: picturesWidth(columns), mode: mode(of: echo), map: map, library: library)
+                }
             }
+            // So the middle's line can run the height of the taller side.
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.vertical, 24)
+            .overlay(alignment: .top) { Rectangle().fill(theme.rule.color).frame(height: 1) }
         }
     }
 
-    private func strip(label: String, items: [Int32], map: LibraryMap, library: Library) -> some View {
-        HStack(alignment: .top, spacing: 8) {
+    /// How long it went quiet, with a line down to an arrow between then and now. The arrow
+    /// lands in the gap between the two rows of pictures, or level with a lone row's middle.
+    private func silence(_ echo: Echo) -> some View {
+        let twoRows = max(echo.thenItems.count, echo.nowItems.count) > columns
+        return VStack(spacing: 0) {
+            // Level with the theme's name, in the key beside it.
+            Text(Echoes.duration(months: echo.silentMonths))
+                .font(PlexMono.font(.medium, size: 11))
+                .foregroundStyle(theme.ink.color)
+                .frame(height: Self.titleHeight)
+            Text("of near-silence")
+                .font(PlexMono.font(.regular, size: 10))
+                .foregroundStyle(theme.secondary.color)
+            SilenceArrow()
+                .stroke(theme.ink.color, lineWidth: 1)
+                .frame(maxHeight: .infinity)
+                .padding(.top, 5)
+            Color.clear.frame(height: twoRows ? Self.cell + Self.spacing / 2 : Self.cell / 2)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    /// In color while the pointer's on the echo's name.
+    private func mode(of echo: Echo) -> ImageMode {
+        colored == echo.region ? .color : model.imageMode
+    }
+
+    private func picturesWidth(_ count: Int) -> Double {
+        Double(count) * (Self.cell + Self.spacing) - Self.spacing
+    }
+
+    /// One side of an echo, two rows of pictures at most.
+    private func side(label: String, items: [Int32], width: Double, mode: ImageMode, map: LibraryMap, library: Library) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
             Text(label)
                 .font(PlexMono.font(.medium, size: 11))
                 .foregroundStyle(theme.ink.color)
-                .frame(width: 104, alignment: .leading)
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 4) {
-                    ForEach(items, id: \.self) { index in
-                        Button { model.openItem(index) } label: {
-                            GridCell(item: map.items[Int(index)], library: library, mode: model.imageMode, theme: theme)
-                                .frame(width: 88, height: 88)
-                        }
-                        .buttonStyle(.plain)
+            LazyVGrid(columns: Array(repeating: GridItem(.fixed(Self.cell), spacing: Self.spacing), count: columns), alignment: .leading, spacing: Self.spacing) {
+                ForEach(items.prefix(columns * 2), id: \.self) { index in
+                    Button { model.openItem(index) } label: {
+                        GridCell(item: map.items[Int(index)], library: library, mode: mode, theme: theme)
+                            .frame(width: Self.cell, height: Self.cell)
                     }
+                    .buttonStyle(.plain)
                 }
             }
+            .frame(width: picturesWidth(columns), alignment: .leading)
+            .frame(width: width, alignment: .leading)
         }
+    }
+
+    private static let cell = 84.0
+    private static let spacing = 4.0
+    /// The column between the sides, and the space either side of it.
+    private static let middle = 132.0
+    private static let gutter = 12.0
+    /// A key's height, and the space under the row of the theme's name.
+    private static let titleHeight = 26.0
+    private static let titleSpacing = 12.0
+    private static let padding = 24.0
+
+    /// How many pictures fit across one side.
+    private var columns: Int {
+        let open = width - (model.selection == nil ? 0 : DetailPanel.width)
+        let side = (open - Self.padding * 2 - Self.middle - Self.gutter * 2) / 2
+        return max(2, Int((side + Self.spacing) / (Self.cell + Self.spacing)))
+    }
+}
+
+/// A line down from the top to a line across the bottom, which has a head at each end.
+private struct SilenceArrow: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let middle = rect.midX.rounded() + 0.5, bottom = rect.maxY.rounded() + 0.5, head = 4.5
+        path.move(to: CGPoint(x: middle, y: rect.minY))
+        path.addLine(to: CGPoint(x: middle, y: bottom))
+        path.move(to: CGPoint(x: rect.minX, y: bottom))
+        path.addLine(to: CGPoint(x: rect.maxX, y: bottom))
+        path.move(to: CGPoint(x: rect.minX + head, y: bottom - head))
+        path.addLine(to: CGPoint(x: rect.minX, y: bottom))
+        path.addLine(to: CGPoint(x: rect.minX + head, y: bottom + head))
+        path.move(to: CGPoint(x: rect.maxX - head, y: bottom - head))
+        path.addLine(to: CGPoint(x: rect.maxX, y: bottom))
+        path.addLine(to: CGPoint(x: rect.maxX - head, y: bottom + head))
+        return path
     }
 }
 
