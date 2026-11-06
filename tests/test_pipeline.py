@@ -189,8 +189,23 @@ def test_facebook_parse(tmp_path):
 from topograph.importers import files as files_mod  # noqa: E402
 
 
-def test_files_classification(tmp_path, monkeypatch):
+@pytest.fixture
+def neutral_tmp(tmp_path):
+    """tmp_path with no sensitive word in it, since the rules read the whole path.
+
+    On macOS pytest resolves it to /private/var/..., and "private" alone would skip every
+    file. /var is a symlink to /private/var, so the same folder is there without the word.
+    """
+    path = Path(str(tmp_path).removeprefix("/private"))
+    if not path.exists():
+        path = tmp_path
+    assert not files_mod.SENSITIVE_PATH.search(str(path)), f"sensitive word in temp path: {path}"
+    return path
+
+
+def test_files_classification(neutral_tmp, monkeypatch):
     from fixtures import image_bytes
+    tmp_path = neutral_tmp
     root = tmp_path / "Desktop"
     (root / "Screenshots").mkdir(parents=True)
     (root / "Poster Drafts").mkdir()
@@ -198,10 +213,11 @@ def test_files_classification(tmp_path, monkeypatch):
     (root / "my-app" / "assets").mkdir(parents=True)
     (root / "my-app" / "package.json").write_text("{}")
     (root / "Saved Page_files").mkdir()
-    big = image_bytes(1, size=(1600, 1200), fmt="PNG")
+    # Well above min_bytes: at 1600x1200 these drawn PNGs land right on the 12 KB line.
+    big = image_bytes(1, size=(2400, 1800), fmt="PNG")
     # Distinct content: the same bytes in two places are one item.
-    (root / "Screenshots" / "Screenshot 2024-05-01 at 10.00.00.png").write_bytes(image_bytes(5, size=(1600, 1200), fmt="PNG"))
-    (root / "Poster Drafts" / "poster v2.png").write_bytes(image_bytes(6, "warm", size=(1600, 1200), fmt="PNG"))
+    (root / "Screenshots" / "Screenshot 2024-05-01 at 10.00.00.png").write_bytes(image_bytes(5, size=(2400, 1800), fmt="PNG"))
+    (root / "Poster Drafts" / "poster v2.png").write_bytes(image_bytes(6, "warm", size=(2400, 1800), fmt="PNG"))
     (root / "Poster Drafts" / "from-web.jpg").write_bytes(image_bytes(7, "green", size=(1600, 1200)))
     (root / "Poster Drafts" / "pattern.jpg").write_bytes(big)
     (root / "Taxes 2023" / "w2.png").write_bytes(big)
@@ -295,10 +311,10 @@ def test_review_groups_split_big_folders():
     assert groups["/D/Personal/Family/2016"] == 310
 
 
-def test_scan_and_site_rules(tmp_path, monkeypatch):
+def test_scan_and_site_rules(neutral_tmp, monkeypatch):
     from fixtures import image_bytes
     monkeypatch.setattr(files_mod, "_getxattr", lambda p, n: None)
-    root = tmp_path / "Dropbox"
+    root = neutral_tmp / "Dropbox"
     scans = root / "Family" / "Scans" / "PATIENT_CT_Scan_2026.04.01"
     wp = root / "site" / "wordpress" / "wp-content"
     for d in (scans, wp / "uploads" / "2014", wp / "themes" / "twenty", root / "site" / "wordpress" / "wp-includes"):
@@ -323,10 +339,10 @@ def test_review_groups_count_each_image_once():
     assert len({name for name, _ in groups}) == len(groups)
 
 
-def test_files_import_survives_bad_files_and_resumes(tmp_path, monkeypatch):
+def test_files_import_survives_bad_files_and_resumes(neutral_tmp, monkeypatch):
     from fixtures import image_bytes
     monkeypatch.setattr(files_mod, "_getxattr", lambda p, n: None)
-    root = tmp_path / "Desktop"
+    root = neutral_tmp / "Desktop"
     root.mkdir()
     for i in range(4):
         (root / f"part {i}.stl").write_bytes(f"solid part{i}\n".encode() * 10)
