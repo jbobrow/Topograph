@@ -70,6 +70,8 @@ final class AppModel {
     private var search: SearchIndex?
     private var fullPeak = 0.0
     private var filtering = 0
+    /// What the timeline's bars were last counted for.
+    private var countedFilter: MapFilter?
     private var player: Timer?
     private var embeddingsTask: Task<EmbeddingStore?, Never>?
     private var encoderTask: Task<CLIPEncoder?, Never>?
@@ -84,7 +86,7 @@ final class AppModel {
         Task {
             do {
                 let filter = self.filter
-                let (library, loaded, search, peak, scene) = try await Task.detached(priority: .userInitiated) {
+                let (library, loaded, search, peak, scene, counted) = try await Task.detached(priority: .userInitiated) {
                     let library = try Library()
                     let map = try library.map()
                     let search = SearchIndex(items: map.items)
@@ -92,7 +94,11 @@ final class AppModel {
                     let shown = map.items.indices.filter { map.items[$0].platform != "google" }.map(Int32.init)
                     let peak = DensityField(items: map.items, visible: shown).peak
                     let scene = TerrainScene(map: map, visible: filter.visible(in: map.items, search: search), fullPeak: peak)
-                    return (library, map, search, peak, scene)
+                    let times = map.items.compactMap(\.time)
+                    let counted = MonthAxis(times: times + map.waitingTimes).map {
+                        Self.monthCounts(filter: filter, map: map, search: search, axis: $0)
+                    }
+                    return (library, map, search, peak, scene, counted)
                 }.value
                 self.library = library
                 let map = loaded.withRegions(loaded.regions.renamed(regionNames))
@@ -100,7 +106,8 @@ final class AppModel {
                 embeddingsTask = nil
                 let times = map.items.compactMap(\.time)
                 axis = MonthAxis(times: times + map.waitingTimes)
-                monthCounts = axis?.counts(of: times) ?? []
+                monthCounts = counted ?? []
+                countedFilter = filter.ignoringTime
                 // Largest first, like the viewer's chips in the order they turn up.
                 let tally = map.items.reduce(into: [String: Int]()) { $0[$1.platform, default: 0] += 1 }
                 platforms = tally.keys.sorted { tally[$0]! > tally[$1]! }
@@ -256,11 +263,24 @@ final class AppModel {
         filtering += 1
         let ticket = filtering
         let (filter, peak) = (self.filter, fullPeak)
+        // Dragging across the timeline changes only the range, which the bars ignore.
+        let axis = filter.ignoringTime == countedFilter ? nil : self.axis
         Task {
-            let scene = await Task.detached(priority: .userInitiated) {
-                TerrainScene(map: map, visible: filter.visible(in: map.items, search: search), fullPeak: peak)
+            let (scene, counts) = await Task.detached(priority: .userInitiated) {
+                let scene = TerrainScene(map: map, visible: filter.visible(in: map.items, search: search), fullPeak: peak)
+                return (scene, axis.map { Self.monthCounts(filter: filter, map: map, search: search, axis: $0) })
             }.value
-            if ticket == filtering { self.scene = scene }
+            guard ticket == filtering else { return }
+            self.scene = scene
+            if let counts {
+                monthCounts = counts
+                countedFilter = filter.ignoringTime
+            }
         }
+    }
+
+    /// Items per month under a filter, whatever its time range.
+    private nonisolated static func monthCounts(filter: MapFilter, map: LibraryMap, search: SearchIndex, axis: MonthAxis) -> [Int] {
+        axis.counts(of: filter.ignoringTime.visible(in: map.items, search: search).compactMap { map.items[Int($0)].time })
     }
 }

@@ -12,9 +12,11 @@ struct StrataScreen: View {
     var body: some View {
         ZStack(alignment: .topLeading) {
             if let strata, let map = model.map {
-                StrataCanvas(model: strata, map: map, range: model.filter.range, theme: theme,
+                StrataCanvas(model: strata, map: map, range: model.filter.range, marked: markedItem(in: map), theme: theme,
                              onTip: { tip = $0 },
                              onPick: { model.openRegion($0) })
+                    // The chart stays clear of the side panel, or recent months end up behind it.
+                    .padding(.trailing, model.selection == nil ? 0 : DetailPanel.width)
             }
             if let tip {
                 Text(tip.text)
@@ -40,6 +42,13 @@ struct StrataScreen: View {
     }
 }
 
+extension StrataScreen {
+    private func markedItem(in map: LibraryMap) -> MapItem? {
+        if case .item(let index) = model.selection { return map.items[Int(index)] }
+        return nil
+    }
+}
+
 struct StrataTip: Equatable {
     let text: String
     let x: Double
@@ -50,6 +59,7 @@ private struct StrataCanvas: NSViewRepresentable {
     let model: StrataModel
     let map: LibraryMap
     let range: ClosedRange<Int>?
+    let marked: MapItem?
     let theme: Theme
     let onTip: (StrataTip?) -> Void
     let onPick: (Int) -> Void
@@ -59,7 +69,7 @@ private struct StrataCanvas: NSViewRepresentable {
     func updateNSView(_ view: StrataNSView, context: Context) {
         view.onTip = onTip
         view.onPick = onPick
-        view.update(model: model, map: map, range: range, theme: theme)
+        view.update(model: model, map: map, range: range, marked: marked, theme: theme)
     }
 }
 
@@ -67,6 +77,7 @@ final class StrataNSView: NSView {
     private var model: StrataModel?
     private var map: LibraryMap?
     private var range: ClosedRange<Int>?
+    private var marked: MapItem?
     private var theme = Theme.light
     private var patternOf: [Int: Int] = [:]
     private var paths: [CGPath] = []
@@ -84,10 +95,11 @@ final class StrataNSView: NSView {
 
     override var isFlipped: Bool { true }
 
-    func update(model: StrataModel, map: LibraryMap, range: ClosedRange<Int>?, theme: Theme) {
+    func update(model: StrataModel, map: LibraryMap, range: ClosedRange<Int>?, marked: MapItem?, theme: Theme) {
         self.model = model
         self.map = map
         self.range = range
+        self.marked = marked
         self.theme = theme
         patternOf = Dictionary(map.regions.strataLayers().enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })
         builtFor = .zero
@@ -221,6 +233,44 @@ final class StrataNSView: NSView {
         }
         drawNames(model: model)
         drawAxis(c, axis: axis)
+        drawMarker(c, model: model)
+    }
+
+    /// The open item: a rule at its time, topped with the date, and a square on its layer.
+    private func drawMarker(_ c: CGContext, model: StrataModel) {
+        guard let marked, let place = model.place(of: marked) else { return }
+        let at = x(place.time, axis: model.axis).rounded() + 0.5
+        let bottom = bounds.height - margin.bottom
+
+        // A ground-colored edge keeps the rule visible over any pattern.
+        c.setStrokeColor(theme.ground.cg)
+        c.setLineWidth(3)
+        c.move(to: CGPoint(x: at, y: 16))
+        c.addLine(to: CGPoint(x: at, y: bottom))
+        c.strokePath()
+        c.setStrokeColor(theme.ink.cg)
+        c.setLineWidth(1)
+        c.move(to: CGPoint(x: at, y: 16))
+        c.addLine(to: CGPoint(x: at, y: bottom))
+        c.strokePath()
+
+        if let height = place.height {
+            let square = CGRect(x: at - 7, y: y(height, model: model).rounded() - 7, width: 14, height: 14)
+            c.setFillColor(theme.ground.cg)
+            c.fill(square.insetBy(dx: -2, dy: -2))
+            c.setFillColor(theme.ink.cg)
+            c.stroke(square.insetBy(dx: 0.5, dy: 0.5))
+            c.fill(square.insetBy(dx: 4, dy: 4))
+        }
+
+        let font = NSFont(name: "IBMPlexMono-Medium", size: 10) ?? .monospacedSystemFont(ofSize: 10, weight: .medium)
+        let date = NSAttributedString(string: Format.month(place.time), attributes: [.font: font, .foregroundColor: NSColor(cgColor: theme.ground.cg) ?? .white])
+        let size = date.size()
+        let width = size.width + 10
+        let box = CGRect(x: min(max(at - width / 2, 0), bounds.width - width), y: 0, width: width, height: 16)
+        c.setFillColor(theme.ink.cg)
+        c.fill(box)
+        date.draw(at: CGPoint(x: box.minX + 5, y: (16 - size.height) / 2))
     }
 
     /// Name each layer where the whole name fits inside it: the stretch of months under

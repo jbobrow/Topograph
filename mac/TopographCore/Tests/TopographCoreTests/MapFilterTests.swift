@@ -11,6 +11,16 @@ final class MapFilterTests: XCTestCase {
 
     private var search: SearchIndex { SearchIndex(items: items) }
 
+    func testIgnoringTimeKeepsEverythingElse() {
+        var filter = MapFilter()
+        filter.range = 1...2
+        filter.hiddenPlatforms = ["x"]
+        filter.groups = .creation
+        XCTAssertNil(filter.ignoringTime.range)
+        XCTAssertEqual(filter.ignoringTime.hiddenPlatforms, ["x"])
+        XCTAssertEqual(filter.ignoringTime.groups, .creation)
+    }
+
     func testCreationAndConsumptionSplitWhatYouDid() {
         func shows(_ item: ActionGroups, in position: ActionGroups) -> Bool {
             var filter = MapFilter()

@@ -52,6 +52,14 @@ public struct MapFilter: Sendable, Equatable {
         return true
     }
 
+    /// This filter without its time range, which is what the timeline's bars show: they
+    /// have to keep showing the months outside the range you're choosing.
+    public var ignoringTime: MapFilter {
+        var filter = self
+        filter.range = nil
+        return filter
+    }
+
     /// The items showing. With a query, `search` finds the words; it's built once per map
     /// because scanning every caption afresh is too slow to do as you type.
     public func visible(in items: [MapItem], search: SearchIndex) -> [Int32] {

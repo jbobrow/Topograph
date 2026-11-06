@@ -62,4 +62,41 @@ final class StrataTests: XCTestCase {
         XCTAssertEqual(path.currentPoint, points.last)
         XCTAssertTrue(path.boundingBoxOfPath.contains(CGPoint(x: 15, y: 5)))
     }
+
+    func testTheCurveValueIsWhatTheDrawnCurvePassesThrough() {
+        let values = [0.0, 4, 2, 8, 1]
+        // A knot of the curve sits at (a + 4b + c) / 6.
+        XCTAssertEqual(BasisCurve.value(values, at: 2), (4 + 4 * 2 + 8) / 6, accuracy: 1e-9)
+        // Between knots it stays continuous.
+        XCTAssertEqual(BasisCurve.value(values, at: 2.999_999), BasisCurve.value(values, at: 3), accuracy: 1e-4)
+        XCTAssertEqual(BasisCurve.value([5], at: 0), 5)
+    }
+
+    func testAnItemSitsInsideItsLayerAtItsTime() throws {
+        let t0 = 1_579_046_400
+        var items: [MapItem] = []
+        for month in 0..<24 {
+            for region in 1...2 {
+                items.append(MapItem(id: "\(month)-\(region)", x: 0, y: 0, resonance: 2, region: region, time: t0 + month * 30 * 86400))
+            }
+        }
+        let tree = RegionTree(records: [.init(id: 1, label: "a", x: 1, y: 1, r: 4), .init(id: 2, label: "b", x: 2, y: 2, r: 4)], items: items)
+        let map = LibraryMap(items: items, regions: tree)
+        let axis = try XCTUnwrap(MonthAxis(times: items.compactMap(\.time), calendar: utc))
+        let model = StrataModel(map: map, visible: items.indices.map(Int32.init), axis: axis)
+        let item = items[24]
+        let place = try XCTUnwrap(model.place(of: item))
+        XCTAssertEqual(place.time, item.time)
+        let height = try XCTUnwrap(place.height)
+        let month = try XCTUnwrap(axis.index(of: item.time!))
+        let layer = try XCTUnwrap(model.layers.first { $0.region == item.region })
+        XCTAssertGreaterThan(height, min(layer.bottom[month], layer.bottom[month + 1]) - 0.5)
+        XCTAssertLessThan(height, max(layer.top[month], layer.top[month + 1]) + 0.5)
+        var outside = item
+        outside.time = t0 - 400 * 86400
+        XCTAssertNil(model.place(of: outside))
+        var unplaced = item
+        unplaced.region = nil
+        XCTAssertNil(try XCTUnwrap(model.place(of: unplaced)).height)
+    }
 }

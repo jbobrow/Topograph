@@ -106,7 +106,8 @@ On a Mac, install with the `xattr` package (included in the install line above).
 
 The native app opens the library you built above and has every view: Terrain, Strata,
 Echoes, Palette, Drift, Process and Sources, with item and region panels, filters and
-the time scrubber. It needs macOS 14 or later and Xcode.
+the time scrubber. It needs macOS 14 or later and Xcode. The timeline's bars follow
+your filters, and with an item open, Strata marks where and when it sits.
 
 ```bash
 xcodebuild -downloadComponent MetalToolchain   # once, if Xcode doesn't have it yet

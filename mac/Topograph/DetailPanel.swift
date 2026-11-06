@@ -4,6 +4,8 @@ import TopographCore
 
 /// The side panel: one item, one region, or what a search found.
 struct DetailPanel: View {
+    static let width = 380.0
+
     let model: AppModel
     let library: Library
     let map: LibraryMap
@@ -34,13 +36,17 @@ struct DetailPanel: View {
                 .padding(16)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            // With an always-visible scrollbar taking up width, some items sent layout into a
+            // loop, which AppKit ends by crashing the app ("more Update Constraints in Window
+            // passes than there are views in the window").
+            .scrollIndicators(.never)
             Button("×") { model.closePanel() }
                 .buttonStyle(SquareKeyStyle(theme: theme))
                 .keyboardShortcut(.cancelAction)
                 .accessibilityLabel("Close")
                 .padding(16)
         }
-        .frame(width: 380)
+        .frame(width: Self.width)
         .frame(maxHeight: .infinity)
         .background(theme.ground.color)
         .overlay(alignment: .leading) { Rectangle().fill(theme.ink.color).frame(width: 1) }

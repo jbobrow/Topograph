@@ -90,6 +90,8 @@ public struct StrataModel: Sendable {
     public let layers: [Layer]
     public let low: Double
     public let high: Double
+    /// Each region's layer, as a position in `layers`.
+    private let layerOfRegion: [Int: Int]
 
     public init(map: LibraryMap, visible: [Int32], axis: MonthAxis) {
         let cut = map.regions.strataLayers()
@@ -119,9 +121,23 @@ public struct StrataModel: Sendable {
         layers = stacked.map { (index, bottom, top) in
             Layer(region: keys[index], raw: table[index], bottom: bottom, top: top)
         }
+        // Regions inside a layer's region belong to that layer too.
+        let positionOfCut = Dictionary(uniqueKeysWithValues: stacked.enumerated().map { ($1.index, $0) })
+        layerOfRegion = layerOf.compactMapValues { positionOfCut[$0] }
         low = layers.flatMap(\.bottom).min() ?? 0
         high = layers.flatMap(\.top).max() ?? 1
         self.axis = axis
+    }
+
+    /// Where an item belongs on the chart: its time, and the height of the middle of its
+    /// layer then, in the same units as `low` and `high`. No height if it's in no layer.
+    public func place(of item: MapItem) -> (time: Int, height: Double?)? {
+        guard let time = item.time, let month = axis.index(of: time) else { return nil }
+        guard let region = item.region, let position = layerOfRegion[region] else { return (time, nil) }
+        let span = Double(axis.edges[month + 1] - axis.edges[month])
+        let at = Double(month) + Double(time - axis.edges[month]) / span
+        let layer = layers[position]
+        return (time, (BasisCurve.value(layer.top, at: at) + BasisCurve.value(layer.bottom, at: at)) / 2)
     }
 
     static func smoothed(_ values: [Double]) -> [Double] {
@@ -203,6 +219,19 @@ public struct StrataModel: Sendable {
 
 /// `d3.curveBasis`, as a smooth line through a series of points.
 public enum BasisCurve {
+    /// The height of the curve through `values` at a fractional position along them, so a
+    /// point can sit on what `append` draws rather than on the straight line between months.
+    public static func value(_ values: [Double], at position: Double) -> Double {
+        guard let last = values.indices.last, last > 0 else { return values.first ?? 0 }
+        let clamped = min(max(position, 0), Double(last))
+        let i = min(Int(clamped), last - 1)
+        let t = clamped - Double(i)
+        func point(_ index: Int) -> Double { values[min(max(index, 0), last)] }
+        let (a, b, c, d) = (point(i - 1), point(i), point(i + 1), point(i + 2))
+        let t2 = t * t, t3 = t2 * t
+        return ((1 - t) * (1 - t) * (1 - t) * a + (3 * t3 - 6 * t2 + 4) * b + (-3 * t3 + 3 * t2 + 3 * t + 1) * c + t3 * d) / 6
+    }
+
     /// Adds the curve to `path`. It continues from the current point when `joined`.
     public static func append(_ points: [CGPoint], to path: CGMutablePath, joined: Bool) {
         guard let first = points.first else { return }
