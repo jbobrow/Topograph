@@ -7,6 +7,8 @@ struct EchoesScreen: View {
     let model: AppModel
     let theme: Theme
     @State private var echoes: [Echo]?
+    /// The scene `echoes` were found in. A newer one means they're being looked for again.
+    @State private var foundIn: UUID?
 
     var body: some View {
         ScrollView {
@@ -14,7 +16,9 @@ struct EchoesScreen: View {
                 Text("themes that came back")
                     .font(PlexMono.font(.semibold, size: 16))
                     .foregroundStyle(theme.ink.color)
-                if let echoes, echoes.isEmpty {
+                if foundIn != model.scene?.id {
+                    LoadingNote(text: "looking for themes that came back", theme: theme)
+                } else if let echoes, echoes.isEmpty {
                     Text("Nothing here has gone quiet for nine months and come back.")
                         .font(PlexSans.font(size: 13)).foregroundStyle(theme.secondary.color)
                 }
@@ -31,6 +35,8 @@ struct EchoesScreen: View {
             echoes = await Task.detached(priority: .userInitiated) {
                 Echoes.find(map: scene.map, visible: scene.visible, axis: axis)
             }.value
+            guard !Task.isCancelled else { return }
+            foundIn = scene.id
         }
     }
 
@@ -73,32 +79,33 @@ struct EchoesScreen: View {
     }
 }
 
-/// Your visual taste with the subject stripped away: each picture's strongest color,
-/// hue around the circle, lighter toward the middle.
+/// Your visual taste with the subject stripped away: each picture's strongest color. On
+/// the wheel, hue goes around and lighter is toward the middle. As a cylinder, hue goes
+/// around, more colorful is farther out, and light rises to the top. Through time, it's
+/// Strata's chart with bands of color for layers.
 struct PaletteScreen: View {
     let model: AppModel
     let theme: Theme
-    @State private var image: CGImage?
-    @State private var dots: [(index: Int32, point: CGPoint)] = []
     @State private var hover: Hover?
     @State private var cardHeight: CGFloat = 0
-
-    private struct Job: Equatable {
-        let scene: UUID?
-        let size: CGSize
-        let dark: Bool
-    }
+    @State private var space: PaletteSpace?
 
     var body: some View {
         GeometryReader { geometry in
             ZStack(alignment: .topLeading) {
-                if let image {
-                    Image(decorative: image, scale: 2)
-                        .interpolation(.none)
+                if model.paletteView == .time {
+                    ColorStrataCanvas(model: model, theme: theme)
+                } else {
+                    PaletteCanvas(space: space, scene: model.scene, root: model.library?.root, controller: model.palette,
+                                  camera: model.paletteCamera, selected: selectedItem, imageMode: model.imageMode,
+                                  onCamera: { camera, size in
+                                      model.paletteCamera = camera
+                                      model.paletteSize = size
+                                  },
+                                  onHover: { hover = $0 },
+                                  onPick: { model.openItem($0) })
                 }
-                PointerArea(onMove: { moved($0, size: geometry.size) },
-                            onExit: { hover = nil },
-                            onClick: { if let hover { model.openItem(hover.item) } })
+                PaletteChrome(model: model, theme: theme, space: space)
                 if let hover, let map = model.map, let library = model.library {
                     HoverCard(item: map.items[Int(hover.item)], library: library, theme: theme)
                         .frame(width: 260)
@@ -109,91 +116,220 @@ struct PaletteScreen: View {
                         .allowsHitTesting(false)
                 }
             }
-            .task(id: Job(scene: model.scene?.id, size: geometry.size, dark: theme.ink.red > 0.5)) {
-                await draw(size: geometry.size)
-            }
         }
         .background(theme.ground.color)
-    }
-
-    private func draw(size: CGSize) async {
-        guard let scene = model.scene, size.width > 0 else { return }
-        let ground = theme.ground.cg
-        let result = await Task.detached(priority: .userInitiated) { () -> (CGImage?, [(index: Int32, point: CGPoint)]) in
-            let scale = 2.0
-            let width = Int(size.width * scale), height = Int(size.height * scale)
-            guard let c = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
-                                    space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return (nil, []) }
-            c.setFillColor(ground)
-            c.fill(CGRect(x: 0, y: 0, width: width, height: height))
-            let radius = min(size.width, size.height) / 2 - 24
-            var dots: [(index: Int32, point: CGPoint)] = []
-            for index in scene.visible {
-                let item = scene.map.items[Int(index)]
-                guard let rgb = item.color else { continue }
-                let at = PaletteLayout.position(rgb: rgb, seed: Int(index))
-                let point = CGPoint(x: size.width / 2 + at.x * radius, y: size.height / 2 + at.y * radius)
-                dots.append((index, point))
-                c.setFillColor(CGColor(srgbRed: CGFloat((rgb >> 16) & 0xff) / 255, green: CGFloat((rgb >> 8) & 0xff) / 255,
-                                       blue: CGFloat(rgb & 0xff) / 255, alpha: 1))
-                c.fill(CGRect(x: point.x * scale - 4, y: (size.height - point.y) * scale - 4, width: 8, height: 8))
-            }
-            return (c.makeImage(), dots)
-        }.value
-        image = result.0
-        dots = result.1
-    }
-
-    private func moved(_ point: CGPoint, size: CGSize) {
-        var best: Int32?
-        var bestDistance: CGFloat = 64     // within 8 points
-        for dot in dots {
-            let dx = dot.point.x - point.x, dy = dot.point.y - point.y
-            let distance = dx * dx + dy * dy
-            if distance < bestDistance {
-                bestDistance = distance
-                best = dot.index
-            }
+        .task(id: model.map?.items.count) {
+            guard let map = model.map else { return }
+            space = await Task.detached(priority: .userInitiated) { PaletteSpace(items: map.items) }.value
         }
-        hover = best.map { Hover(item: $0, location: point, mapSize: size) }
+    }
+
+    private var selectedItem: Int32? {
+        if case .item(let index) = model.selection { return index }
+        return nil
     }
 }
 
-/// Mouse movement and clicks for a SwiftUI view, in points, y down.
-struct PointerArea: NSViewRepresentable {
-    let onMove: (CGPoint) -> Void
-    let onExit: () -> Void
-    let onClick: () -> Void
+/// Color through time, on Strata's chart.
+private struct ColorStrataCanvas: View {
+    let model: AppModel
+    let theme: Theme
+    @State private var fallback: StrataModel?
+    @State private var colors: [Int: CGColor]?
+    @State private var tip: StrataTip?
 
-    final class Area: NSView {
-        var onMove: ((CGPoint) -> Void)?
-        var onExit: (() -> Void)?
-        var onClick: (() -> Void)?
-        private var tracking: NSTrackingArea?
-
-        override var isFlipped: Bool { true }
-
-        override func updateTrackingAreas() {
-            super.updateTrackingAreas()
-            if let tracking { removeTrackingArea(tracking) }
-            let area = NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
-                                      owner: self, userInfo: nil)
-            addTrackingArea(area)
-            tracking = area
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            if let chart = model.scene?.colorStrata ?? fallback, let colors {
+                StrataCanvas(model: chart, labels: { ColorBands.names.indices.contains($0) ? ColorBands.names[$0] : nil },
+                             patterns: [:], colors: colors, range: model.scene?.range, marked: markedItem, theme: theme,
+                             onTip: { tip = $0 }, onPick: { model.openColorBand($0) })
+                    .padding(.top, 34)
+                    .padding(.trailing, model.selection == nil ? 0 : DetailPanel.width)
+            } else {
+                LoadingNote(text: "sorting colors by time", theme: theme)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            if let tip {
+                Text(tip.text)
+                    .font(PlexMono.font(.regular, size: 11))
+                    .foregroundStyle(theme.ink.color)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background(theme.surface.color)
+                    .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(theme.ink.color, lineWidth: 1))
+                    .frame(maxWidth: 260, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .offset(x: tip.x, y: tip.y + 34)
+                    .allowsHitTesting(false)
+            }
         }
-
-        override func mouseMoved(with event: NSEvent) { onMove?(convert(event.locationInWindow, from: nil)) }
-        override func mouseExited(with event: NSEvent) { onExit?() }
-        override func mouseUp(with event: NSEvent) { onClick?() }
+        // For a scene made while another view was showing, and for the bands' own colors.
+        .task(id: model.scene?.id) {
+            guard let scene = model.scene, let axis = model.axis else { return }
+            if colors == nil {
+                let means = await Task.detached(priority: .userInitiated) { ColorBands.colors(of: scene.map.items) }.value
+                colors = Dictionary(uniqueKeysWithValues: means.enumerated().map { band, mean in
+                    (band, CGColor(srgbRed: CGFloat(mean.x), green: CGFloat(mean.y), blue: CGFloat(mean.z), alpha: 1))
+                })
+            }
+            guard scene.colorStrata == nil else { return }
+            let share = model.paletteShowsShare
+            fallback = await Task.detached(priority: .userInitiated) {
+                StrataModel(colorsOf: scene.map, visible: scene.visible, axis: axis, share: share)
+            }.value
+        }
     }
 
-    func makeNSView(context: Context) -> Area { Area() }
+    private var markedItem: MapItem? {
+        if case .item(let index) = model.selection, let map = model.map { return map.items[Int(index)] }
+        return nil
+    }
+}
 
-    func updateNSView(_ view: Area, context: Context) {
-        view.onMove = onMove
-        view.onExit = onExit
-        view.onClick = onClick
+/// What floats over the palette: how it's standing, where you are, the zoom keys.
+private struct PaletteChrome: View {
+    let model: AppModel
+    let theme: Theme
+    let space: PaletteSpace?
+
+    private static let kinds: [(PaletteViewKind, String, KeyEquivalent)] = [
+        (.wheel, "wheel", "e"), (.cylinder, "cylinder", "d"), (.time, "through time", "j"),
+    ]
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            if model.paletteView != .time { axisLabels }
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 4) {
+                    ForEach(Self.kinds, id: \.1) { kind, label, key in
+                        Button(label) { choose(kind) }
+                            .buttonStyle(KeyStyle(theme: theme, led: model.paletteView == kind))
+                            .hotkey("⌘\(String(key.character).uppercased())", key: key, model: model, theme: theme)
+                    }
+                    if model.paletteView == .time {
+                        Button("stacked (percent)") { model.paletteShowsShare.toggle() }
+                            .buttonStyle(KeyStyle(theme: theme, led: model.paletteShowsShare))
+                            .help("On, each month fills the height, showing its mix of colors. Off, thickness shows how much there was.")
+                            .padding(.leading, 10)
+                    }
+                }
+                Spacer()
+                if model.paletteView == .wheel {
+                    PaletteMinimap(model: model, theme: theme, space: space)
+                }
+                // Through time, the chart's years are along the bottom here.
+                if model.paletteView != .time, let scene = model.scene, let map = model.map {
+                    Readout(visible: scene.visible.count, total: map.items.count, waiting: map.waiting, theme: theme)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+
+            if model.paletteView != .time {
+                VStack(spacing: 4) {
+                    Spacer()
+                    // Their shortcuts are in the Map menu.
+                    Button("+", action: model.palette.zoomIn).accessibilityLabel("Zoom in")
+                        .hotkey("⌘+", placement: .beside, model: model, theme: theme)
+                    Button("−", action: model.palette.zoomOut).accessibilityLabel("Zoom out")
+                        .hotkey("⌘-", placement: .beside, model: model, theme: theme)
+                    Button("fit", action: model.palette.fit).accessibilityLabel("Show everything")
+                        .hotkey("⌘0", placement: .beside, model: model, theme: theme)
+                }
+                .buttonStyle(SquareKeyStyle(theme: theme))
+                .padding(.trailing, 16 + (model.selection == nil ? 0 : DetailPanel.width))
+                .padding(.bottom, 12)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+            }
+        }
+    }
+
+    private func choose(_ kind: PaletteViewKind) {
+        model.paletteView = kind
+        // The canvas may be just coming back, so this waits a turn for it to be there.
+        if kind != .time {
+            DispatchQueue.main.async { model.palette.setCylinder(kind == .cylinder) }
+        }
+    }
+
+    /// Which way is which, once it's standing up.
+    @ViewBuilder
+    private var axisLabels: some View {
+        let camera = model.paletteCamera
+        if camera.solid > 0.5, camera.pitch > 0.3, model.paletteSize.width > 0 {
+            let height = PaletteCamera.cylinderHeight * camera.solid
+            axisLabel("light", at: camera.project(x: 0, y: 0, z: height, size: model.paletteSize).point)
+            axisLabel("dark", at: camera.project(x: 0, y: 0, z: -height, size: model.paletteSize).point)
+        }
+    }
+
+    private func axisLabel(_ text: String, at point: CGPoint) -> some View {
+        Text(text)
+            .font(PlexMono.font(.medium, size: 10))
+            .foregroundStyle(theme.ink.color)
+            .padding(.horizontal, 4)
+            .frame(height: 14)
+            .background(theme.surface.color, in: Rectangle())
+            .position(x: point.x, y: point.y)
+            .allowsHitTesting(false)
+    }
+}
+
+/// The whole wheel with what's showing marked, while zoomed in.
+private struct PaletteMinimap: View {
+    let model: AppModel
+    let theme: Theme
+    let space: PaletteSpace?
+    @State private var picture: CGImage?
+    @State private var drawing = false
+    @Environment(\.displayScale) private var displayScale
+
+    private let side = 168.0
+    /// Units from the middle shown either way, which takes in the guide ring.
+    private let reach = 1.1
+
+    var body: some View {
+        if model.paletteCamera.isZoomedIn, let scene = model.scene, model.paletteSize.width > 0 {
+            let shown = model.paletteCamera.shownOnWheel(size: model.paletteSize)
+            let perUnit = side / (reach * 2)
+            MinimapDial(picture: picture, side: side,
+                        frame: CGRect(x: (shown.minX + reach) * perUnit, y: (shown.minY + reach) * perUnit,
+                                      width: shown.width * perUnit, height: shown.height * perUnit),
+                        theme: theme, tinted: false,
+                        onMove: { model.palette.center(x: $0.x / perUnit - reach, y: $0.y / perUnit - reach) },
+                        onPointer: { model.palette.pointerIsOnMinimap = $0 })
+                .task(id: scene.id) { await drawLatest(perUnit: perUnit) }
+        }
+    }
+
+    /// One at a time, going on to whatever's newest.
+    private func drawLatest(perUnit: Double) async {
+        guard !drawing, let space else { return }
+        drawing = true
+        defer { drawing = false }
+        let (scale, side, reach, ground) = (displayScale, side, reach, theme.surface.cg)
+        var drawn: UUID?
+        while let scene = model.scene, scene.id != drawn {
+            drawn = scene.id
+            picture = await Task.detached(priority: .utility) { () -> CGImage? in
+                let pixels = Int(side * scale)
+                guard let c = CGContext(data: nil, width: pixels, height: pixels, bitsPerComponent: 8, bytesPerRow: 0,
+                                        space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+                c.setFillColor(ground)
+                c.fill(CGRect(x: 0, y: 0, width: pixels, height: pixels))
+                let toPixels = Double(pixels) / (reach * 2)
+                for place in space.showing(scene.visible).reversed() {
+                    let p = space.places[Int(place)]
+                    c.setFillColor(CGColor(srgbRed: CGFloat(p.color.x), green: CGFloat(p.color.y), blue: CGFloat(p.color.z), alpha: 1))
+                    c.fill(CGRect(x: (Double(p.wheel.x) + reach) * toPixels - scale, y: Double(pixels) - (Double(p.wheel.y) + reach) * toPixels - scale,
+                                  width: scale * 2, height: scale * 2))
+                }
+                return c.makeImage()
+            }.value
+        }
     }
 }
 
@@ -203,6 +339,7 @@ struct DriftScreen: View {
     let theme: Theme
     @State private var trail: [Int32] = []
     @State private var detail: ItemDetail?
+    @State private var detailOf: Int32?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -250,7 +387,10 @@ struct DriftScreen: View {
                     }
                     .frame(maxHeight: .infinity, alignment: .top)
                     PanelHeading(text: "nearest in taste", theme: theme)
-                    let neighbors = (detail?.neighbors ?? []).compactMap { map.indexOfID[$0] }
+                    if detailOf != current {
+                        LoadingNote(text: "finding what's nearby", theme: theme)
+                    }
+                    let neighbors = (detailOf == current ? detail?.neighbors ?? [] : []).compactMap { map.indexOfID[$0] }
                     HStack(spacing: 4) {
                         ForEach(neighbors.prefix(10), id: \.self) { index in
                             Button { trail.append(index) } label: {
@@ -270,6 +410,7 @@ struct DriftScreen: View {
         .task(id: trail.last) {
             guard let current = trail.last, let library = model.library, let id = model.map?.items[Int(current)].id else { return }
             detail = try? await Task.detached { try library.detail(of: id) }.value
+            if !Task.isCancelled { detailOf = current }
         }
     }
 
@@ -297,9 +438,13 @@ struct ProcessScreen: View {
         HStack(spacing: 0) {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
-                    Text("\((sequences ?? []).count.formatted()) pieces, in versions")
-                        .font(PlexMono.font(.semibold, size: 16))
-                        .foregroundStyle(theme.ink.color)
+                    if let sequences {
+                        Text("\(sequences.count.formatted()) pieces, in versions")
+                            .font(PlexMono.font(.semibold, size: 16))
+                            .foregroundStyle(theme.ink.color)
+                    } else {
+                        LoadingNote(text: "looking for versions of your work", theme: theme)
+                    }
                     if let map = model.map, let library = model.library {
                         ForEach(sequences ?? [], id: \.self) { sequence in
                             Button {

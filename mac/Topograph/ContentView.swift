@@ -20,7 +20,7 @@ struct ContentView: View {
             ZStack(alignment: .topTrailing) {
                 // The map stays alive under other views so it keeps your place.
                 TerrainView(scene: model.scene, root: model.library?.root, controller: model.controller,
-                            imageMode: model.imageMode, selected: selectedItem, isActive: model.section == .terrain,
+                            imageMode: model.mapImageMode, selected: selectedItem, isActive: model.section == .terrain,
                             isPlaying: model.isPlaying,
                             onFailure: { model.fail($0) },
                             onHover: { model.hover = $0 },
@@ -190,7 +190,6 @@ private struct MinimapPanel: View {
     let model: AppModel
     let theme: Theme
     @State private var picture: CGImage?
-    @State private var grab: CGSize?
     @State private var drawing = false
     @Environment(\.displayScale) private var displayScale
 
@@ -199,64 +198,18 @@ private struct MinimapPanel: View {
 
     var body: some View {
         if let viewport = model.viewport, viewport.transform.isZoomedIn(viewSize: viewport.size), let scene = model.scene {
-            let frame = viewFrame(viewport)
-            let shown = frame.intersection(CGRect(x: 0, y: 0, width: side, height: side))
-            ZStack(alignment: .topLeading) {
-                theme.surface.color
-                if let picture {
-                    Image(decorative: picture, scale: displayScale)
-                        .renderingMode(.template)
-                        .foregroundStyle(theme.ink.color)
-                }
-                // What's showing. Its edge stays visible where it runs past the map's.
-                Rectangle()
-                    .strokeBorder(theme.ink.color, lineWidth: 1.5)
-                    .frame(width: max(shown.width, 6), height: max(shown.height, 6))
-                    .offset(x: shown.minX, y: shown.minY)
-            }
-            .frame(width: side, height: side)
-            .clipShape(RoundedRectangle(cornerRadius: 3))
-            .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(theme.ink.color, lineWidth: 1))
-            .contentShape(Rectangle())
-            .gesture(DragGesture(minimumDistance: 0)
-                .onChanged { changed($0, frame: frame) }
-                .onEnded { _ in
-                    grab = nil
-                    NSCursor.openHand.set()
-                })
-            .onContinuousHover { phase in
-                if case .active = phase {
-                    model.controller.pointerIsOnMinimap = true
-                    if grab == nil { NSCursor.openHand.set() }
-                } else {
-                    model.controller.pointerIsOnMinimap = false
-                }
-            }
-            .onDisappear { model.controller.pointerIsOnMinimap = false }
-            .accessibilityLabel("Minimap")
-            .task(id: scene.id) { await drawLatest() }
+            let shown = viewport.transform.visibleRect(viewSize: viewport.size)
+            MinimapDial(picture: picture, side: side,
+                        frame: CGRect(x: shown.minX * perMapUnit, y: shown.minY * perMapUnit,
+                                      width: shown.width * perMapUnit, height: shown.height * perMapUnit),
+                        theme: theme, tinted: true,
+                        onMove: { point in
+                            model.controller.center(x: min(max(point.x / perMapUnit, 0), DensityField.mapSize),
+                                                    y: min(max(point.y / perMapUnit, 0), DensityField.mapSize))
+                        },
+                        onPointer: { model.controller.pointerIsOnMinimap = $0 })
+                .task(id: scene.id) { await drawLatest() }
         }
-    }
-
-    /// What's showing, in the minimap's points. Never too small to see or to take hold of.
-    private func viewFrame(_ viewport: MapViewport) -> CGRect {
-        let shown = viewport.transform.visibleRect(viewSize: viewport.size)
-        let box = CGRect(x: shown.minX * perMapUnit, y: shown.minY * perMapUnit, width: shown.width * perMapUnit, height: shown.height * perMapUnit)
-        let width = max(box.width, 6), height = max(box.height, 6)
-        return CGRect(x: box.midX - width / 2, y: box.midY - height / 2, width: width, height: height)
-    }
-
-    /// Taking hold of the marked part moves it from there; anywhere else jumps to that spot.
-    private func changed(_ value: DragGesture.Value, frame: CGRect) {
-        if grab == nil {
-            grab = frame.contains(value.startLocation)
-                ? CGSize(width: value.startLocation.x - frame.midX, height: value.startLocation.y - frame.midY)
-                : .zero
-            NSCursor.closedHand.set()
-        }
-        let x = (value.location.x - (grab?.width ?? 0)) / perMapUnit
-        let y = (value.location.y - (grab?.height ?? 0)) / perMapUnit
-        model.controller.center(x: min(max(x, 0), DensityField.mapSize), y: min(max(y, 0), DensityField.mapSize))
     }
 
     /// One at a time, always going on to whatever's newest, since scenes can change faster
@@ -274,6 +227,74 @@ private struct MinimapPanel: View {
                 Minimap.image(mask: Minimap.mask(field: scene.field, side: pixels, dot: dot), side: pixels)
             }.value
         }
+    }
+}
+
+/// A small picture of the whole with the part showing outlined. Press or drag to move:
+/// taking hold of the outline moves it from there, and anywhere else jumps to that spot.
+struct MinimapDial: View {
+    let picture: CGImage?
+    let side: Double
+    /// What's showing, in this view's points.
+    let frame: CGRect
+    let theme: Theme
+    /// Whether the picture is a mask for the theme's ink, not a picture in its own colors.
+    let tinted: Bool
+    let onMove: (CGPoint) -> Void
+    let onPointer: (Bool) -> Void
+    @State private var grab: CGSize?
+    @Environment(\.displayScale) private var displayScale
+
+    var body: some View {
+        // Never too small to see or to take hold of.
+        let width = max(frame.width, 6), height = max(frame.height, 6)
+        let held = CGRect(x: frame.midX - width / 2, y: frame.midY - height / 2, width: width, height: height)
+        let shown = held.intersection(CGRect(x: 0, y: 0, width: side, height: side))
+        ZStack(alignment: .topLeading) {
+            theme.surface.color
+            if let picture {
+                if tinted {
+                    Image(decorative: picture, scale: displayScale)
+                        .renderingMode(.template)
+                        .foregroundStyle(theme.ink.color)
+                } else {
+                    Image(decorative: picture, scale: displayScale)
+                }
+            }
+            // Its edge stays visible where it runs past the map's.
+            Rectangle()
+                .strokeBorder(theme.ink.color, lineWidth: 1.5)
+                .frame(width: max(shown.width, 6), height: max(shown.height, 6))
+                .offset(x: shown.minX, y: shown.minY)
+        }
+        .frame(width: side, height: side)
+        .clipShape(RoundedRectangle(cornerRadius: 3))
+        .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(theme.ink.color, lineWidth: 1))
+        .contentShape(Rectangle())
+        .gesture(DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                if grab == nil {
+                    grab = held.contains(value.startLocation)
+                        ? CGSize(width: value.startLocation.x - held.midX, height: value.startLocation.y - held.midY)
+                        : .zero
+                    NSCursor.closedHand.set()
+                }
+                onMove(CGPoint(x: value.location.x - (grab?.width ?? 0), y: value.location.y - (grab?.height ?? 0)))
+            }
+            .onEnded { _ in
+                grab = nil
+                NSCursor.openHand.set()
+            })
+        .onContinuousHover { phase in
+            if case .active = phase {
+                onPointer(true)
+                if grab == nil { NSCursor.openHand.set() }
+            } else {
+                onPointer(false)
+            }
+        }
+        .onDisappear { onPointer(false) }
+        .accessibilityLabel("Minimap")
     }
 }
 
@@ -298,7 +319,7 @@ private struct WhereBar: View {
     }
 }
 
-private struct Readout: View {
+struct Readout: View {
     let visible: Int
     let total: Int
     let waiting: Int

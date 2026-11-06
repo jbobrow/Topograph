@@ -20,9 +20,9 @@ struct TopographApp: App {
             // ⌘P plays the timeline, and there's nothing here to print.
             CommandGroup(replacing: .printItem) {}
             CommandMenu("Map") {
-                Button("Zoom In") { model.controller.zoomIn() }.keyboardShortcut("=")
-                Button("Zoom Out") { model.controller.zoomOut() }.keyboardShortcut("-")
-                Button("Show Everything") { model.controller.fit() }.keyboardShortcut("0")
+                Button("Zoom In") { model.zoomIn() }.keyboardShortcut("=")
+                Button("Zoom Out") { model.zoomOut() }.keyboardShortcut("-")
+                Button("Show Everything") { model.fit() }.keyboardShortcut("0")
                 Divider()
                 Button("Reload Library") { model.load() }.keyboardShortcut("r")
             }

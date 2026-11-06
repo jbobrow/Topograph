@@ -122,6 +122,10 @@ fingers also move it, pinching zooms, and with a mouse the wheel zooms. While yo
 zoomed in, a minimap at the bottom left shows where you are: press or drag on it to go
 somewhere else. Hold ⌘, or rest on a key for a second, to see its shortcut. Space also pauses the timeline while it's playing.
 
+Palette has three views. **Wheel** moves like the terrain. **Cylinder** stands the same
+pictures up, with hue around it, colorfulness out from its axis and light to dark from top
+to bottom: drag to turn it. **Through time** is Strata's chart with bands of color for layers.
+
 **Sources** adds your history by running the `topograph` commands below for you, only
 when you ask. It finds them in this repo's `.venv`, or at `TOPOGRAPH_CLI`. Folders get a
 dry run first, so you see what would be read.

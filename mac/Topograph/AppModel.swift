@@ -15,6 +15,13 @@ enum Selection: Equatable {
     case region(Int)
     /// What a search by meaning found, best first.
     case found(String)
+    /// The pictures in one band of color.
+    case colorBand(Int)
+}
+
+/// The palette's three ways of looking: two across color, and one through time.
+enum PaletteViewKind: Sendable {
+    case wheel, cylinder, time
 }
 
 /// Loads the library off the main thread and keeps what's showing.
@@ -44,8 +51,20 @@ final class AppModel {
     private(set) var commandHeld = false
     var selection: Selection?
     var hover: Hover?
+    /// How pictures show on the map and in most views. Gray unless you've changed it.
+    private(set) var mapImageMode: ImageMode {
+        didSet { UserDefaults.standard.set(mapImageMode.rawValue, forKey: "imageMode") }
+    }
+    /// Palette keeps its own, in color unless you've changed it, since color is its subject.
+    private var paletteImageMode: ImageMode {
+        didSet { UserDefaults.standard.set(paletteImageMode.rawValue, forKey: "paletteImageMode") }
+    }
+    /// How pictures show in the view you're looking at.
     var imageMode: ImageMode {
-        didSet { UserDefaults.standard.set(imageMode.rawValue, forKey: "imageMode") }
+        get { section == .palette ? paletteImageMode : mapImageMode }
+        set {
+            if section == .palette { paletteImageMode = newValue } else { mapImageMode = newValue }
+        }
     }
     var filter: MapFilter = {
         var filter = MapFilter()
@@ -56,6 +75,17 @@ final class AppModel {
         didSet { if filter != oldValue { applyFilter() } }
     }
     let controller = TerrainController()
+    let palette = PaletteController()
+    /// Kept here so the palette is as you left it when you come back to it.
+    var paletteCamera = PaletteCamera()
+    var paletteSize = CGSize.zero
+    var paletteView = PaletteViewKind.wheel {
+        didSet { if paletteView != oldValue, paletteView == .time { applyFilter() } }
+    }
+    /// Whether color through time shows each color's part of the month, or how much of it.
+    var paletteShowsShare = true {
+        didSet { if paletteShowsShare != oldValue { applyFilter() } }
+    }
     let pipeline = PipelineRunner()
     /// Read fresh from the file every few seconds while the Sources page is showing.
     var sources: LibrarySources?
@@ -76,11 +106,11 @@ final class AppModel {
     private var updating = false
     private var updateAgain = false
     private var lastUpdate: CFTimeInterval = 0
-    /// Terrain and Strata are cheap to redraw and worth seeing at full speed. The other views
-    /// do more work per update, so they follow more slowly.
+    /// Terrain, Strata and Palette are cheap to redraw and worth seeing at full speed. Echoes
+    /// does more work per update, so it follows more slowly.
     private var updateStep: CFTimeInterval {
         switch section {
-        case .terrain, .strata: 0
+        case .terrain, .strata, .palette: 0
         default: 0.14
         }
     }
@@ -96,7 +126,8 @@ final class AppModel {
     private var encoderTask: Task<CLIPEncoder?, Never>?
 
     init() {
-        imageMode = UserDefaults.standard.string(forKey: "imageMode").flatMap(ImageMode.init) ?? .gray
+        mapImageMode = UserDefaults.standard.string(forKey: "imageMode").flatMap(ImageMode.init) ?? .gray
+        paletteImageMode = UserDefaults.standard.string(forKey: "paletteImageMode").flatMap(ImageMode.init) ?? .color
         NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
             let held = event.modifierFlags.contains(.command)
             MainActor.assumeIsolated { self?.commandHeld = held }
@@ -199,8 +230,12 @@ final class AppModel {
     /// Whether find looks for what things are about, not the words in them.
     var findsByMeaning = false
     private var lastMeaningQuery: String?
+    private var bandToReturnTo: Int?
     /// The model is about 600 MB, so it's set up separately (mac/tools/convert_clip.py).
     let canFindByMeaning = CLIPEncoder.isInstalled()
+
+    /// Searches by meaning under way. The first has to load a model, which takes a moment.
+    private(set) var findingByMeaning = 0
 
     func find(_ text: String) async {
         let text = text.trimmingCharacters(in: .whitespaces)
@@ -210,6 +245,8 @@ final class AppModel {
             if case .found = selection { selection = nil }
             return
         }
+        findingByMeaning += 1
+        defer { findingByMeaning -= 1 }
         if encoderTask == nil {
             // Loads faster on the CPU, which is quick enough for one query at a time.
             encoderTask = Task.detached(priority: .userInitiated) { try? CLIPEncoder(computeUnits: .cpuOnly) }
@@ -236,16 +273,32 @@ final class AppModel {
 
     /// Closing an item goes back to the search results it came from.
     func closePanel() {
-        if case .item = selection, let query = lastMeaningQuery, filter.nearest != nil {
+        if case .item = selection, let bandToReturnTo {
+            selection = .colorBand(bandToReturnTo)
+        } else if case .item = selection, let query = lastMeaningQuery, filter.nearest != nil {
             selection = .found(query)
         } else {
             selection = nil
         }
+        if case .colorBand = selection {} else { bandToReturnTo = nil }
+    }
+
+    func openColorBand(_ band: Int) {
+        bandToReturnTo = nil
+        selection = .colorBand(band)
     }
 
     func setWhere(_ path: [Int]) { whereYouAre = path }
 
+    // MARK: Zoom, for whichever view can
+
+    func zoomIn() { section == .palette ? palette.zoomIn() : controller.zoomIn() }
+    func zoomOut() { section == .palette ? palette.zoomOut() : controller.zoomOut() }
+    func fit() { section == .palette ? palette.fit() : controller.fit() }
+
     func openItem(_ index: Int32, pan: Bool = false) {
+        // Closing it goes back to the band it was picked from.
+        if case .colorBand(let band) = selection { bandToReturnTo = band }
         selection = .item(index)
         if pan, section == .terrain, let item = map?.items[Int(index)] { controller.fly(toItem: item) }
     }
@@ -324,6 +377,8 @@ final class AppModel {
         let (filter, peak, generation) = (self.filter, fullPeak, mapGeneration)
         let current = slicer?.filter == filter.ignoringTime ? slicer : nil
         let (axis, order, wantsStrata) = (self.axis, current == nil ? nil : strataOrder, section == .strata)
+        let wantsColors = section == .palette && paletteView == .time
+        let share = paletteShowsShare
         let (scene, newSlicer, newOrder, counts) = await Task.detached(priority: .userInitiated) { () -> (TerrainScene, TimeSlicer, [Int]?, [Int]?) in
             let slicer = current ?? TimeSlicer(filter: filter, items: map.items, search: search)
             let counts = current == nil ? axis?.counts(of: slicer.times) : nil
@@ -331,7 +386,8 @@ final class AppModel {
             let visible = filter.nearest == nil ? slicer.visible(in: filter.range) : filter.visible(in: map.items, search: search)
             let order = order ?? axis.map { StrataModel.stackingOrder(map: map, visible: slicer.all, axis: $0) }
             let strata = wantsStrata ? axis.map { StrataModel(map: map, visible: visible, axis: $0, order: order) } : nil
-            return (TerrainScene(map: map, visible: visible, fullPeak: peak, strata: strata, range: filter.range), slicer, order, counts)
+            let colors = wantsColors ? axis.map { StrataModel(colorsOf: map, visible: visible, axis: $0, share: share) } : nil
+            return (TerrainScene(map: map, visible: visible, fullPeak: peak, strata: strata, colorStrata: colors, range: filter.range), slicer, order, counts)
         }.value
         guard generation == mapGeneration else { return }
         self.scene = scene

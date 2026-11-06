@@ -78,24 +78,49 @@ public enum Echoes {
 public enum PaletteLayout {
     /// `seed` spreads out colors that would otherwise land on one spot or one spoke.
     public static func position(rgb: UInt32, seed: Int = 0) -> (x: Double, y: Double) {
-        let r = Double((rgb >> 16) & 0xff) / 255, g = Double((rgb >> 8) & 0xff) / 255, b = Double(rgb & 0xff) / 255
-        let high = max(r, g, b), low = min(r, g, b), chroma = high - low
-        let lightness = (high + low) / 2
-        var hue = 0.0
-        if chroma > 0 {
-            if high == r { hue = ((g - b) / chroma).truncatingRemainder(dividingBy: 6) }
-            else if high == g { hue = (b - r) / chroma + 2 }
-            else { hue = (r - g) / chroma + 4 }
+        let color = Parts(rgb: rgb, seed: seed)
+        let radius = (1 - color.lightness) * (0.25 + 0.75 * color.saturation) * (0.94 + 0.12 * color.scatterB)
+        return (cos(color.angle) * radius, sin(color.angle) * radius)
+    }
+
+    /// The same colors in depth: hue around the cylinder, colorfulness out from its axis,
+    /// light to dark from top to bottom, `z` running from 1 to -1.
+    ///
+    /// Out from the axis is by chroma, not HSL's saturation, which rates a barely tinted
+    /// white as fully saturated and would send it to the rim.
+    public static func cylinder(rgb: UInt32, seed: Int = 0) -> (x: Double, y: Double, z: Double) {
+        let color = Parts(rgb: rgb, seed: seed)
+        let radius = pow(color.chroma, 0.75) * (0.97 + 0.06 * color.scatterB)
+        return (cos(color.angle) * radius, sin(color.angle) * radius, color.lightness * 2 - 1)
+    }
+
+    private struct Parts {
+        let chroma: Double
+        let lightness: Double
+        let saturation: Double
+        let angle: Double
+        let scatterB: Double
+
+        init(rgb: UInt32, seed: Int) {
+            let r = Double((rgb >> 16) & 0xff) / 255, g = Double((rgb >> 8) & 0xff) / 255, b = Double(rgb & 0xff) / 255
+            let high = max(r, g, b), low = min(r, g, b)
+            chroma = high - low
+            lightness = (high + low) / 2
+            var hue = 0.0
+            if chroma > 0 {
+                if high == r { hue = ((g - b) / chroma).truncatingRemainder(dividingBy: 6) }
+                else if high == g { hue = (b - r) / chroma + 2 }
+                else { hue = (r - g) / chroma + 4 }
+            }
+            // Grays have no hue of their own, so they gather near the middle in every direction.
+            // Near-grays have only a rough one, which would otherwise show as hard spokes.
+            saturation = min(chroma / max(1 - abs(2 * lightness - 1), 0.001), 1)
+            let scatterA = Double((seed &* 2654435761) & 0xffff) / 65535
+            scatterB = Double((seed &* 40503) & 0xffff) / 65535
+            let certainty = min(saturation / 0.3, 1)
+            let hueAngle = hue / 6 * 2 * .pi - .pi / 2
+            angle = hueAngle + (scatterA - 0.5) * 2 * .pi * (1 - certainty) + (scatterA - 0.5) * 0.28 * certainty
         }
-        // Grays have no hue of their own, so they gather near the middle in every direction.
-        // Near-grays have only a rough one, which would otherwise show as hard spokes.
-        let saturation = min(chroma / max(1 - abs(2 * lightness - 1), 0.001), 1)
-        let scatterA = Double((seed &* 2654435761) & 0xffff) / 65535, scatterB = Double((seed &* 40503) & 0xffff) / 65535
-        let certainty = min(saturation / 0.3, 1)
-        let hueAngle = hue / 6 * 2 * .pi - .pi / 2
-        let angle = hueAngle + (scatterA - 0.5) * 2 * .pi * (1 - certainty) + (scatterA - 0.5) * 0.28 * certainty
-        let radius = (1 - lightness) * (0.25 + 0.75 * saturation) * (0.94 + 0.12 * scatterB)
-        return (cos(angle) * radius, sin(angle) * radius)
     }
 }
 

@@ -128,4 +128,63 @@ final class StrataTests: XCTestCase {
         XCTAssertEqual(stack(months: 0..<6), stack(months: 12..<18))
         XCTAssertEqual(stack(months: 12..<18), stack(months: 24..<30))
     }
+
+    func testColorBandsSortColorsByHueAndNeutralsByLight() {
+        XCTAssertEqual(ColorBands.names[ColorBands.band(of: 0xff0000)], "reds")
+        XCTAssertEqual(ColorBands.names[ColorBands.band(of: 0xff0010)], "reds", "just past red, around the wheel")
+        XCTAssertEqual(ColorBands.names[ColorBands.band(of: 0xff0010 - 0x10 + 0x0020)], "reds")
+        XCTAssertEqual(ColorBands.names[ColorBands.band(of: 0x00ff00)], "greens")
+        XCTAssertEqual(ColorBands.names[ColorBands.band(of: 0x0000ff)], "blues")
+        XCTAssertEqual(ColorBands.names[ColorBands.band(of: 0xfafafa)], "whites")
+        XCTAssertEqual(ColorBands.names[ColorBands.band(of: 0x808080)], "grays")
+        XCTAssertEqual(ColorBands.names[ColorBands.band(of: 0x0a0a0a)], "blacks")
+        XCTAssertEqual(Set(ColorBands.stackOrder), Set(0..<ColorBands.count))
+    }
+
+    func testColorStrataFollowsColorThroughTime() throws {
+        let t0 = 1_579_046_400
+        var items: [MapItem] = []
+        for month in 0..<6 {
+            items.append(MapItem(id: "r\(month)", x: 0, y: 0, resonance: 2, time: t0 + month * 30 * 86400, color: 0xff0000))
+        }
+        items.append(MapItem(id: "none", x: 0, y: 0, resonance: 5, time: t0))
+        let map = LibraryMap(items: items, regions: RegionTree(records: [], items: items))
+        let axis = try XCTUnwrap(MonthAxis(times: items.compactMap(\.time), calendar: utc))
+        let model = StrataModel(colorsOf: map, visible: items.indices.map(Int32.init), axis: axis)
+        let reds = try XCTUnwrap(model.layers.first { $0.region == 0 })
+        XCTAssertEqual(reds.raw.reduce(0, +), 12, "what has no color isn't counted")
+        XCTAssertEqual(model.layers.count, ColorBands.count)
+        let place = try XCTUnwrap(model.place(of: items[2]))
+        XCTAssertNotNil(place.height)
+        XCTAssertNil(try XCTUnwrap(model.place(of: items[6])).height)
+    }
+
+    func testABandHoldsWhatsShowingInThatColorBestFirst() {
+        let items = [
+            MapItem(id: "quiet red", x: 0, y: 0, resonance: 1, color: 0xff0000),
+            MapItem(id: "blue", x: 0, y: 0, resonance: 9, color: 0x0000ff),
+            MapItem(id: "loud red", x: 0, y: 0, resonance: 5, color: 0xee1010),
+            MapItem(id: "no color", x: 0, y: 0, resonance: 9),
+            MapItem(id: "hidden red", x: 0, y: 0, resonance: 7, color: 0xff0000),
+        ]
+        let map = LibraryMap(items: items, regions: RegionTree(records: [], items: items))
+        let reds = ColorBands.band(of: 0xff0000)
+        XCTAssertEqual(ColorBands.items(in: reds, map: map, visible: [0, 1, 2, 3]), [2, 0])
+    }
+
+    func testColorShareFillsEveryMonthWithAnythingInIt() throws {
+        let t0 = 1_579_046_400
+        let items = [
+            MapItem(id: "a", x: 0, y: 0, resonance: 50, time: t0, color: 0xff0000),
+            MapItem(id: "b", x: 0, y: 0, resonance: 1, time: t0 + 300 * 86400, color: 0x0000ff),
+        ]
+        let map = LibraryMap(items: items, regions: RegionTree(records: [], items: items))
+        let axis = try XCTUnwrap(MonthAxis(times: items.compactMap(\.time), calendar: utc))
+        let model = StrataModel(colorsOf: map, visible: [0, 1], axis: axis, share: true)
+        let top = try XCTUnwrap(model.layers.last), bottom = try XCTUnwrap(model.layers.first)
+        XCTAssertEqual(top.top[0] - bottom.bottom[0], 1, accuracy: 1e-9, "a busy month")
+        XCTAssertEqual(top.top[axis.count - 1] - bottom.bottom[axis.count - 1], 1, accuracy: 1e-9, "a quiet one")
+        XCTAssertEqual(top.top[0], 0.5, accuracy: 1e-9, "centered, not wandering")
+        XCTAssertEqual(bottom.bottom[axis.count - 1], -0.5, accuracy: 1e-9)
+    }
 }

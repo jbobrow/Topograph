@@ -20,6 +20,8 @@ struct DetailPanel: View {
                         ItemPanel(model: model, library: library, map: map, theme: theme, index: index).id(index)
                     case .region(let id):
                         RegionPanel(model: model, library: library, map: map, theme: theme, id: id).id(id)
+                    case .colorBand(let band):
+                        ColorBandPanel(model: model, library: library, map: map, theme: theme, band: band).id(band)
                     case .found(let query):
                         Text(query)
                             .font(PlexMono.font(.medium, size: 13))
@@ -78,6 +80,7 @@ private struct ItemPanel: View {
     @State private var hero = 0
     @State private var fileMissing = false
     @State private var tributaries: [Int32] = []
+    @State private var findingTributaries = false
 
     private var item: MapItem { map.items[Int(index)] }
 
@@ -157,7 +160,10 @@ private struct ItemPanel: View {
                 PanelHeading(text: "region", theme: theme)
                 RegionPath(path: path, map: map, theme: theme) { model.openRegion($0) }
             }
-            if !tributaries.isEmpty {
+            if findingTributaries {
+                PanelHeading(text: "tributaries: kept in the months before", theme: theme)
+                LoadingNote(text: "looking through what you kept", theme: theme)
+            } else if !tributaries.isEmpty {
                 PanelHeading(text: "tributaries: kept in the months before", theme: theme)
                 ItemGrid(items: tributaries, map: map, library: library, mode: model.imageMode, theme: theme) {
                     model.openItem($0, pan: true)
@@ -174,7 +180,10 @@ private struct ItemPanel: View {
         .task(id: index) {
             let (library, id) = (library, item.id)
             detail = try? await Task.detached { try library.detail(of: id) }.value
-            guard item.mine, let store = await model.embeddings() else { return }
+            guard item.mine else { return }
+            findingTributaries = true
+            defer { findingTributaries = false }
+            guard let store = await model.embeddings() else { return }
             let (index, map) = (index, map)
             tributaries = await Task.detached { Tributaries.find(of: index, map: map, embeddings: store) }.value
         }
@@ -212,6 +221,64 @@ private struct ItemPanel: View {
     private var fileURL: URL? {
         guard let link = detail?.url, link.hasPrefix("file://") else { return nil }
         return URL(string: link)
+    }
+}
+
+/// The pictures in one band of color, among what's showing.
+private struct ColorBandPanel: View {
+    let model: AppModel
+    let library: Library
+    let map: LibraryMap
+    let theme: Theme
+    let band: Int
+    @State private var items: [Int32]?
+    @State private var swatch: Color?
+
+    private static let shown = 120
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                Rectangle().fill(swatch ?? theme.surface.color)
+                    .frame(width: 26, height: 26)
+                    .overlay(Rectangle().strokeBorder(theme.rule.color, lineWidth: 1))
+                Text(ColorBands.names[band])
+                    .font(PlexMono.font(.semibold, size: 16))
+                    .foregroundStyle(theme.ink.color)
+            }
+            .padding(.trailing, 36)
+            if let items {
+                Text("\(items.count.formatted()) pictures" + (items.count > Self.shown ? ", the \(Self.shown) most resonant here" : ""))
+                    .font(PlexMono.font(.regular, size: 11))
+                    .foregroundStyle(theme.secondary.color)
+                    .padding(.top, 8)
+                if let axis = model.axis {
+                    let times = items.compactMap { map.items[Int($0)].time }
+                    if times.count > 1 {
+                        PanelHeading(text: "when it was on your mind", theme: theme)
+                        QuarterBars(times: times, axis: axis, theme: theme)
+                    }
+                }
+                PanelHeading(text: "most resonant", theme: theme)
+                ItemGrid(items: Array(items.prefix(Self.shown)), map: map, library: library, mode: model.imageMode, theme: theme) {
+                    model.openItem($0)
+                }
+            } else {
+                LoadingNote(text: "gathering \(ColorBands.names[band])", theme: theme)
+                    .padding(.top, 12)
+            }
+        }
+        .task(id: model.scene?.id) {
+            guard let scene = model.scene else { return }
+            let (map, band) = (map, band)
+            let found = await Task.detached(priority: .userInitiated) { ColorBands.items(in: band, map: map, visible: scene.visible) }.value
+            guard !Task.isCancelled else { return }
+            items = found
+            if swatch == nil {
+                let mean = await Task.detached(priority: .userInitiated) { ColorBands.colors(of: map.items)[band] }.value
+                swatch = Color(.sRGB, red: Double(mean.x), green: Double(mean.y), blue: Double(mean.z))
+            }
+        }
     }
 }
 

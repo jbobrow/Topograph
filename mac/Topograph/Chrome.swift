@@ -98,6 +98,18 @@ struct FilterBar: View {
                 .frame(height: 26)
                 .background(theme.surface.color)
                 .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(theme.rule.color, lineWidth: 1))
+                .overlay(alignment: .bottomLeading) {
+                    if model.findingByMeaning > 0 {
+                        LoadingNote(text: "reading for meaning", theme: theme)
+                            .fixedSize()
+                            .padding(.horizontal, 8)
+                            .frame(height: 22)
+                            .background(theme.surface.color, in: Rectangle())
+                            .overlay(Rectangle().strokeBorder(theme.rule.color, lineWidth: 1))
+                            .offset(y: 24)
+                            .allowsHitTesting(false)
+                    }
+                }
                 // On the whole field, or its outline draws over the label.
                 .hotkey("⌘F", key: "f", placement: .belowLeft, model: model, theme: theme)
                 Button("by meaning") { model.findsByMeaning.toggle() }

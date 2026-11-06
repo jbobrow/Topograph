@@ -21,7 +21,8 @@ final class ThumbnailStore {
     }
 
     private static let tiers = [96, 192, 320]
-    private static let budget = 768 * 1024 * 1024
+    /// Bytes of textures to keep. A second store for another view gets a smaller share.
+    private let budget: Int
     private static let parallel = max(ProcessInfo.processInfo.activeProcessorCount - 2, 2)
 
     private let device: MTLDevice
@@ -38,7 +39,8 @@ final class ThumbnailStore {
     /// Called when a new picture is ready to draw.
     var onReady: (() -> Void)?
 
-    init(device: MTLDevice, queue: MTLCommandQueue, root: URL) {
+    init(device: MTLDevice, queue: MTLCommandQueue, root: URL, budget: Int = 768 * 1024 * 1024) {
+        self.budget = budget
         self.device = device
         self.queue = queue
         self.root = root
@@ -102,9 +104,9 @@ final class ThumbnailStore {
     }
 
     private func evict() {
-        guard bytes > Self.budget else { return }
+        guard bytes > budget else { return }
         // Oldest first, never what the current frame is using.
-        for key in lastUsed.sorted(by: { $0.value < $1.value }).map(\.key) where bytes > Self.budget * 9 / 10 {
+        for key in lastUsed.sorted(by: { $0.value < $1.value }).map(\.key) where bytes > budget * 9 / 10 {
             guard lastUsed[key] != clock, let texture = textures.removeValue(forKey: key) else { continue }
             lastUsed[key] = nil
             bytes -= Self.cost(texture)

@@ -231,3 +231,66 @@ fragment float4 labelFragment(LabelVarying in [[stage_in]], texture2d<float> ima
     constexpr sampler near(filter::nearest, address::clamp_to_edge);
     return image.sample(near, in.uv) * in.alpha;
 }
+
+// The palette: a dot for each picture, in its own color, already placed on screen.
+
+struct PaletteDot {
+    float2 center;  // pixels
+    float half_size;
+    float pad;
+    float4 color;
+};
+
+struct PaletteDotVarying {
+    float4 position [[position]];
+    float2 local;
+    float half_size;
+    float4 color;
+};
+
+vertex PaletteDotVarying paletteDotVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
+                                          constant Uniforms &u [[buffer(0)]],
+                                          constant PaletteDot *dots [[buffer(1)]]) {
+    PaletteDot d = dots[iid];
+    float2 corner = float2(vid & 1, (vid >> 1) & 1) * 2 - 1;
+    float2 local = corner * d.half_size;
+    float2 clip = (d.center + local) / u.drawable * 2 - 1;
+    return { float4(clip.x, -clip.y, 0, 1), local, d.half_size, d.color };
+}
+
+fragment float4 paletteDotFragment(PaletteDotVarying in [[stage_in]], constant Uniforms &u [[buffer(0)]]) {
+    // A hair of the ground's opposite keeps colors near the ground's own visible.
+    float edge = in.half_size - max(abs(in.local.x), abs(in.local.y));
+    float3 line = mix(in.color.rgb, u.ink.rgb, 0.28);
+    return float4(edge < u.scale * 0.5 ? line : in.color.rgb, 1);
+}
+
+// The palette's guide lines: rings and the axis.
+
+struct PaletteLine {
+    float2 from;  // pixels
+    float2 to;
+    float width;
+    float alpha;
+};
+
+struct PaletteLineVarying {
+    float4 position [[position]];
+    float alpha;
+};
+
+vertex PaletteLineVarying paletteLineVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
+                                            constant Uniforms &u [[buffer(0)]],
+                                            constant PaletteLine *lines [[buffer(1)]]) {
+    PaletteLine l = lines[iid];
+    float2 along = l.to - l.from;
+    float2 side = normalize(float2(-along.y, along.x) + float2(1e-5, 0)) * l.width * 0.5;
+    float2 ends = float2(vid & 1, (vid >> 1) & 1);
+    float2 pixel = l.from + along * ends.x + side * (ends.y * 2 - 1);
+    float2 clip = pixel / u.drawable * 2 - 1;
+    return { float4(clip.x, -clip.y, 0, 1), l.alpha };
+}
+
+fragment float4 paletteLineFragment(PaletteLineVarying in [[stage_in]], constant Uniforms &u [[buffer(0)]]) {
+    return float4(u.ink.rgb * in.alpha, in.alpha);
+}

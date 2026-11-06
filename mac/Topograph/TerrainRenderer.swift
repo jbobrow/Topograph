@@ -15,9 +15,12 @@ struct TerrainScene: Sendable {
     /// The chart for these items, made together with them while Strata is showing so its
     /// shape and its time range change in the same frame.
     let strata: StrataModel?
+    /// Likewise for color through time, while that's showing.
+    let colorStrata: StrataModel?
     let range: ClosedRange<Int>?
 
-    init(map: LibraryMap, visible: [Int32], fullPeak: Double, strata: StrataModel? = nil, range: ClosedRange<Int>? = nil) {
+    init(map: LibraryMap, visible: [Int32], fullPeak: Double, strata: StrataModel? = nil, colorStrata: StrataModel? = nil, range: ClosedRange<Int>? = nil) {
+        self.colorStrata = colorStrata
         self.map = map
         self.visible = visible
         self.strata = strata
@@ -38,7 +41,7 @@ enum ImageMode: String, CaseIterable, Sendable {
 }
 
 /// Keep in step with `Uniforms` in Terrain.metal.
-private struct Uniforms {
+struct Uniforms {
     var ground: SIMD4<Float>
     var ink: SIMD4<Float>
     var hair: SIMD4<Float>
@@ -58,7 +61,7 @@ private struct Marker {
     var mine: Float
 }
 
-private struct ThumbDraw {
+struct ThumbDraw {
     var center: SIMD2<Float>
     var half: SIMD2<Float>
     var frame: Float
@@ -68,7 +71,7 @@ private struct ThumbDraw {
     var nearest: Float
 }
 
-private struct Bar {
+struct Bar {
     var origin: SIMD2<Float>
     var size: SIMD2<Float>
 }
@@ -282,7 +285,7 @@ final class TerrainRenderer {
     }
 
     /// Four sides, one point wide, in pixels.
-    private static func outline(_ box: CGRect, scale: Double) -> [Bar] {
+    static func outline(_ box: CGRect, scale: Double) -> [Bar] {
         let x = Float((box.minX * scale).rounded()), y = Float((box.minY * scale).rounded())
         let width = Float((box.width * scale).rounded()), height = Float((box.height * scale).rounded())
         let weight = Float(scale)
@@ -295,7 +298,7 @@ final class TerrainRenderer {
     }
 
     /// Four corners, two bars each, in pixels.
-    private static func viewfinder(center: CGPoint, half: Double, scale: Double) -> [Bar] {
+    static func viewfinder(center: CGPoint, half: Double, scale: Double) -> [Bar] {
         let arm = max(5, half * 0.35) * scale, weight = 2 * scale, reach = half * scale
         let cx = center.x * scale, cy = center.y * scale
         var bars: [Bar] = []

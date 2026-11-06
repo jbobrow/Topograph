@@ -71,6 +71,56 @@ public struct MonthAxis: Sendable, Equatable {
     }
 }
 
+/// Colors sorted into a few named bands, for following color through time: twelve hues
+/// around the wheel, and white, gray and black for what has little color of its own.
+public enum ColorBands {
+    public static let names = ["reds", "oranges", "yellows", "limes", "greens", "teals", "cyans", "azures",
+                               "blues", "violets", "magentas", "roses", "whites", "grays", "blacks"]
+    public static var count: Int { names.count }
+    /// Cool colors, then the neutrals, then warm ones, so each layer sits beside its kin.
+    static let stackOrder = [7, 6, 5, 4, 3, 8, 14, 13, 12, 2, 1, 0, 11, 10, 9]
+
+    public static func band(of rgb: UInt32) -> Int {
+        let r = Double((rgb >> 16) & 0xff) / 255, g = Double((rgb >> 8) & 0xff) / 255, b = Double(rgb & 0xff) / 255
+        let high = max(r, g, b), low = min(r, g, b), chroma = high - low
+        if chroma < 0.12 {
+            let lightness = (high + low) / 2
+            return lightness > 0.75 ? 12 : lightness < 0.25 ? 14 : 13
+        }
+        var hue: Double
+        if high == r { hue = (g - b) / chroma } else if high == g { hue = (b - r) / chroma + 2 } else { hue = (r - g) / chroma + 4 }
+        if hue < 0 { hue += 6 }
+        // Each band is centered on its hue: red runs from just under 0 to just over.
+        return Int((hue * 2 + 0.5).rounded(.down)) % 12
+    }
+
+    /// What's showing in a band, most resonant first.
+    public static func items(in band: Int, map: LibraryMap, visible: [Int32]) -> [Int32] {
+        visible.filter { index in map.items[Int(index)].color.map { Self.band(of: $0) == band } ?? false }
+            .sorted {
+                let a = map.items[Int($0)], b = map.items[Int($1)]
+                return a.resonance != b.resonance ? a.resonance > b.resonance : $0 < $1
+            }
+    }
+
+    /// Each band's average color across `items`, so the bands look like what's in them.
+    public static func colors(of items: [MapItem]) -> [SIMD3<Float>] {
+        var sums = [SIMD3<Double>](repeating: .zero, count: count)
+        var tallies = [Double](repeating: 0, count: count)
+        for item in items {
+            guard let rgb = item.color else { continue }
+            let band = band(of: rgb)
+            sums[band] += SIMD3(Double((rgb >> 16) & 0xff), Double((rgb >> 8) & 0xff), Double(rgb & 0xff)) / 255
+            tallies[band] += 1
+        }
+        return (0..<count).map { band in
+            guard tallies[band] > 0 else { return .zero }
+            let mean = sums[band] / tallies[band]
+            return SIMD3(Float(mean.x), Float(mean.y), Float(mean.z))
+        }
+    }
+}
+
 /// Regions stacked as layers through time: each layer's thickness is its resonance per
 /// month. A port of `drawStrata` in viewer/app.js, with d3's wiggle offset and inside-out
 /// order so the result sits the same way up.
@@ -90,8 +140,11 @@ public struct StrataModel: Sendable {
     public let layers: [Layer]
     public let low: Double
     public let high: Double
-    /// Each region's layer, as a position in `layers`.
-    private let layerOfRegion: [Int: Int]
+    /// Each key's layer, as a position in `layers`. Keys are regions, or for color, bands.
+    private let layerOfKey: [Int: Int]
+    private let keyOfItem: @Sendable (MapItem) -> Int?
+    /// Whether thickness is a part of each month rather than an amount.
+    public let isShare: Bool
 
     /// `order` keeps the layers in a set order, from `stackingOrder`. Without it they're
     /// ordered by what's in `visible`, which would swap them around as a time range moves.
@@ -113,7 +166,43 @@ public struct StrataModel: Sendable {
             }
             mark(id)
         }
-        layerOfRegion = layerOf
+        layerOfKey = layerOf
+        keyOfItem = { $0.region }
+        isShare = false
+        low = layers.flatMap(\.bottom).min() ?? 0
+        high = layers.flatMap(\.top).max() ?? 1
+        self.axis = axis
+    }
+
+    /// Color through time: a layer for each band of `ColorBands`, thick where you kept
+    /// that color, in a set order so neighboring layers are neighboring colors.
+    ///
+    /// With `share`, thickness is the band's part of that month rather than its amount, so a
+    /// month of bulk imports doesn't flatten every other year.
+    public init(colorsOf map: LibraryMap, visible: [Int32], axis: MonthAxis, share: Bool = false) {
+        var table = [[Double]](repeating: [Double](repeating: 0, count: axis.count), count: ColorBands.count)
+        for index in visible {
+            let item = map.items[Int(index)]
+            guard let time = item.time, let color = item.color, let month = axis.index(of: time) else { continue }
+            table[ColorBands.band(of: color)][month] += Double(item.resonance)
+        }
+        var smooth = table.map(Self.smoothed)
+        if share {
+            for month in 0..<axis.count {
+                let total = smooth.reduce(0) { $0 + $1[month] }
+                guard total > 0 else { continue }
+                for band in smooth.indices { smooth[band][month] /= total }
+            }
+        }
+        // Every month adds up to the same, so there's no slope for the wiggle to even out, and
+        // it would only make sparse months jump. Each month is simply centered.
+        let stacked = Self.stack(smooth, order: ColorBands.stackOrder, centered: share)
+        layers = stacked.map { (index, bottom, top) in
+            Layer(region: index, raw: table[index], bottom: bottom, top: top)
+        }
+        layerOfKey = Dictionary(uniqueKeysWithValues: stacked.enumerated().map { ($1.index, $0) })
+        keyOfItem = { $0.color.map(ColorBands.band(of:)) }
+        isShare = share
         low = layers.flatMap(\.bottom).min() ?? 0
         high = layers.flatMap(\.top).max() ?? 1
         self.axis = axis
@@ -153,7 +242,7 @@ public struct StrataModel: Sendable {
     /// layer then, in the same units as `low` and `high`. No height if it's in no layer.
     public func place(of item: MapItem) -> (time: Int, height: Double?)? {
         guard let time = item.time, let month = axis.index(of: time) else { return nil }
-        guard let region = item.region, let position = layerOfRegion[region] else { return (time, nil) }
+        guard let key = keyOfItem(item), let position = layerOfKey[key] else { return (time, nil) }
         let span = Double(axis.edges[month + 1] - axis.edges[month])
         let at = Double(month) + Double(time - axis.edges[month]) / span
         let layer = layers[position]
@@ -174,14 +263,14 @@ public struct StrataModel: Sendable {
 
     /// `d3.stack` with `stackOrderInsideOut` and `stackOffsetWiggle`. Returns each
     /// series' original index with its bottom and top edges, bottom of the stack first.
-    static func stack(_ series: [[Double]], order given: [Int]? = nil) -> [(index: Int, bottom: [Double], top: [Double])] {
+    static func stack(_ series: [[Double]], order given: [Int]? = nil, centered: Bool = false) -> [(index: Int, bottom: [Double], top: [Double])] {
         guard let months = series.first?.count, months > 0 else { return [] }
         let order = given ?? insideOut(series)
 
         // Wiggle: choose a baseline that minimizes how much the layers slope.
         var baseline = [Double](repeating: 0, count: months)
         var y = 0.0
-        for j in 1..<max(months, 1) {
+        for j in 1..<max(months, 1) where !centered {
             var s1 = 0.0, s2 = 0.0
             for (i, si) in order.enumerated() {
                 let now = series[si][j], before = series[si][j - 1]
@@ -197,6 +286,9 @@ public struct StrataModel: Sendable {
             if s1 != 0 { y -= s2 / s1 }
         }
         baseline[months - 1] = y
+        if centered {
+            baseline = (0..<months).map { j in -series.reduce(0) { $0 + $1[j] } / 2 }
+        }
 
         var out: [(Int, [Double], [Double])] = []
         var below = baseline

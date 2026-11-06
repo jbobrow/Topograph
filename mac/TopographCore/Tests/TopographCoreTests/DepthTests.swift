@@ -52,6 +52,70 @@ final class DepthTests: XCTestCase {
         XCTAssertEqual(hypot(white.x, white.y), 0, accuracy: 1e-6)
     }
 
+    func testCylinderRunsLightToDarkWithColorOnTheOutside() {
+        let white = PaletteLayout.cylinder(rgb: 0xffffff), black = PaletteLayout.cylinder(rgb: 0x000000)
+        XCTAssertEqual(white.z, 1, accuracy: 1e-9)
+        XCTAssertEqual(black.z, -1, accuracy: 1e-9)
+        XCTAssertEqual(hypot(white.x, white.y), 0, accuracy: 1e-9)
+        let red = PaletteLayout.cylinder(rgb: 0xff0000), muted = PaletteLayout.cylinder(rgb: 0xa08080)
+        XCTAssertGreaterThan(hypot(red.x, red.y), hypot(muted.x, muted.y))
+        // A barely tinted white stays near the axis.
+        let tinted = PaletteLayout.cylinder(rgb: 0xfdfdff)
+        XCTAssertLessThan(hypot(tinted.x, tinted.y), 0.1)
+    }
+
+    func testPaletteCameraZoomKeepsTheAnchorStill() {
+        let size = CGSize(width: 1000, height: 800)
+        let camera = PaletteCamera().panned(dx: 40, dy: -20)
+        let before = camera.project(x: 0.3, y: -0.2, z: 0, size: size).point
+        let next = camera.zoomed(by: 3, around: before, size: size)
+        let after = next.project(x: 0.3, y: -0.2, z: 0, size: size).point
+        XCTAssertEqual(after.x, before.x, accuracy: 1e-6)
+        XCTAssertEqual(after.y, before.y, accuracy: 1e-6)
+    }
+
+    func testPaletteCameraShowsABoxItWasAskedToFill() {
+        let size = CGSize(width: 1000, height: 800)
+        let camera = PaletteCamera()
+        let start = camera.project(x: 0.4, y: 0.1, z: 0, size: size).point
+        let box = CGRect(x: start.x - 50, y: start.y - 40, width: 100, height: 80)
+        let next = camera.zoomed(toFill: box, size: size)
+        XCTAssertEqual(next.zoom, 10, accuracy: 1e-9)
+        let after = next.project(x: 0.4, y: 0.1, z: 0, size: size).point
+        XCTAssertEqual(after.x, 500, accuracy: 1e-6)
+        XCTAssertEqual(after.y, 400, accuracy: 1e-6)
+    }
+
+    func testPaletteCameraPutsTheNearSideInFront() {
+        let size = CGSize(width: 1000, height: 800)
+        var camera = PaletteCamera()
+        camera.pitch = PaletteCamera.cylinderPitch
+        camera.solid = 1
+        // From above, the top of the cylinder is nearer than the bottom, and higher on screen.
+        let top = camera.project(x: 0, y: 0, z: 0.85, size: size), bottom = camera.project(x: 0, y: 0, z: -0.85, size: size)
+        XCTAssertGreaterThan(top.depth, bottom.depth)
+        XCTAssertGreaterThan(top.scale, bottom.scale)
+        XCTAssertLessThan(top.point.y, bottom.point.y)
+    }
+
+    func testPaletteSpaceDrawsFarthestFirstAndSkipsWhatHasNoColor() {
+        let items = [
+            MapItem(id: "white", x: 0, y: 0, resonance: 1, color: 0xffffff),
+            MapItem(id: "none", x: 0, y: 0, resonance: 1),
+            MapItem(id: "black", x: 0, y: 0, resonance: 2, color: 0x000000),
+        ]
+        let space = PaletteSpace(items: items)
+        XCTAssertEqual(space.places.count, 2)
+        XCTAssertNil(space.place(ofItem: 1))
+        let showing = space.showing([0, 1, 2])
+        XCTAssertEqual(showing.map { space.places[Int($0)].index }, [2, 0], "most resonant first")
+        var camera = PaletteCamera()
+        camera.pitch = PaletteCamera.cylinderPitch
+        camera.solid = 1
+        let dots = space.project(showing, camera: camera, size: CGSize(width: 800, height: 800))
+        XCTAssertEqual(dots.map { space.places[Int($0.place)].index }, [2, 0], "the dark bottom is farther away")
+    }
+
     func testTributariesAreNearestKeptItemsBeforeTheWork() {
         let items = [
             item(monthsIn: 12, mine: true),   // the work

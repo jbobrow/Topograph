@@ -13,11 +13,15 @@ struct StrataScreen: View {
     var body: some View {
         ZStack(alignment: .topLeading) {
             if let strata = model.scene?.strata ?? strata, let map = model.map {
-                StrataCanvas(model: strata, map: map, range: model.scene?.range, marked: markedItem(in: map), theme: theme,
+                StrataCanvas(model: strata, labels: { map.regions.regions[$0]?.label }, patterns: Dictionary(map.regions.strataLayers().enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a }),
+                             colors: nil, range: model.scene?.range, marked: markedItem(in: map), theme: theme,
                              onTip: { tip = $0 },
                              onPick: { model.openRegion($0) })
                     // The chart stays clear of the side panel, or recent months end up behind it.
                     .padding(.trailing, model.selection == nil ? 0 : DetailPanel.width)
+            } else {
+                LoadingNote(text: "laying down the strata", theme: theme)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             if let tip {
                 Text(tip.text)
@@ -58,9 +62,14 @@ struct StrataTip: Equatable {
     let y: Double
 }
 
-private struct StrataCanvas: NSViewRepresentable {
+struct StrataCanvas: NSViewRepresentable {
     let model: StrataModel
-    let map: LibraryMap
+    /// A layer's name, by its key.
+    let labels: (Int) -> String?
+    /// A layer's pattern, by its key.
+    let patterns: [Int: Int]
+    /// A layer's color, by its key, in place of a pattern.
+    let colors: [Int: CGColor]?
     let range: ClosedRange<Int>?
     let marked: MapItem?
     let theme: Theme
@@ -72,13 +81,14 @@ private struct StrataCanvas: NSViewRepresentable {
     func updateNSView(_ view: StrataNSView, context: Context) {
         view.onTip = onTip
         view.onPick = onPick
-        view.update(model: model, map: map, range: range, marked: marked, theme: theme)
+        view.update(model: model, labels: labels, patterns: patterns, colors: colors, range: range, marked: marked, theme: theme)
     }
 }
 
 final class StrataNSView: NSView {
     private var model: StrataModel?
-    private var map: LibraryMap?
+    private var labels: (Int) -> String? = { _ in nil }
+    private var colors: [Int: CGColor]?
     private var range: ClosedRange<Int>?
     private var marked: MapItem?
     private var theme = Theme.light
@@ -93,6 +103,9 @@ final class StrataNSView: NSView {
     private var shownScale: (low: Double, high: Double)?
     private var scaleLink: CADisplayLink?
     private var lastScaleStep: CFTimeInterval = 0
+    /// Layers on their way from where they were on screen, by layer id, and since when.
+    private var morph: (from: [Int: (top: [Double], bottom: [Double])], start: CFTimeInterval)?
+    private static let morphDuration = 0.55
     private var names: [Int: ShownName] = [:]
     private var lastNameStep: CFTimeInterval = 0
     private var namesMoving = false
@@ -114,13 +127,23 @@ final class StrataNSView: NSView {
 
     override var isFlipped: Bool { true }
 
-    func update(model: StrataModel, map: LibraryMap, range: ClosedRange<Int>?, marked: MapItem?, theme: Theme) {
+    func update(model: StrataModel, labels: @escaping (Int) -> String?, patterns: [Int: Int], colors: [Int: CGColor]?,
+                range: ClosedRange<Int>?, marked: MapItem?, theme: Theme) {
+        // Amounts and shares are on different scales, so easing the scale would drag every
+        // layer through the middle. Each layer goes straight from where it is to where it's going.
+        if let shown = self.model, shown.isShare != model.isShare,
+           !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            morph = (Dictionary(shown.layers.map { ($0.id, edges(of: $0, model: shown)) }, uniquingKeysWith: { a, _ in a }), CACurrentMediaTime())
+            shownScale = (model.low, model.high)
+            startMotion()
+        }
         self.model = model
-        self.map = map
+        self.labels = labels
+        self.colors = colors
         self.range = range
         self.marked = marked
         self.theme = theme
-        patternOf = Dictionary(map.regions.strataLayers().enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })
+        patternOf = patterns
         builtFor = .zero
         easeScale()
         needsDisplay = true
@@ -179,6 +202,12 @@ final class StrataNSView: NSView {
     @objc private func stepMotion() {
         guard let model, let shown = shownScale else { return stopEasing() }
         let now = CACurrentMediaTime()
+        if let morph {
+            builtFor = .zero
+            needsDisplay = true
+            if now - morph.start >= Self.morphDuration { self.morph = nil }
+            return
+        }
         let share = 1 - exp(-(now - lastScaleStep) / 0.09)
         lastScaleStep = now
         if scaleIsSettled(model) {
@@ -199,13 +228,24 @@ final class StrataNSView: NSView {
         scaleLink = nil
     }
 
+    /// Where a layer's edges are on screen right now, month by month.
+    private func edges(of layer: StrataModel.Layer, model: StrataModel) -> (top: [Double], bottom: [Double]) {
+        let target = (top: layer.top.map { y($0, model: model) }, bottom: layer.bottom.map { y($0, model: model) })
+        guard let morph, let from = morph.from[layer.id], from.top.count == target.top.count else { return target }
+        let t = min((CACurrentMediaTime() - morph.start) / Self.morphDuration, 1)
+        let eased = t * t * (3 - 2 * t)
+        func mix(_ a: [Double], _ b: [Double]) -> [Double] { zip(a, b).map { $0 + ($1 - $0) * eased } }
+        return (mix(from.top, target.top), mix(from.bottom, target.bottom))
+    }
+
     private func buildPaths() {
         guard let model, builtFor != bounds.size else { return }
         builtFor = bounds.size
         let axis = model.axis
         paths = model.layers.map { layer in
-            let tops = (0..<axis.count).map { CGPoint(x: x(axis.edges[$0], axis: axis), y: y(layer.top[$0], model: model)) }
-            let bottoms = (0..<axis.count).reversed().map { CGPoint(x: x(axis.edges[$0], axis: axis), y: y(layer.bottom[$0], model: model)) }
+            let (top, bottom) = edges(of: layer, model: model)
+            let tops = (0..<axis.count).map { CGPoint(x: x(axis.edges[$0], axis: axis), y: top[$0]) }
+            let bottoms = (0..<axis.count).reversed().map { CGPoint(x: x(axis.edges[$0], axis: axis), y: bottom[$0]) }
             let path = CGMutablePath()
             BasisCurve.append(tops, to: path, joined: false)
             BasisCurve.append(bottoms, to: path, joined: true)
@@ -287,20 +327,27 @@ final class StrataNSView: NSView {
         }
 
         for (index, layer) in model.layers.enumerated() {
-            let tile: CGImage? = layer.region.flatMap { patternOf[$0] }.map { tiles[$0 % tiles.count] } ?? waitingTile
             c.saveGState()
             if let hovered, hovered != index { c.setAlpha(0.22) }
-            c.saveGState()
-            c.addPath(paths[index])
-            c.clip()
-            if let tile {
-                c.draw(tile, in: CGRect(x: 0, y: 0, width: Double(tile.width) / scale, height: Double(tile.height) / scale), byTiling: true)
+            if let color = layer.region.flatMap({ colors?[$0] }) {
+                // The color's enough to tell a layer from the next, so it needs no outline.
+                c.addPath(paths[index])
+                c.setFillColor(color)
+                c.fillPath()
+            } else {
+                let tile: CGImage? = layer.region.flatMap { patternOf[$0] }.map { tiles[$0 % tiles.count] } ?? waitingTile
+                c.saveGState()
+                c.addPath(paths[index])
+                c.clip()
+                if let tile {
+                    c.draw(tile, in: CGRect(x: 0, y: 0, width: Double(tile.width) / scale, height: Double(tile.height) / scale), byTiling: true)
+                }
+                c.restoreGState()
+                c.addPath(paths[index])
+                c.setStrokeColor(theme.ink.cg)
+                c.setLineWidth(0.75)
+                c.strokePath()
             }
-            c.restoreGState()
-            c.addPath(paths[index])
-            c.setStrokeColor(theme.ink.cg)
-            c.setLineWidth(0.75)
-            c.strokePath()
             c.restoreGState()
         }
         drawNames(c, model: model)
@@ -352,7 +399,6 @@ final class StrataNSView: NSView {
     /// month until a clearly better one comes along, shown names keep their place over new
     /// ones, and each eases to where it's going, fading in or out when it comes or goes.
     private func drawNames(_ c: CGContext, model: StrataModel) {
-        guard let map else { return }
         let axis = model.axis
         let step = (bounds.width - margin.left - margin.right) / max(1, Double(axis.count - 1))
         func thinnest(_ layer: StrataModel.Layer, around month: Int, half: Int) -> Double {
@@ -364,7 +410,7 @@ final class StrataNSView: NSView {
         }
         var candidates: [(best: Double, month: Int, layer: StrataModel.Layer, id: Int, name: String)] = []
         for layer in model.layers {
-            guard let id = layer.region, let name = map.regions.regions[id]?.label else { continue }
+            guard let id = layer.region, let name = labels(id) else { continue }
             let half = Int((((Double(name.count) * 6.8 + 10) / 2) / step).rounded(.up))
             guard half < axis.count - half else { continue }
             var best = -1.0, at = -1
@@ -392,7 +438,9 @@ final class StrataNSView: NSView {
         var placed: [CGRect] = []
         var wanted: Set<Int> = []
         for candidate in candidates.sorted(by: { favored($0) > favored($1) }) {
-            let middle = (y(candidate.layer.bottom[candidate.month], model: model) + y(candidate.layer.top[candidate.month], model: model)) / 2
+            // On screen as it is now, so a name stays with its layer while the layers change over.
+            let shownEdges = edges(of: candidate.layer, model: model)
+            let middle = (shownEdges.bottom[candidate.month] + shownEdges.top[candidate.month]) / 2
             let size = NSAttributedString(string: candidate.name, attributes: [.font: font]).size()
             let center = CGPoint(x: x(axis.edges[candidate.month], axis: axis), y: middle)
             let rect = CGRect(x: center.x - size.width / 2, y: center.y - size.height / 2, width: size.width, height: size.height)
@@ -474,7 +522,7 @@ final class StrataNSView: NSView {
     }
 
     override func mouseMoved(with event: NSEvent) {
-        guard let model, let map else { return }
+        guard let model else { return }
         let point = convert(event.locationInWindow, from: nil)
         let index = layerIndex(at: point)
         if index != hovered {
@@ -491,7 +539,7 @@ final class StrataNSView: NSView {
         let time = axis.time(atFraction: fraction)
         let month = axis.index(of: time)
         let raw = month.map { layer.raw[$0] } ?? 0
-        let name = layer.region.flatMap { map.regions.regions[$0]?.label } ?? "not yet mapped (links waiting for images)"
+        let name = layer.region.flatMap(labels) ?? "not yet mapped (links waiting for images)"
         let amount = layer.region == nil ? "\(Int(raw)) links" : "resonance \(String(format: "%.1f", raw))"
         onTip?(StrataTip(text: "\(name)  \(Format.month(time))  \(amount)",
                          x: min(point.x + 12, bounds.width - 270), y: point.y + 12))

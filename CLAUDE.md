@@ -109,7 +109,7 @@ These come from the owner. Keep them in any port.
 - **Shading:** elevation and strata layers use 1-bit dither and pattern fills (Bayer
   dot screens, hatches, rules, checks) instead of color.
 - **Images:** gray by default (color and 1-bit modes exist), shown in full color on
-  hover.
+  hover. Palette keeps its own setting, which starts on color, since color is its subject.
 - **Region names on the map:**
   - They are boxed mono labels with a crosshair at the anchor, and top-level names
     are inverted.
@@ -171,9 +171,10 @@ The Xcode project is `mac/Topograph.xcodeproj`, beside the Python pipeline:
 mac/
   TopographCore/    Swift package with no UI: Library (read-only GRDB), DensityField
                     (d3.contourDensity port), Regions, Strata, Depth (Echoes, Palette,
-                    Tributaries, Process), MapFilter, Minimap, Moodboard, RegionNamer, CLIP (encoder,
+                    Tributaries, Process), PaletteSpace (camera, places), MapFilter, Minimap,
+                    Moodboard, RegionNamer, CLIP (encoder,
                     tokenizer, image preparation), and tests
-  Topograph/        SwiftUI shell, TerrainView (MTKView), TerrainRenderer, Terrain.metal,
+  Topograph/        SwiftUI shell, TerrainView (MTKView), PaletteView (MTKView), TerrainRenderer, Terrain.metal,
                     ThumbnailStore, LabelStore, DetailPanel, StrataView, DepthViews,
                     SourcesView, PipelineRunner (runs the Python tools)
   tools/            make_icon.swift draws the app icon at every size; convert_clip.py makes
