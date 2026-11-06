@@ -22,10 +22,15 @@ public struct MapItem: Sendable, Equatable, Identifiable {
     public var thumb: String?
     /// Width over height of that picture.
     public var aspect: Float?
+    /// Its strongest color, as 0xRRGGBB.
+    public var color: UInt32?
+    /// Its perceptual hash, for finding near-duplicates.
+    public var phash: UInt64?
 
     public init(id: String = "", x: Float, y: Float, resonance: Float, mine: Bool = false, groups: ActionGroups = [],
                 platform: String = "x", kind: String = "text", author: String? = nil, text: String? = nil,
-                region: Int? = nil, time: Int? = nil, thumb: String? = nil, aspect: Float? = nil) {
+                region: Int? = nil, time: Int? = nil, thumb: String? = nil, aspect: Float? = nil,
+                color: UInt32? = nil, phash: UInt64? = nil) {
         self.id = id
         self.x = x
         self.y = y
@@ -40,6 +45,8 @@ public struct MapItem: Sendable, Equatable, Identifiable {
         self.time = time
         self.thumb = thumb
         self.aspect = aspect
+        self.color = color
+        self.phash = phash
     }
 }
 
@@ -51,8 +58,14 @@ public struct LibraryMap: Sendable {
     /// images). They count in Strata. Gone items don't.
     public let waitingTimes: [Int]
     public let waiting: Int
+    /// Where each item id sits in `items`.
+    public let indexOfID: [String: Int32]
 
     public init(items: [MapItem], regions: RegionTree, waitingTimes: [Int] = [], waiting: Int = 0) {
+        var ids: [String: Int32] = [:]
+        ids.reserveCapacity(items.count)
+        for index in items.indices { ids[items[index].id] = Int32(index) }
+        indexOfID = ids
         self.items = items
         self.regions = regions
         self.waitingTimes = waitingTimes
@@ -72,6 +85,24 @@ public struct MediaFile: Sendable, Equatable {
     public let display: String?
     public let thumb: String?
     public let originalURL: String?
+    /// Dominant colors, strongest first, each as a hex string and a share.
+    public let palette: [PaletteColor]
+}
+
+public struct PaletteColor: Sendable, Equatable {
+    public let hex: String
+    public let share: Double
+
+    /// `[["#262825", 0.291], ...]` as media.py stores it.
+    static func parse(_ json: String?) -> [PaletteColor] {
+        guard let json, let rows = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [[Any]] else { return [] }
+        return rows.compactMap { row in
+            guard row.count == 2, let hex = row[0] as? String, let share = row[1] as? Double else { return nil }
+            return PaletteColor(hex: hex, share: share)
+        }
+    }
+
+    public var rgb: UInt32? { UInt32(hex.drop(while: { $0 == "#" }), radix: 16) }
 }
 
 /// What the detail panel shows beyond what the map already holds.
@@ -144,9 +175,9 @@ public struct Library: Sendable {
             }
 
             // The first picture of each item.
-            var pictures: [String: (thumb: String?, aspect: Float?)] = [:]
+            var pictures: [String: (thumb: String?, aspect: Float?, color: UInt32?, phash: UInt64?)] = [:]
             let media = try Row.fetchCursor(db, sql: """
-                select item_id, thumb_path, width, height from media where status = 'ok' order by item_id, ord
+                select item_id, thumb_path, width, height, palette, phash from media where status = 'ok' order by item_id, ord
                 """)
             while let row = try media.next() {
                 let id: String = row[0]
@@ -154,7 +185,13 @@ public struct Library: Sendable {
                 let width: Double? = row[2], height: Double? = row[3]
                 var aspect: Float?
                 if let width, let height, width > 0, height > 0 { aspect = Float(width / height) }
-                pictures[id] = (row[1], aspect)
+                // The strongest color comes first; no need to parse the whole list here.
+                var color: UInt32?
+                if let palette = row[4] as String?, let hash = palette.firstIndex(of: "#"),
+                   let end = palette.index(hash, offsetBy: 7, limitedBy: palette.endIndex) {
+                    color = UInt32(palette[palette.index(after: hash)..<end], radix: 16)
+                }
+                pictures[id] = (row[1], aspect, color, (row[5] as String?).flatMap { UInt64($0, radix: 16) })
             }
 
             var items: [MapItem] = []
@@ -173,7 +210,8 @@ public struct Library: Sendable {
                     text: text?.isEmpty == false ? text : nil,
                     region: row[3],
                     time: engagement.time ?? row[8],
-                    thumb: picture?.thumb, aspect: picture?.aspect))
+                    thumb: picture?.thumb, aspect: picture?.aspect,
+                    color: picture?.color, phash: picture?.phash))
             }
             guard !items.isEmpty else { throw LibraryError.noMap }
 
@@ -207,10 +245,10 @@ public struct Library: Sendable {
                 Interaction(type: $0[0], at: $0[1], estimated: ($0[2] as Int) != 0, collection: $0[3])
             }
             let media = try Row.fetchAll(db, sql: """
-                select kind, local_path, thumb_path, original_url from media
+                select kind, local_path, thumb_path, original_url, palette from media
                 where item_id = ? and status = 'ok' order by ord
                 """, arguments: [id]).map {
-                MediaFile(kind: $0[0], display: $0[1], thumb: $0[2], originalURL: $0[3])
+                MediaFile(kind: $0[0], display: $0[1], thumb: $0[2], originalURL: $0[3], palette: PaletteColor.parse($0[4]))
             }
             let model = try String.fetchOne(db, sql: "select value from meta where key = 'embedding_model'")
             let neighbors = try String.fetchOne(db, sql: "select neighbors from layout where item_id = ? and model = ?",

@@ -9,21 +9,32 @@ struct ContentView: View {
         let theme = Theme.of(scheme)
         VStack(spacing: 0) {
             TopBar(model: model, theme: theme)
+            FilterBar(model: model, theme: theme)
             Rectangle().fill(theme.ink.color).frame(height: 1)
-            ZStack(alignment: .bottomTrailing) {
+            ZStack(alignment: .topTrailing) {
+                // The map stays alive under other views so it keeps your place.
                 TerrainView(scene: model.scene, root: model.library?.root, controller: model.controller,
                             imageMode: model.imageMode, selected: selectedItem,
                             onFailure: { model.fail($0) },
                             onHover: { model.hover = $0 },
-                            onPickItem: { model.selection = .item($0) },
-                            onPickRegion: { id in
-                                model.selection = .region(id)
-                                if let region = model.map?.regions.regions[id] { model.controller.fly(to: region) }
-                            },
+                            onPickItem: { model.openItem($0) },
+                            onPickRegion: { model.openRegion($0) },
                             onWhere: { model.setWhere($0) })
-                MapChrome(model: model, theme: theme)
+                    .opacity(model.section == .terrain ? 1 : 0)
+                    .allowsHitTesting(model.section == .terrain)
+                if model.section == .terrain {
+                    MapChrome(model: model, theme: theme)
+                }
+                if model.section == .strata {
+                    StrataScreen(model: model, theme: theme)
+                }
                 status(theme)
+                if model.selection != nil, let library = model.library, let map = model.map {
+                    DetailPanel(model: model, library: library, map: map, theme: theme)
+                }
             }
+            Rectangle().fill(theme.ink.color).frame(height: 1)
+            TimeBar(model: model, theme: theme)
         }
         .ignoresSafeArea(edges: .top)
         .background(theme.ground.color)
@@ -72,6 +83,11 @@ struct TopBar: View {
     var body: some View {
         HStack(spacing: 8) {
             Text("topograph").font(PlexMono.font(.semibold, size: 15)).foregroundStyle(theme.ink.color)
+                .padding(.trailing, 12)
+            ForEach(Section.allCases, id: \.self) { section in
+                Button(section.rawValue) { model.section = section }
+                    .buttonStyle(KeyStyle(theme: theme, on: model.section == section, led: model.section == section))
+            }
             Spacer()
             Lamp(text: "on this mac only", theme: theme)
         }
@@ -102,6 +118,7 @@ struct Lamp: View {
 private struct MapChrome: View {
     let model: AppModel
     let theme: Theme
+    @State private var cardHeight: CGFloat = 0
 
     var body: some View {
         ZStack {
@@ -131,9 +148,10 @@ private struct MapChrome: View {
                 HoverCard(item: map.items[Int(hover.item)], library: library, theme: theme)
                     .frame(width: 260)
                     .fixedSize(horizontal: false, vertical: true)
-                    .alignmentGuide(.leading) { _ in 0 }
-                    .position(x: min(hover.location.x + 14, hover.mapSize.width - 270) + 130,
-                              y: min(hover.location.y + 90, hover.mapSize.height - 110))
+                    .onGeometryChange(for: CGFloat.self, of: \.size.height) { cardHeight = $0 }
+                    .offset(x: min(hover.location.x + 14, hover.mapSize.width - 270),
+                            y: max(8, min(hover.location.y + 14, hover.mapSize.height - cardHeight - 8)))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .allowsHitTesting(false)
             }
         }
@@ -152,10 +170,7 @@ private struct WhereBar: View {
                 ForEach(model.whereYouAre, id: \.self) { id in
                     if let region = map.regions.regions[id] {
                         Text("›").font(PlexMono.font(.regular, size: 11)).foregroundStyle(theme.secondary.color)
-                        Button(region.label) {
-                            model.controller.fly(x: region.x, y: region.y,
-                                                 k: LabelPlanner.expandAt(CGSize(width: 800, height: 800)) * 0.7 / region.r)
-                        }
+                        Button(region.label) { model.controller.fly(inside: region) }
                         .buttonStyle(KeyStyle(theme: theme, on: id == model.whereYouAre.last))
                     }
                 }
@@ -190,7 +205,7 @@ private struct Readout: View {
 }
 
 /// What the pointer is over: always in full color.
-private struct HoverCard: View {
+struct HoverCard: View {
     let item: MapItem
     let library: Library
     let theme: Theme

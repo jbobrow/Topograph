@@ -13,21 +13,8 @@ final class LibraryTests: XCTestCase {
         writer = try DatabaseQueue(path: root.appending(path: "topograph.sqlite").path)
         _ = try writer.writeWithoutTransaction { try String.fetchOne($0, sql: "pragma journal_mode = wal") }
         try writer.write { db in
-            try db.execute(sql: """
-                create table item (id text primary key, platform text not null, kind text not null default 'link', url text, author text,
-                  text text, created_at integer, created_estimated integer default 0,
-                  hydrated integer default 0, hydrate_attempts integer default 0);
-                create table interaction (item_id text, type text, at integer, at_estimated integer default 0,
-                  collection text, source_file text, primary key (item_id, type, at));
-                create table media (item_id text, ord integer, kind text, original_url text, local_path text,
-                  thumb_path text, width integer, height integer, status text, primary key (item_id, ord));
-                create table cluster (model text, id integer, label text, terms text, parent integer,
-                  depth integer default 0, x real, y real, r real, primary key (model, id));
-                create table layout (item_id text, model text, x real, y real, cluster integer, neighbors text,
-                  primary key (item_id, model));
-                create table meta (key text primary key, value text);
-                insert into meta values ('embedding_model', 'clip-vit-b-32');
-                """)
+            try db.execute(sql: LibrarySchema.sql)
+            try db.execute(sql: "insert into meta values ('embedding_model', 'clip-vit-b-32')")
         }
     }
 
@@ -173,7 +160,22 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(try Library(root: root).map().items.first?.x, 999)
     }
 
+    func testColorAndHashComeFromTheFirstPicture() throws {
+        try place("x:1")
+        try writer.write { db in
+            try db.execute(sql: """
+                insert into media(item_id, ord, kind, palette, phash, status) values
+                  ('x:1', 0, 'image', '[["#262825", 0.29], ["#89a8bb", 0.25]]', 'cbe0349f3788e364', 'ok')
+                """)
+        }
+        let item = try XCTUnwrap(Library(root: root).map().items.first)
+        XCTAssertEqual(item.color, 0x262825)
+        XCTAssertEqual(item.phash, 0xcbe0349f3788e364)
+        XCTAssertEqual(try Library(root: root).detail(of: "x:1").media.first?.palette.map(\.hex), ["#262825", "#89a8bb"])
+    }
+
     func testMissingLibraryAndMissingMapSayWhatToDo() throws {
+        try writer.write { try $0.execute(sql: "delete from meta") }
         let nowhere = root.appending(path: "nowhere")
         XCTAssertThrowsError(try Library(root: nowhere)) {
             XCTAssertEqual($0 as? LibraryError, .notFound(path: nowhere.path))

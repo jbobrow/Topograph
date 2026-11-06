@@ -22,6 +22,12 @@ final class TerrainController {
         fly(x: region.x, y: region.y, k: LabelPlanner.expandAt(view.bounds.size) * factor / region.r)
     }
 
+    /// Back to where this region's own name is the one showing.
+    func fly(inside region: Region) {
+        guard let view else { return }
+        fly(x: region.x, y: region.y, k: LabelPlanner.expandAt(view.bounds.size) * 0.7 / region.r)
+    }
+
     /// To an item, at least close enough to see it as a picture.
     func fly(toItem item: MapItem) {
         guard let view else { return }
