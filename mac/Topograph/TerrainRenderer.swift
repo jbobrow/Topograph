@@ -2,11 +2,33 @@ import MetalKit
 import simd
 import TopographCore
 
-/// What the terrain draws: the items and their elevation field.
+/// What the terrain draws: the items showing and their elevation field.
 struct TerrainScene: Sendable {
     let id = UUID()
-    let items: [MapItem]
+    let map: LibraryMap
+    let visible: [Int32]
     let field: DensityField
+    let counts: [Int: Int]
+    let spatial: SpatialIndex
+    /// Visible items with pictures, most resonant first.
+    let pictures: [Int32]
+
+    init(map: LibraryMap, visible: [Int32], fullPeak: Double) {
+        self.map = map
+        self.visible = visible
+        field = DensityField(items: map.items, visible: visible, fullPeak: fullPeak)
+        counts = map.regions.counts(items: map.items, visible: visible)
+        spatial = SpatialIndex(items: map.items, visible: visible)
+        pictures = visible.filter { map.items[Int($0)].thumb != nil }
+            .sorted { map.items[Int($0)].resonance > map.items[Int($1)].resonance }
+    }
+}
+
+/// How pictures show: gray by default, in full color on hover.
+enum ImageMode: String, CaseIterable, Sendable {
+    case color, gray, dither
+
+    var label: String { self == .dither ? "1-bit" : rawValue }
 }
 
 /// Keep in step with `Uniforms` in Terrain.metal.
@@ -14,13 +36,14 @@ private struct Uniforms {
     var ground: SIMD4<Float>
     var ink: SIMD4<Float>
     var hair: SIMD4<Float>
+    var surface: SIMD4<Float>
     var drawable: SIMD2<Float>
     var translate: SIMD2<Float>
     var scale: Float
     var k: Float
     var origin: Float
     var cell: Float
-    var markerZoom: Float
+    var dotRadius: Float
 }
 
 private struct Marker {
@@ -29,14 +52,67 @@ private struct Marker {
     var mine: Float
 }
 
-/// Draws the terrain with one full-view pass and one instanced pass of markers.
-/// Nothing runs between frames: the view redraws only when something changes.
+private struct ThumbDraw {
+    var center: SIMD2<Float>
+    var half: SIMD2<Float>
+    var frame: Float
+    var mine: Float
+    var mode: Float
+    var hasImage: Float
+    var nearest: Float
+}
+
+private struct Bar {
+    var origin: SIMD2<Float>
+    var size: SIMD2<Float>
+}
+
+private struct LabelDraw {
+    var origin: SIMD2<Float>
+    var size: SIMD2<Float>
+    var alpha: Float
+}
+
+/// One thumbnail to draw this frame, in points.
+struct ThumbPlacement {
+    let center: CGPoint
+    let size: CGSize
+    let frame: Double
+    let mine: Bool
+    let texture: MTLTexture?
+    let mode: ImageMode
+    /// Drawn larger than its pixels, in 1-bit: keep the dots square.
+    let nearest: Bool
+}
+
+/// One region name to draw this frame.
+struct LabelPlacement {
+    let origin: CGPoint
+    let size: CGSize
+    let texture: MTLTexture
+    let alpha: Double
+}
+
+/// Everything on top of the terrain.
+struct TerrainOverlay {
+    var thumbs: [ThumbPlacement] = []
+    var dots = false
+    /// The selection's viewfinder: its center and half its width, in points.
+    var viewfinder: (center: CGPoint, half: Double)?
+    var labels: [LabelPlacement] = []
+}
+
+/// Draws the terrain with one full-view pass, an instanced pass of markers, and then
+/// pictures and names. Nothing runs between frames: the view redraws only when something changes.
 @MainActor
 final class TerrainRenderer {
-    private let device: MTLDevice
-    private let queue: MTLCommandQueue
+    let device: MTLDevice
+    let queue: MTLCommandQueue
     private let terrainPipeline: MTLRenderPipelineState
     private let markerPipeline: MTLRenderPipelineState
+    private let thumbPipeline: MTLRenderPipelineState
+    private let barPipeline: MTLRenderPipelineState
+    private let labelPipeline: MTLRenderPipelineState
     private var field: MTLTexture?
     private var markers: MTLBuffer?
     private var markerCount = 0
@@ -49,23 +125,26 @@ final class TerrainRenderer {
         self.device = device
         self.queue = queue
 
-        let terrain = MTLRenderPipelineDescriptor()
-        terrain.vertexFunction = library.makeFunction(name: "terrainVertex")
-        terrain.fragmentFunction = library.makeFunction(name: "terrainFragment")
-        terrain.colorAttachments[0].pixelFormat = view.colorPixelFormat
-        terrainPipeline = try device.makeRenderPipelineState(descriptor: terrain)
-
-        let marker = MTLRenderPipelineDescriptor()
-        marker.vertexFunction = library.makeFunction(name: "markerVertex")
-        marker.fragmentFunction = library.makeFunction(name: "markerFragment")
-        let color = marker.colorAttachments[0]!
-        color.pixelFormat = view.colorPixelFormat
-        color.isBlendingEnabled = true
-        color.sourceRGBBlendFactor = .one
-        color.sourceAlphaBlendFactor = .one
-        color.destinationRGBBlendFactor = .oneMinusSourceAlpha
-        color.destinationAlphaBlendFactor = .oneMinusSourceAlpha
-        markerPipeline = try device.makeRenderPipelineState(descriptor: marker)
+        func pipeline(_ vertex: String, _ fragment: String, blended: Bool, premultiplied: Bool = true) throws -> MTLRenderPipelineState {
+            let descriptor = MTLRenderPipelineDescriptor()
+            descriptor.vertexFunction = library.makeFunction(name: vertex)
+            descriptor.fragmentFunction = library.makeFunction(name: fragment)
+            let color = descriptor.colorAttachments[0]!
+            color.pixelFormat = view.colorPixelFormat
+            if blended {
+                color.isBlendingEnabled = true
+                color.sourceRGBBlendFactor = .one
+                color.sourceAlphaBlendFactor = .one
+                color.destinationRGBBlendFactor = .oneMinusSourceAlpha
+                color.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            }
+            return try device.makeRenderPipelineState(descriptor: descriptor)
+        }
+        terrainPipeline = try pipeline("terrainVertex", "terrainFragment", blended: false)
+        markerPipeline = try pipeline("markerVertex", "markerFragment", blended: true)
+        thumbPipeline = try pipeline("thumbVertex", "thumbFragment", blended: false)
+        barPipeline = try pipeline("barVertex", "barFragment", blended: false)
+        labelPipeline = try pipeline("labelVertex", "labelFragment", blended: true)
     }
 
     func setScene(_ scene: TerrainScene?) {
@@ -75,27 +154,30 @@ final class TerrainRenderer {
             markerCount = 0
             return
         }
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .r32Float, width: scene.field.width, height: scene.field.height, mipmapped: false)
-        descriptor.usage = .shaderRead
-        let texture = device.makeTexture(descriptor: descriptor)
+        // Filtering rebuilds the field often, and the grid's size never changes.
+        if field?.width != scene.field.width || field?.height != scene.field.height {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .r32Float, width: scene.field.width, height: scene.field.height, mipmapped: false)
+            descriptor.usage = .shaderRead
+            field = device.makeTexture(descriptor: descriptor)
+        }
         scene.field.elevation.withUnsafeBytes { bytes in
-            texture?.replace(region: MTLRegionMake2D(0, 0, scene.field.width, scene.field.height),
-                             mipmapLevel: 0, withBytes: bytes.baseAddress!,
-                             bytesPerRow: scene.field.width * MemoryLayout<Float>.stride)
+            field?.replace(region: MTLRegionMake2D(0, 0, scene.field.width, scene.field.height),
+                           mipmapLevel: 0, withBytes: bytes.baseAddress!,
+                           bytesPerRow: scene.field.width * MemoryLayout<Float>.stride)
         }
-        field = texture
 
-        let instances = scene.items.map { item in
-            Marker(position: SIMD2(item.x, item.y),
-                   base: TerrainStyle.markerBase(resonance: item.resonance),
-                   mine: item.mine ? 1 : 0)
+        let instances = scene.visible.map { index -> Marker in
+            let item = scene.map.items[Int(index)]
+            return Marker(position: SIMD2(item.x, item.y),
+                          base: TerrainStyle.markerBase(resonance: item.resonance),
+                          mine: item.mine ? 1 : 0)
         }
-        markers = device.makeBuffer(bytes: instances, length: instances.count * MemoryLayout<Marker>.stride)
+        markers = instances.isEmpty ? nil : device.makeBuffer(bytes: instances, length: instances.count * MemoryLayout<Marker>.stride)
         markerCount = instances.count
     }
 
-    func draw(in view: MTKView, transform: MapTransform, theme: Theme) {
+    func draw(in view: MTKView, transform: MapTransform, theme: Theme, overlay: TerrainOverlay) {
         guard let pass = view.currentRenderPassDescriptor, let drawable = view.currentDrawable,
               let commands = queue.makeCommandBuffer() else { return }
         let ground = theme.ground.simd
@@ -106,12 +188,12 @@ final class TerrainRenderer {
 
         let size = view.drawableSize
         let scale = view.bounds.width > 0 ? Float(size.width / view.bounds.width) : 1
-        var uniforms = Uniforms(ground: ground, ink: theme.ink.simd, hair: theme.hair.simd,
+        var uniforms = Uniforms(ground: ground, ink: theme.ink.simd, hair: theme.hair.simd, surface: theme.surface.simd,
                                 drawable: SIMD2(Float(size.width), Float(size.height)),
                                 translate: SIMD2(Float(transform.x), Float(transform.y)),
                                 scale: scale, k: Float(transform.k),
                                 origin: Float(DensityField.origin), cell: Float(DensityField.cellSize),
-                                markerZoom: Float(TerrainStyle.markerZoomLimit))
+                                dotRadius: overlay.dots ? TerrainStyle.dotRadius : 0)
         let uniformLength = MemoryLayout<Uniforms>.stride
 
         if let field {
@@ -134,9 +216,68 @@ final class TerrainRenderer {
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: markerCount)
         }
 
+        if !overlay.thumbs.isEmpty {
+            encoder.setRenderPipelineState(thumbPipeline)
+            encoder.setVertexBytes(&uniforms, length: uniformLength, index: 0)
+            encoder.setFragmentBytes(&uniforms, length: uniformLength, index: 0)
+            for thumb in overlay.thumbs {
+                var data = ThumbDraw(center: SIMD2(Float(thumb.center.x), Float(thumb.center.y)) * scale,
+                                     half: SIMD2(Float(thumb.size.width), Float(thumb.size.height)) * scale / 2,
+                                     frame: Float(thumb.frame) * scale,
+                                     mine: thumb.mine ? 1 : 0,
+                                     mode: thumb.mode == .color ? 0 : 1,
+                                     hasImage: thumb.texture == nil ? 0 : 1,
+                                     nearest: thumb.nearest ? 1 : 0)
+                encoder.setVertexBytes(&data, length: MemoryLayout<ThumbDraw>.stride, index: 1)
+                encoder.setFragmentBytes(&data, length: MemoryLayout<ThumbDraw>.stride, index: 1)
+                encoder.setFragmentTexture(thumb.texture, index: 0)
+                encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+            }
+        }
+
+        if let finder = overlay.viewfinder {
+            let bars = Self.viewfinder(center: finder.center, half: finder.half, scale: Double(scale))
+            encoder.setRenderPipelineState(barPipeline)
+            encoder.setVertexBytes(&uniforms, length: uniformLength, index: 0)
+            bars.withUnsafeBytes { encoder.setVertexBytes($0.baseAddress!, length: $0.count, index: 1) }
+            encoder.setFragmentBytes(&uniforms, length: uniformLength, index: 0)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: bars.count)
+        }
+
+        if !overlay.labels.isEmpty {
+            encoder.setRenderPipelineState(labelPipeline)
+            encoder.setVertexBytes(&uniforms, length: uniformLength, index: 0)
+            for label in overlay.labels {
+                // On whole pixels, so the text stays as crisp as it was drawn.
+                let origin = SIMD2(Float(label.origin.x), Float(label.origin.y)) * scale
+                var data = LabelDraw(origin: origin.rounded(.toNearestOrAwayFromZero),
+                                     size: SIMD2(Float(label.texture.width), Float(label.texture.height)),
+                                     alpha: Float(label.alpha))
+                encoder.setVertexBytes(&data, length: MemoryLayout<LabelDraw>.stride, index: 1)
+                encoder.setFragmentTexture(label.texture, index: 0)
+                encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+            }
+        }
+
         encoder.endEncoding()
         commands.present(drawable)
         commands.commit()
+    }
+
+    /// Four corners, two bars each, in pixels.
+    private static func viewfinder(center: CGPoint, half: Double, scale: Double) -> [Bar] {
+        let arm = max(5, half * 0.35) * scale, weight = 2 * scale, reach = half * scale
+        let cx = center.x * scale, cy = center.y * scale
+        var bars: [Bar] = []
+        for (sx, sy) in [(-1.0, -1.0), (1, -1), (1, 1), (-1, 1)] {
+            let px = cx + sx * reach, py = cy + sy * reach
+            let horizontal = Bar(origin: SIMD2(Float(sx < 0 ? px : px - arm), Float(py - weight / 2)),
+                                 size: SIMD2(Float(arm), Float(weight)))
+            let vertical = Bar(origin: SIMD2(Float(px - weight / 2), Float(sy < 0 ? py : py - arm)),
+                               size: SIMD2(Float(weight), Float(arm)))
+            bars += [horizontal, vertical]
+        }
+        return bars
     }
 
     private func setBytes(_ values: [Float], _ encoder: MTLRenderCommandEncoder, index: Int) {

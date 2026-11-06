@@ -2,7 +2,7 @@ import SwiftUI
 
 @main
 struct TopographApp: App {
-    @State private var model = MapModel()
+    @State private var model = AppModel()
 
     init() {
         PlexMono.registerFonts()

@@ -14,12 +14,15 @@ final class LibraryTests: XCTestCase {
         _ = try writer.writeWithoutTransaction { try String.fetchOne($0, sql: "pragma journal_mode = wal") }
         try writer.write { db in
             try db.execute(sql: """
-                create table item (id text primary key, platform text, kind text, url text, author text,
+                create table item (id text primary key, platform text not null, kind text not null default 'link', url text, author text,
                   text text, created_at integer, created_estimated integer default 0,
                   hydrated integer default 0, hydrate_attempts integer default 0);
                 create table interaction (item_id text, type text, at integer, at_estimated integer default 0,
                   collection text, source_file text, primary key (item_id, type, at));
-                create table media (item_id text, ord integer, kind text, status text, primary key (item_id, ord));
+                create table media (item_id text, ord integer, kind text, original_url text, local_path text,
+                  thumb_path text, width integer, height integer, status text, primary key (item_id, ord));
+                create table cluster (model text, id integer, label text, terms text, parent integer,
+                  depth integer default 0, x real, y real, r real, primary key (model, id));
                 create table layout (item_id text, model text, x real, y real, cluster integer, neighbors text,
                   primary key (item_id, model));
                 create table meta (key text primary key, value text);
@@ -50,16 +53,80 @@ final class LibraryTests: XCTestCase {
     func testReadsPositionsResonanceAndWhatIsMine() throws {
         try place("x:1", x: 12, y: 34, types: ["like", "save"])
         try place("x:2", types: ["post"])
-        let items = try Library(root: root).mapItems()
-        XCTAssertEqual(items, [
-            MapItem(x: 12, y: 34, resonance: 4, mine: false),
-            MapItem(x: 100, y: 200, resonance: 2.5, mine: true),
-        ])
+        let items = try Library(root: root).map().items.sorted { $0.id < $1.id }
+        XCTAssertEqual(items.map(\.x), [12, 100])
+        XCTAssertEqual(items.map(\.y), [34, 200])
+        XCTAssertEqual(items.map(\.resonance), [4, 2.5])
+        XCTAssertEqual(items.map(\.mine), [false, true])
+        XCTAssertEqual(items.map(\.groups), [[.liked, .kept], [.made]])
     }
 
     func testRepeatedInteractionsCountOnce() throws {
         try place("x:1", types: ["open", "open", "open"])
-        XCTAssertEqual(try Library(root: root).mapItems().first?.resonance, 0.5)
+        XCTAssertEqual(try Library(root: root).map().items.first?.resonance, 0.5)
+    }
+
+    func testTimeIsTheFirstRealEngagementThenAnEstimateThenPublication() throws {
+        try writer.write { db in
+            try db.execute(sql: """
+                insert into item(id, platform, created_at) values ('x:real', 'x', 900), ('x:est', 'x', 900), ('x:none', 'x', 900);
+                insert into layout(item_id, model, x, y, cluster) values
+                  ('x:real', 'clip-vit-b-32', 1, 1, 0), ('x:est', 'clip-vit-b-32', 2, 2, 0), ('x:none', 'clip-vit-b-32', 3, 3, 0);
+                insert into interaction(item_id, type, at, at_estimated) values
+                  ('x:real', 'like', 100, 1), ('x:real', 'save', 500, 0), ('x:real', 'post', 300, 0),
+                  ('x:est', 'like', 200, 1), ('x:est', 'save', 0, 0);
+                """)
+        }
+        let times = Dictionary(uniqueKeysWithValues: try Library(root: root).map().items.map { ($0.id, $0.time) })
+        XCTAssertEqual(times["x:real"], 300)
+        XCTAssertEqual(times["x:est"], 200)
+        XCTAssertEqual(times["x:none"], 900)
+    }
+
+    func testFirstPictureGivesThumbnailAndAspect() throws {
+        try place("x:1")
+        try writer.write { db in
+            try db.execute(sql: """
+                insert into media(item_id, ord, kind, thumb_path, width, height, status) values
+                  ('x:1', 1, 'image', 'second-t.webp', 100, 100, 'ok'),
+                  ('x:1', 0, 'image', 'failed-t.webp', 100, 100, 'failed'),
+                  ('x:1', 2, 'image', 'third-t.webp', 300, 100, 'ok');
+                """)
+        }
+        let item = try XCTUnwrap(Library(root: root).map().items.first)
+        XCTAssertEqual(item.thumb, "second-t.webp")
+        XCTAssertEqual(item.aspect, 1)
+    }
+
+    func testWaitingItemsCountButGoneOnesDont() throws {
+        try place("x:placed")
+        try writer.write { db in
+            try db.execute(sql: """
+                insert into item(id, platform, hydrated, created_at) values
+                  ('x:waiting', 'x', 0, 700), ('x:gone', 'x', -1, 800);
+                """)
+        }
+        let map = try Library(root: root).map()
+        XCTAssertEqual(map.waiting, 1)
+        XCTAssertEqual(map.waitingTimes, [700])
+    }
+
+    func testDetailReadsHistoryMediaAndNeighbors() throws {
+        try place("x:1", types: ["like"])
+        try writer.write { db in
+            try db.execute(sql: """
+                update item set url = 'https://example.com/1', created_at = 42 where id = 'x:1';
+                update layout set neighbors = '["x:2", "x:3"]' where item_id = 'x:1';
+                insert into media(item_id, ord, kind, local_path, thumb_path, status) values
+                  ('x:1', 1, 'image', 'b-d.webp', 'b-t.webp', 'ok'), ('x:1', 0, 'video', 'a-d.webp', 'a-t.webp', 'ok');
+                """)
+        }
+        let detail = try Library(root: root).detail(of: "x:1")
+        XCTAssertEqual(detail.url, "https://example.com/1")
+        XCTAssertEqual(detail.createdAt, 42)
+        XCTAssertEqual(detail.interactions.map(\.type), ["like"])
+        XCTAssertEqual(detail.media.map(\.display), ["a-d.webp", "b-d.webp"])
+        XCTAssertEqual(detail.neighbors, ["x:2", "x:3"])
     }
 
     func testUnknownTypeCountsOneAndNoInteractionsCountZero() {
@@ -74,16 +141,16 @@ final class LibraryTests: XCTestCase {
         try place("x:has-picture", hydrated: -1, text: nil)
         try place("x:failed-picture", hydrated: -1, text: nil)
         try writer.write { db in
-            try db.execute(sql: "insert into media values ('x:has-picture', 0, 'image', 'ok')")
-            try db.execute(sql: "insert into media values ('x:failed-picture', 0, 'image', 'failed')")
+            try db.execute(sql: "insert into media(item_id, ord, kind, status) values ('x:has-picture', 0, 'image', 'ok')")
+            try db.execute(sql: "insert into media(item_id, ord, kind, status) values ('x:failed-picture', 0, 'image', 'failed')")
         }
-        XCTAssertEqual(try Library(root: root).mapItems().count, 2)
+        XCTAssertEqual(try Library(root: root).map().items.count, 2)
     }
 
     func testOnlyReadsTheCurrentModel() throws {
         try place("x:1")
         try place("x:2", model: "lite")
-        XCTAssertEqual(try Library(root: root).mapItems().count, 1)
+        XCTAssertEqual(try Library(root: root).map().items.count, 1)
     }
 
     func testCannotWrite() throws {
@@ -100,10 +167,10 @@ final class LibraryTests: XCTestCase {
             try db.execute(sql: "begin immediate")
             try db.execute(sql: "update layout set x = 999")
             // The uncommitted change isn't visible and doesn't block the read.
-            XCTAssertEqual(try Library(root: root).mapItems().first?.x, 100)
+            XCTAssertEqual(try Library(root: root).map().items.first?.x, 100)
             try db.execute(sql: "commit")
         }
-        XCTAssertEqual(try Library(root: root).mapItems().first?.x, 999)
+        XCTAssertEqual(try Library(root: root).map().items.first?.x, 999)
     }
 
     func testMissingLibraryAndMissingMapSayWhatToDo() throws {
@@ -111,7 +178,7 @@ final class LibraryTests: XCTestCase {
         XCTAssertThrowsError(try Library(root: nowhere)) {
             XCTAssertEqual($0 as? LibraryError, .notFound(path: nowhere.path))
         }
-        XCTAssertThrowsError(try Library(root: root).mapItems()) {
+        XCTAssertThrowsError(try Library(root: root).map().items) {
             XCTAssertEqual($0 as? LibraryError, .noMap)
         }
     }

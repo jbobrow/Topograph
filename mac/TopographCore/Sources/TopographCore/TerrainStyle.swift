@@ -42,7 +42,15 @@ public enum TerrainStyle {
     /// A marker's size before zoom: `screen radius = base * sqrt(k)`, in points.
     public static func markerBase(resonance: Float) -> Float { 1 + resonance.squareRoot() * 0.5 }
 
-    /// The zoom at which the viewer hands markers over to thumbnails. Markers stop
-    /// growing here so they don't overwhelm the map.
-    public static let markerZoomLimit: Double = 2.4
+    /// From this zoom the most resonant pictures show as thumbnails, and everything
+    /// else is a small dot.
+    public static let thumbnailZoom: Double = 2.4
+    /// That dot's radius in points.
+    public static let dotRadius: Float = 1.8
+
+    /// A thumbnail's long edge in points before resonance. It grows with zoom, up to a limit.
+    public static func thumbnailSize(k: Double) -> Double { min(150, 6.5 * pow(k, 0.9)) }
+
+    /// How much larger a resonant thumbnail is drawn.
+    public static func thumbnailScale(resonance: Float) -> Double { 0.7 + 0.15 * Double(min(resonance, 4)) }
 }

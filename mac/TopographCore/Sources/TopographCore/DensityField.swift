@@ -23,13 +23,15 @@ public struct DensityField: Sendable {
     /// The highest point in d3's units, before scaling.
     public let peak: Double
 
-    public init(items: [MapItem]) {
+    /// `items` at their positions. The elevation is scaled by `fullPeak` when it's given,
+    /// so a filtered map keeps the same contour heights as the whole one.
+    public init(items: [MapItem], visible: [Int32]? = nil, fullPeak: Double? = nil) {
         let n = Int(Self.mapSize + Self.origin * 2) >> 2
         var values = [Float](repeating: 0, count: n * n)
         let origin = Float(Self.origin), toCell = Float(1 / Self.cellSize)
-        for item in items {
+        func add(_ item: MapItem) {
             let cx = (item.x + origin) * toCell, cy = (item.y + origin) * toCell
-            guard cx >= 0, cy >= 0, cx < Float(n), cy < Float(n) else { continue }
+            guard cx >= 0, cy >= 0, cx < Float(n), cy < Float(n) else { return }
             let weight = item.resonance > 0 ? item.resonance : 1
             let x0 = Int(cx), y0 = Int(cy)
             let tx = cx - Float(x0) - 0.5, ty = cy - Float(y0) - 0.5
@@ -38,6 +40,11 @@ public struct DensityField: Sendable {
             values[x1 + y0 * n] += tx * (1 - ty) * weight
             values[x1 + y1 * n] += tx * ty * weight
             values[x0 + y1 * n] += (1 - tx) * ty * weight
+        }
+        if let visible {
+            for index in visible { add(items[Int(index)]) }
+        } else {
+            items.forEach(add)
         }
 
         var scratch = values
@@ -63,11 +70,13 @@ public struct DensityField: Sendable {
         }
         // And after three more it is in `values`.
 
-        let highest = values.max() ?? 0
+        let unit = Float(Self.cellSize * Self.cellSize)
+        let highest = (values.max() ?? 0) / unit
+        let scale = Float(fullPeak ?? 0) > 0 ? Float(fullPeak!) : highest
         width = n
         height = n
-        peak = Double(highest) / (Self.cellSize * Self.cellSize)
-        elevation = highest > 0 ? values.map { $0 / highest } : values
+        peak = Double(highest)
+        elevation = scale > 0 ? values.map { $0 / unit / scale } : values
     }
 
     /// A box blur with a fractional radius (`d3.blur2`): whole cells inside the

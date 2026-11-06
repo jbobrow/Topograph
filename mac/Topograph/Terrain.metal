@@ -10,13 +10,14 @@ struct Uniforms {
     float4 ground;
     float4 ink;
     float4 hair;
+    float4 surface;
     float2 drawable;   // pixels
     float2 translate;  // points
     float scale;       // pixels per point
     float k;           // points per map unit
     float origin;      // map units the field extends past the map
     float cell;        // map units per field cell
-    float markerZoom;
+    float dotRadius;   // points; when above 0, every marker is a plain dot this size
 };
 
 struct TerrainVarying {
@@ -116,7 +117,7 @@ vertex MarkerVarying markerVertex(uint vid [[vertex_id]], uint iid [[instance_id
                                   constant Uniforms &u [[buffer(0)]],
                                   constant Marker *markers [[buffer(1)]]) {
     Marker m = markers[iid];
-    float radius = m.base * sqrt(min(u.k, u.markerZoom)) * u.scale;
+    float radius = (u.dotRadius > 0 ? u.dotRadius : m.base * sqrt(u.k)) * u.scale;
     float reach = radius + 1.0 * u.scale + 1.0;
     float2 corner = float2(vid & 1, (vid >> 1) & 1) * 2 - 1;
     float2 center = (m.position * u.k + u.translate) * u.scale;
@@ -129,8 +130,104 @@ fragment float4 markerFragment(MarkerVarying in [[stage_in]], constant Uniforms 
     float d = in.mine > 0.5 ? max(abs(in.offset.x), abs(in.offset.y)) : length(in.offset);
     float fill = saturate(in.radius - d + 0.5);
     // A thin outline in the ground color keeps overlapping markers apart.
-    float outline = saturate(0.4 * u.scale + 0.5 - abs(d - in.radius));
+    float outline = u.dotRadius > 0 ? 0 : saturate(0.4 * u.scale + 0.5 - abs(d - in.radius));
     float3 rgb = mix(u.ink.rgb * fill, u.ground.rgb, outline);
     float alpha = mix(fill, 1.0, outline);
     return float4(rgb, alpha);
+}
+
+// Thumbnails. Each is drawn on its own, with a frame: heavy for what you made, fine
+// for what you kept.
+
+struct Thumb {
+    float2 center;  // pixels
+    float2 half_size;
+    float frame;
+    float mine;
+    float mode;     // 0 color, 1 gray or 1-bit (both follow the theme's ramp)
+    float has_image;
+    float nearest;
+};
+
+struct ThumbVarying {
+    float4 position [[position]];
+    float2 local;   // pixels from the center
+};
+
+vertex ThumbVarying thumbVertex(uint vid [[vertex_id]], constant Uniforms &u [[buffer(0)]],
+                                constant Thumb &t [[buffer(1)]]) {
+    float2 corner = float2(vid & 1, (vid >> 1) & 1) * 2 - 1;
+    float2 local = corner * (t.half_size + t.frame);
+    float2 clip = (t.center + local) / u.drawable * 2 - 1;
+    return { float4(clip.x, -clip.y, 0, 1), local };
+}
+
+fragment float4 thumbFragment(ThumbVarying in [[stage_in]], constant Uniforms &u [[buffer(0)]],
+                              constant Thumb &t [[buffer(1)]], texture2d<float> image [[texture(0)]]) {
+    constexpr sampler smooth(filter::linear, mip_filter::linear, address::clamp_to_edge);
+    constexpr sampler blocky(filter::nearest, address::clamp_to_edge);
+
+    if (any(abs(in.local) > t.half_size)) {
+        if (t.mine > 0.5) return u.ink;
+        // A fine line at the outer edge, then a sliver of surface.
+        float2 outer = t.half_size + t.frame - abs(in.local);
+        return min(outer.x, outer.y) < 0.75 * u.scale ? u.ink : u.surface;
+    }
+    if (t.has_image < 0.5) {
+        // Not ready yet: a hatched card rather than a blank one.
+        float line = fmod(in.local.x + in.local.y + 4096.0, 6.0 * u.scale);
+        return line < u.scale ? u.hair : u.surface;
+    }
+    float2 uv = in.local / t.half_size * 0.5 + 0.5;
+    float4 c = t.nearest > 0.5 ? image.sample(blocky, uv) : image.sample(smooth, uv);
+    if (t.mode < 0.5) return float4(c.rgb, 1);
+    // Luminance onto the theme's own dark-to-light ramp, so pictures stay positive in dark mode.
+    float lum = dot(c.rgb, float3(0.2126, 0.7152, 0.0722));
+    bool inkIsDark = dot(u.ink.rgb, float3(1)) < dot(u.surface.rgb, float3(1));
+    float3 lo = inkIsDark ? u.ink.rgb : u.surface.rgb, hi = inkIsDark ? u.surface.rgb : u.ink.rgb;
+    return float4(mix(lo, hi, lum), 1);
+}
+
+// Plain rectangles in pixels, for the selection's viewfinder.
+
+struct Bar {
+    float2 origin;
+    float2 size;
+};
+
+vertex float4 barVertex(uint vid [[vertex_id]], uint iid [[instance_id]], constant Uniforms &u [[buffer(0)]],
+                        constant Bar *bars [[buffer(1)]]) {
+    float2 corner = float2(vid & 1, (vid >> 1) & 1);
+    float2 clip = (bars[iid].origin + corner * bars[iid].size) / u.drawable * 2 - 1;
+    return float4(clip.x, -clip.y, 0, 1);
+}
+
+fragment float4 barFragment(constant Uniforms &u [[buffer(0)]]) {
+    return u.ink;
+}
+
+// Region names: each one a small bitmap, premultiplied.
+
+struct Label {
+    float2 origin;  // pixels
+    float2 size;
+    float alpha;
+};
+
+struct LabelVarying {
+    float4 position [[position]];
+    float2 uv;
+    float alpha;
+};
+
+vertex LabelVarying labelVertex(uint vid [[vertex_id]], constant Uniforms &u [[buffer(0)]],
+                                constant Label &l [[buffer(1)]]) {
+    float2 corner = float2(vid & 1, (vid >> 1) & 1);
+    float2 clip = (l.origin + corner * l.size) / u.drawable * 2 - 1;
+    return { float4(clip.x, -clip.y, 0, 1), corner, l.alpha };
+}
+
+fragment float4 labelFragment(LabelVarying in [[stage_in]], texture2d<float> image [[texture(0)]]) {
+    constexpr sampler near(filter::nearest, address::clamp_to_edge);
+    return image.sample(near, in.uv) * in.alpha;
 }

@@ -32,6 +32,7 @@ struct RGB: Sendable {
 
     var simd: SIMD4<Float> { SIMD4(red, green, blue, 1) }
     var color: Color { Color(.sRGB, red: Double(red), green: Double(green), blue: Double(blue)) }
+    var cg: CGColor { CGColor(srgbRed: CGFloat(red), green: CGFloat(green), blue: CGFloat(blue), alpha: 1) }
 }
 
 /// IBM Plex Mono, bundled with the app.
@@ -50,4 +51,9 @@ enum PlexMono {
         }
         return .custom(name, fixedSize: size)
     }
+}
+
+/// IBM Plex Sans, for captions and prose.
+enum PlexSans {
+    static func font(size: CGFloat) -> Font { .custom("IBMPlexSans-Regular", fixedSize: size) }
 }
