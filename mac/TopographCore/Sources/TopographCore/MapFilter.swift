@@ -9,7 +9,7 @@ public struct ActionGroups: OptionSet, Sendable, Hashable {
     public static let liked = ActionGroups(rawValue: 2)
     public static let kept = ActionGroups(rawValue: 4)
     public static let all: ActionGroups = [.made, .liked, .kept]
-    /// What you made, what you took in, and both: the filter's three positions.
+    /// What you made and what you took in: the filter's two toggles.
     public static let creation: ActionGroups = .made
     public static let consumption: ActionGroups = [.liked, .kept]
 

@@ -7,7 +7,7 @@ struct FilterBar: View {
     let theme: Theme
     @State private var query = ""
 
-    private static let groups: [(ActionGroups, String)] = [(.creation, "creation"), (.consumption, "consumption"), (.all, "creation + consumption")]
+    private static let groups: [(ActionGroups, String)] = [(.creation, "creation"), (.consumption, "consumption")]
 
     var body: some View {
         HStack(spacing: 14) {
@@ -22,8 +22,16 @@ struct FilterBar: View {
             }
             HStack(spacing: 4) {
                 ForEach(Self.groups, id: \.1) { group, label in
-                    Button(label) { model.filter.groups = group }
-                        .buttonStyle(KeyStyle(theme: theme, led: model.filter.groups == group))
+                    let on = model.filter.groups.isSuperset(of: group)
+                    Button(label) {
+                        if !on {
+                            model.filter.groups.formUnion(group)
+                        } else if model.filter.groups != group {
+                            // The last one stays on: with neither, the map would be empty.
+                            model.filter.groups.subtract(group)
+                        }
+                    }
+                    .buttonStyle(KeyStyle(theme: theme, led: on))
                 }
             }
             HStack(spacing: 4) {
