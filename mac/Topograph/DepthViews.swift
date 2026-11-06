@@ -518,6 +518,20 @@ struct ProcessScreen: View {
     @State private var open: [Int32]?
     @State private var frame = 0
     @State private var playing = false
+    /// The open piece's pictures by position. All loaded up front, so high frame rates hold.
+    @State private var pictures: [Int: NSImage] = [:]
+    @State private var picturesFor: [Int32]?
+    @State private var hoveringPicture = false
+    @AppStorage("processFramesPerSecond") private var framesPerSecond = 20
+    @AppStorage("processLoops") private var loops = true
+
+    private static let frameRates = [10, 20, 30, 60, 120]
+    private static let pictureEdge = 640
+
+    private struct PlayJob: Equatable {
+        let playing: Bool
+        let rate: Int
+    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -535,7 +549,7 @@ struct ProcessScreen: View {
                             Button {
                                 open = sequence
                                 frame = 0
-                                playing = true
+                                playing = false
                             } label: {
                                 HStack(spacing: 4) {
                                     Text("\(sequence.count)")
@@ -566,39 +580,91 @@ struct ProcessScreen: View {
             guard let map = model.map else { return }
             sequences = await Task.detached(priority: .userInitiated) { ProcessSequences.find(items: map.items) }.value
         }
-        .task(id: playing) {
-            while playing, let open, !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(420))
-                guard playing else { return }
-                if frame + 1 < open.count { frame += 1 } else { playing = false }
+        // Plays from the top once every picture is ready.
+        .task(id: open) {
+            guard let open, let map = model.map, let library = model.library else { return }
+            let urls = open.map { map.items[Int($0)].thumb.map(library.file) }
+            var loaded: [Int: NSImage] = [:]
+            await withTaskGroup(of: (Int, NSImage?).self) { group in
+                for (position, url) in urls.enumerated() {
+                    guard let url else { continue }
+                    group.addTask { await (position, PictureCache.shared.image(url: url, longEdge: Self.pictureEdge)) }
+                }
+                for await (position, image) in group { loaded[position] = image }
+            }
+            guard !Task.isCancelled else { return }
+            pictures = loaded
+            picturesFor = open
+            playing = true
+        }
+        // By the clock, so a frame rate above what the display shows skips frames rather than slowing down.
+        .task(id: PlayJob(playing: playing, rate: framesPerSecond)) {
+            guard playing, let open else { return }
+            let clock = ContinuousClock()
+            let (started, first, rate) = (clock.now, frame, Double(framesPerSecond))
+            var step = 0
+            while !Task.isCancelled {
+                // Each step has its own moment, so a late wake-up doesn't pile up into a jump.
+                step += 1
+                try? await clock.sleep(until: started.advanced(by: .seconds(Double(step) / rate)))
+                guard !Task.isCancelled else { return }
+                let elapsed = started.duration(to: clock.now)
+                let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+                // Past the display's own rate, frames are skipped to keep to the clock.
+                step = max(step, Int(seconds * rate))
+                let next = first + step
+                if next >= open.count, !loops {
+                    frame = open.count - 1
+                    playing = false
+                    return
+                }
+                frame = next % open.count
             }
         }
     }
 
     @ViewBuilder
     private var player: some View {
-        if let open, let map = model.map, let library = model.library, frame < open.count {
+        if let open, let map = model.map, frame < open.count {
             let item = map.items[Int(open[frame])]
             VStack(spacing: 12) {
-                if let thumb = item.thumb {
-                    LibraryPicture(url: library.file(thumb), longEdge: 640, mode: model.imageMode, theme: theme)
-                        .aspectRatio(CGFloat(item.aspect ?? 1), contentMode: .fit)
-                        .overlay(Rectangle().strokeBorder(theme.rule.color, lineWidth: 1))
-                        .frame(maxHeight: .infinity)
-                }
-                HStack(spacing: 8) {
-                    Button(playing ? "■" : "▶") {
-                        if !playing && frame + 1 >= open.count { frame = 0 }
-                        playing.toggle()
+                if picturesFor == open {
+                    if let picture = pictureAtOrBefore(frame) {
+                        Image(nsImage: picture)
+                            .resizable()
+                            .saturation(model.imageMode == .color || hoveringPicture ? 1 : 0)
+                            .aspectRatio(CGFloat(item.aspect ?? 1), contentMode: .fit)
+                            .overlay(Rectangle().strokeBorder(theme.rule.color, lineWidth: 1))
+                            .onHover { hoveringPicture = $0 }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        Spacer()
                     }
-                    .buttonStyle(SquareKeyStyle(theme: theme))
-                    Button("‹") { playing = false; frame = max(0, frame - 1) }.buttonStyle(SquareKeyStyle(theme: theme))
-                    Button("›") { playing = false; frame = min(open.count - 1, frame + 1) }.buttonStyle(SquareKeyStyle(theme: theme))
-                    Text("\(frame + 1) / \(open.count)   \(item.time.map(Format.date) ?? "")")
-                        .font(PlexMono.font(.regular, size: 11))
-                        .foregroundStyle(theme.secondary.color)
-                    Spacer()
-                    Button("details") { model.openItem(open[frame]) }.buttonStyle(KeyStyle(theme: theme))
+                } else {
+                    LoadingNote(text: "loading \(open.count) versions", theme: theme)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                FrameScrubber(count: open.count, frame: frame, theme: theme) { position in
+                    playing = false
+                    frame = position
+                }
+                .frame(height: 26)
+                // Side by side if there's room, or the frame rate goes on a row of its own.
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        transport(open, item: item)
+                        Spacer(minLength: 12)
+                        frameRate
+                        details(open)
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 8) {
+                            transport(open, item: item)
+                            Spacer(minLength: 12)
+                            details(open)
+                        }
+                        frameRate
+                    }
                 }
             }
             .padding(20)
@@ -606,6 +672,87 @@ struct ProcessScreen: View {
             Text("Pick a piece to watch it change.")
                 .font(PlexSans.font(size: 13))
                 .foregroundStyle(theme.secondary.color)
+        }
+    }
+
+    /// A version that failed to load leaves the one before it showing.
+    private func pictureAtOrBefore(_ position: Int) -> NSImage? {
+        stride(from: position, through: 0, by: -1).lazy.compactMap { pictures[$0] }.first
+    }
+
+    private func transport(_ open: [Int32], item: MapItem) -> some View {
+        HStack(spacing: 8) {
+            // These read the open piece on the press, since a keyboard shortcut can keep calling
+            // the action it first had.
+            Button(playing ? "■" : "▶") {
+                if !playing && frame + 1 >= (self.open?.count ?? 0) { frame = 0 }
+                playing.toggle()
+            }
+            .buttonStyle(SquareKeyStyle(theme: theme))
+            .accessibilityLabel(playing ? "Pause" : "Play")
+            .hotkey("space", key: .space, modifiers: [], model: model, theme: theme)
+            Button("‹") { playing = false; frame = max(0, frame - 1) }
+                .buttonStyle(SquareKeyStyle(theme: theme))
+                .accessibilityLabel("Previous version")
+                .hotkey("←", key: .leftArrow, modifiers: [], model: model, theme: theme)
+            Button("›") { playing = false; frame = min((self.open?.count ?? 1) - 1, frame + 1) }
+                .buttonStyle(SquareKeyStyle(theme: theme))
+                .accessibilityLabel("Next version")
+                .hotkey("→", key: .rightArrow, modifiers: [], model: model, theme: theme)
+            Text("\(frame + 1) / \(open.count)   \(item.time.map(Format.date) ?? "")")
+                .font(PlexMono.font(.regular, size: 11))
+                .foregroundStyle(theme.secondary.color)
+                .lineLimit(1)
+                .fixedSize()
+        }
+    }
+
+    private var frameRate: some View {
+        HStack(spacing: 4) {
+            Button("loop") { loops.toggle() }
+                .buttonStyle(KeyStyle(theme: theme, led: loops))
+                .padding(.trailing, 8)
+            UpwardPicker(title: "Frames per second", options: Self.frameRates, selection: $framesPerSecond, label: { "\($0) fps" }, theme: theme)
+        }
+        .fixedSize()
+    }
+
+    private func details(_ open: [Int32]) -> some View {
+        Button("details") { model.openItem(open[frame]) }.buttonStyle(KeyStyle(theme: theme))
+    }
+}
+
+/// A mark for each version, the current one solid. Press or drag to go to a version.
+private struct FrameScrubber: View {
+    let count: Int
+    let frame: Int
+    let theme: Theme
+    let onScrub: (Int) -> Void
+
+    var body: some View {
+        GeometryReader { geometry in
+            Canvas { context, size in
+                let inset = 6.0
+                let step = (size.width - inset * 2) / Double(max(count, 1))
+                let ticks = step >= 3
+                for position in 0..<count where ticks {
+                    let x = (inset + (Double(position) + 0.5) * step).rounded()
+                    context.fill(Path(CGRect(x: x, y: size.height / 2 - 4, width: 1, height: 8)),
+                                 with: .color(position <= frame ? theme.ink.color : theme.rule.color))
+                }
+                let width = max(step, 3)
+                let left = inset + Double(frame) * step
+                context.fill(Path(CGRect(x: left, y: 4, width: width, height: size.height - 8)), with: .color(theme.ink.color))
+            }
+            .background(theme.surface.color)
+            .clipShape(RoundedRectangle(cornerRadius: 3))
+            .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(theme.rule.color, lineWidth: 1))
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0).onChanged { value in
+                let share = (value.location.x - 6) / max(geometry.size.width - 12, 1)
+                onScrub(min(max(Int(share * Double(count)), 0), count - 1))
+            })
+            .accessibilityLabel("Version \(frame + 1) of \(count)")
         }
     }
 }

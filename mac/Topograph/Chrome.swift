@@ -21,19 +21,25 @@ struct FilterBar: View {
         HStack(spacing: 14) {
             HStack(spacing: 4) {
                 ForEach(Array(model.platforms.enumerated()), id: \.element) { position, platform in
-                    let on = !model.filter.hiddenPlatforms.contains(platform)
                     Button(Format.platform(platform)) {
-                        if on { model.filter.hiddenPlatforms.insert(platform) } else { model.filter.hiddenPlatforms.remove(platform) }
+                        // Worked out here, on the press: a keyboard shortcut can keep calling
+                        // the action it first had, and one holding the state from back then
+                        // would only ever do the same thing.
+                        if model.filter.hiddenPlatforms.contains(platform) {
+                            model.filter.hiddenPlatforms.remove(platform)
+                        } else {
+                            model.filter.hiddenPlatforms.insert(platform)
+                        }
                     }
-                    .buttonStyle(KeyStyle(theme: theme, led: on))
-                    .hotkey("⇧⌘\(position + 1)", key: KeyEquivalent(Character(String(position + 1))), modifiers: [.command, .shift], model: model, theme: theme)
+                    .buttonStyle(KeyStyle(theme: theme, led: !model.filter.hiddenPlatforms.contains(platform)))
+                    // ⌥, since ⇧⌘3, ⇧⌘4 and ⇧⌘5 are the system's screenshots.
+                    .hotkey("⌥⌘\(position + 1)", key: KeyEquivalent(Character(String(position + 1))), modifiers: [.command, .option], model: model, theme: theme)
                 }
             }
             HStack(spacing: 4) {
                 ForEach(Self.groups, id: \.1) { group, label, key in
-                    let on = model.filter.groups.isSuperset(of: group)
                     Button(label) {
-                        if !on {
+                        if !model.filter.groups.isSuperset(of: group) {
                             model.filter.groups.formUnion(group)
                         } else if model.filter.groups != group {
                             model.filter.groups.subtract(group)
@@ -42,7 +48,7 @@ struct FilterBar: View {
                             triedLastOff += 1
                         }
                     }
-                    .buttonStyle(KeyStyle(theme: theme, led: on))
+                    .buttonStyle(KeyStyle(theme: theme, led: model.filter.groups.isSuperset(of: group)))
                     .hotkey("⌘\(key.character)", key: key, model: model, theme: theme)
                 }
             }
@@ -135,6 +141,72 @@ struct FilterBar: View {
 private struct FindRequest: Equatable {
     let query: String
     let byMeaning: Bool
+}
+
+/// A key showing a choice, which opens a column of keys above it to change it. A system menu
+/// can't be drawn in the app's style, and opens wherever it likes.
+struct UpwardPicker<Option: Hashable>: View {
+    let title: String
+    let options: [Option]
+    @Binding var selection: Option
+    let label: (Option) -> String
+    let theme: Theme
+    @State private var open = false
+    @State private var monitor: Any?
+
+    private let width = 58.0
+
+    var body: some View {
+        Button {
+            open.toggle()
+        } label: {
+            Text("\(label(selection))  \(open ? "▾" : "▴")").frame(width: width + 14, alignment: .leading)
+        }
+        .buttonStyle(KeyStyle(theme: theme, on: open))
+        .accessibilityLabel(title)
+        .accessibilityValue(label(selection))
+        .overlay(alignment: .bottomTrailing) {
+            if open {
+                VStack(spacing: 4) {
+                    ForEach(options, id: \.self) { option in
+                        Button {
+                            selection = option
+                            open = false
+                        } label: {
+                            Text(label(option)).frame(width: width, alignment: .leading)
+                        }
+                        .buttonStyle(KeyStyle(theme: theme, led: option == selection))
+                    }
+                }
+                .padding(4)
+                .background(theme.ground.color, in: RoundedRectangle(cornerRadius: 3))
+                .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(theme.ink.color, lineWidth: 1))
+                .fixedSize()
+                .offset(y: -30)
+            }
+        }
+        .zIndex(open ? 2 : 0)
+        .onChange(of: open) { _, isOpen in isOpen ? startWatching() : stopWatching() }
+        .onDisappear { stopWatching() }
+    }
+
+    /// A click anywhere closes it, after whatever it hit has had its turn, and so does esc.
+    private func startWatching() {
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseUp, .keyDown]) { event in
+            if event.type == .keyDown {
+                guard event.keyCode == 53 else { return event }
+                MainActor.assumeIsolated { open = false }
+                return nil
+            }
+            DispatchQueue.main.async { open = false }
+            return event
+        }
+    }
+
+    private func stopWatching() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+    }
 }
 
 /// The time scrubber: items per month, a ruler, and a selection to drag.

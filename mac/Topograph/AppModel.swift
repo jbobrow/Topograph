@@ -98,8 +98,16 @@ final class AppModel {
 
     func refreshSources() async {
         let root = libraryRoot
+        checkingSources = true
+        defer { checkingSources = false }
         sources = await Task.detached(priority: .utility) { try? Library(root: root).sources() }.value
+        sourcesAreKnown = true
     }
+
+    /// Whether the library's been asked yet. Until then, no source can be said to be missing.
+    private(set) var sourcesAreKnown = false
+    /// Whether the library's being asked right now.
+    private(set) var checkingSources = false
 
     private var search: SearchIndex?
     private var fullPeak = 0.0

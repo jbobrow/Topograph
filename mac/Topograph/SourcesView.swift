@@ -177,14 +177,18 @@ struct SourcesScreen: View {
                 Text("source").frame(width: 196, alignment: .leading)
                 Text("status")
                 Spacer()
+                // A refresh that's under way, once every row has something to show.
+                if model.checkingSources, model.sourcesAreKnown {
+                    LoadingNote(text: "checking", theme: theme).padding(.trailing, 12)
+                }
                 Text("items")
             }
             .font(PlexMono.font(.regular, size: 10))
             .foregroundStyle(theme.secondary.color)
             .padding(.bottom, 8)
             Rectangle().fill(theme.ink.color).frame(height: 1)
-            ForEach(Row.all, id: \.key) { row in
-                rowView(row)
+            ForEach(Array(Row.all.enumerated()), id: \.element.key) { position, row in
+                rowView(row, position: position)
                 Rectangle().fill(theme.rule.color).frame(height: 1)
             }
         }
@@ -202,13 +206,16 @@ struct SourcesScreen: View {
         requested = list.joined(separator: ",")
     }
 
-    private func rowView(_ row: Row) -> some View {
+    /// `position` is its place in the list, which sets where its lamp falls in the wave.
+    private func rowView(_ row: Row, position: Int) -> some View {
         let found = row.platforms.compactMap(platform)
         let items = found.reduce(0) { $0 + $1.items }
         let added = items > 0
         let waitingForEmail = !added && isRequested(row.key)
+        // Until the library's answered, nothing can be called missing.
+        let known = model.sourcesAreKnown
         return HStack(alignment: .top, spacing: 0) {
-            Channel(state: added ? .on : waitingForEmail ? .waiting : .off, theme: theme)
+            Channel(state: added ? .on : waitingForEmail || !known ? .waiting : .off, theme: theme)
                 .frame(width: 50, alignment: .leading)
                 .padding(.top, 4)
             VStack(alignment: .leading, spacing: 3) {
@@ -233,6 +240,8 @@ struct SourcesScreen: View {
             Spacer(minLength: 16)
             if added {
                 Text(items.formatted()).font(PlexMono.font(.semibold, size: 15)).foregroundStyle(theme.ink.color)
+            } else if !known {
+                LoadingNote(text: "checking", theme: theme, delay: Double(position) * 0.1)
             } else if row.isSync {
                 EmptyView()
             } else {
@@ -263,9 +272,11 @@ struct SourcesScreen: View {
     private func hydrateRow(_ progress: (done: Int, total: Int), key: String) -> some View {
         let mine = model.pipeline.running?.arguments.first == "hydrate"
         let elsewhere = model.pipeline.hydrateElsewhere
+        let checked = model.pipeline.hasCheckedHydrate
         VStack(alignment: .leading, spacing: 5) {
             HStack {
                 Text(mine || elsewhere ? "hydrate · fetching images for kept posts" : "hydrate · images still to fetch")
+                if !checked { LoadingNote(text: "checking", theme: theme) }
                 Spacer()
                 Text("\(progress.done.formatted()) / \(progress.total.formatted())")
             }
@@ -277,7 +288,7 @@ struct SourcesScreen: View {
                 .foregroundStyle(theme.secondary.color)
             if mine {
                 Button("❚❚ pause") { model.pipeline.pause() }.buttonStyle(KeyStyle(theme: theme))
-            } else if !elsewhere {
+            } else if !elsewhere, checked {
                 Button("▶ fetch") { start(title: "fetching images", ["hydrate"]) }
                     .buttonStyle(KeyStyle(theme: theme))
                     .disabled(model.pipeline.running != nil)

@@ -5,12 +5,16 @@ import SwiftUI
 struct LoadingNote: View {
     let text: String
     let theme: Theme
+    /// Seconds behind other notes' lamps, so a column of them blinks in a wave.
+    var delay = 0.0
     @State private var shown = false
+
+    private static let blink = 0.4
 
     var body: some View {
         HStack(spacing: 6) {
-            TimelineView(.periodic(from: .now, by: 0.4)) { context in
-                let on = Int(context.date.timeIntervalSinceReferenceDate / 0.4) % 2 == 0
+            TimelineView(.periodic(from: Date(timeIntervalSinceReferenceDate: delay), by: Self.blink)) { context in
+                let on = Int((context.date.timeIntervalSinceReferenceDate - delay) / Self.blink) % 2 == 0
                 Rectangle()
                     .fill(on ? theme.ink.color : Color.clear)
                     .overlay(Rectangle().strokeBorder(theme.ink.color, lineWidth: 1))

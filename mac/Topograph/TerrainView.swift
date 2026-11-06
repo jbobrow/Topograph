@@ -145,7 +145,11 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
     var onViewport: ((MapViewport) -> Void)?
     /// Whether the map is the view showing. Other views get the keyboard to themselves.
     var isActive = true {
-        didSet { if !isActive { setSpaceHeld(false) } }
+        didSet {
+            guard isActive != oldValue else { return }
+            if !isActive { setSpaceHeld(false) }
+            window?.invalidateCursorRects(for: self)
+        }
     }
     /// While the timeline plays, space pauses it instead of moving the map.
     var isPlaying = false
@@ -436,6 +440,8 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
     }
 
     override func resetCursorRects() {
+        // The map stays alive under other views, invisibly, and has no say in their cursor.
+        guard isActive else { return }
         addCursorRect(bounds, cursor: cursor)
     }
 

@@ -20,6 +20,8 @@ final class PipelineRunner {
     private(set) var failure: String?
     /// A hydrate started somewhere else, like a terminal.
     private(set) var hydrateElsewhere = false
+    /// Whether that's been looked into yet.
+    private(set) var hasCheckedHydrate = false
     private var process: Process?
     private var partial = ""
 
@@ -127,5 +129,6 @@ final class PipelineRunner {
             return check.terminationStatus == 0
         }.value
         hydrateElsewhere = found && running?.arguments.first != "hydrate"
+        hasCheckedHydrate = true
     }
 }
