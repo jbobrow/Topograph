@@ -221,14 +221,23 @@ terrain, sizes thumbnails, and orders "most resonant" lists.
    A CLIP ViT-B/32-class model is small enough that an archive of tens of thousands
    of items should embed in minutes, not hours (to be benchmarked in M2).
 5. **Layout.** UMAP reduces vectors to 2D (cosine metric, `n_neighbors≈30`,
-   `min_dist≈0.05`). HDBSCAN finds clusters. A Gaussian kernel density estimate over
-   the 2D points, weighted by resonance, becomes the terrain's elevation field;
-   contour lines are drawn at fixed density quantiles.
-6. **Label.** Each cluster gets a short name. Default: distinctive caption terms
-   (TF-IDF against the whole archive). Better: an on-device or user-keyed language
-   model looks at the cluster's 12 most central thumbnails and captions and proposes
-   a 2–4 word name. Names are editable and are kept across re-layouts by matching
-   clusters on membership overlap.
+   `min_dist≈0.05`). HDBSCAN finds fine regions; Ward linkage on their centers nests
+   them into larger ones (about 7 at the top, roughly 3 children each, down to the
+   fine regions), so every region sits inside one parent. A Gaussian kernel density
+   estimate over the 2D points, weighted by resonance, becomes the terrain's elevation
+   field; contour lines are drawn at fixed density quantiles.
+6. **Label.** Each region is named by the phrase that best tells it apart from its
+   siblings. Candidates are a curated vocabulary (`concepts.txt`) plus words, phrases
+   and hashtags that recur in the person's own captions and file and folder names.
+   Two kinds of evidence are added: how much more the phrase fits the region's items
+   than its siblings' in CLIP space (in standard deviations, with picture and text
+   items centered separately), and how much more often it appears in the region's
+   text (difference of arcsine-root proportions). A larger region is judged across
+   its sub-regions so one part can't name the whole; with nothing in common it is
+   called after its two largest parts. Names are used once, and never repeat the
+   region around them. Later: an on-device or user-keyed language model proposes
+   2–4 word names from each region's central thumbnails and captions. Names are
+   editable and are kept across re-layouts by matching regions on membership overlap.
 
 ---
 
@@ -236,9 +245,11 @@ terrain, sizes thumbnails, and orders "most resonant" lists.
 
 ### Terrain (home)
 The whole archive as a topographic map. Contour lines and soft hypsometric tinting show
-density; cluster names sit on their peaks like place names on a map. Zoom is semantic:
-far out you see regions and names, closer in the peaks resolve into thumbnails, at the
-closest level you see full images. A **time scrubber** along the bottom filters the map
+density; region names sit on their peaks like place names on a map. Zoom is semantic:
+far out you see the largest regions; as one fills the screen its name gives way to the
+names of the regions inside it, and a bar at the top shows the regions you are inside.
+Names are shown or hidden, never left half-faded. Closer in the peaks resolve into
+thumbnails, at the closest level you see full images. A **time scrubber** along the bottom filters the map
 to a window of years and can play, so you watch ranges rise and erode.
 Filters: platform, interaction type, media kind, collection.
 

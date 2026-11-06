@@ -58,9 +58,6 @@ class LiteBackend:
                 out[i, h % self.dim] += 1 if (h >> 64) & 1 else -1
         return _norm(out)
 
-    def concept_scores(self, vectors, concepts):
-        return None  # lite vectors don't share a space with text
-
 
 class ClipBackend:
     name = "clip-vit-b-32"
@@ -99,9 +96,13 @@ class ClipBackend:
                 out.append(self.model.encode_text(toks).float().cpu().numpy())
         return _norm(np.concatenate(out)) if out else np.zeros((0, self.dim), np.float32)
 
-    def concept_scores(self, vectors, concepts):
-        prompts = [f"an image of {c}" for c in concepts]
-        return vectors @ self.texts(prompts).T
+    def phrases(self, names):
+        """One vector per candidate name, averaged over a few prompt wordings."""
+        from .regions import TEMPLATES
+        acc = np.zeros((len(names), self.dim), np.float32)
+        for tpl in TEMPLATES:
+            acc += self.texts([tpl.format(nm) for nm in names])
+        return _norm(acc)
 
 
 def get_backend(name: str):

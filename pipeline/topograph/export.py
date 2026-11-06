@@ -86,14 +86,31 @@ def export(lib, model: str) -> Path:
             "interactions": dict(Counter(r["type"] for v in ixs.values() for r in v)),
             "weights": INTERACTION_WEIGHTS,
         },
-        "clusters": [{"id": cid, "label": r["label"], "terms": json.loads(r["terms"] or "[]"),
-                      "n": sizes[cid]} for cid, r in sorted(clusters.items())],
+        "clusters": region_list(clusters, sizes),
         "items": out_items,
         "unmapped": dict(sorted(unmapped.items())),
     }
     path = lib.root / "topograph.json"
     path.write_text(json.dumps(out, separators=(",", ":"), ensure_ascii=False))
     return path
+
+
+def region_list(clusters, sizes) -> list[dict]:
+    """Regions with their place in the tree; `n` counts everything inside."""
+    total = Counter()
+    for cid, n in sizes.items():
+        p = cid
+        while p is not None and p in clusters:
+            total[p] += n
+            p = clusters[p]["parent"]
+    out = []
+    for cid, r in sorted(clusters.items()):
+        out.append({"id": cid, "label": r["label"], "terms": json.loads(r["terms"] or "[]"),
+                    "n": total[cid], "parent": r["parent"], "depth": r["depth"] or 0,
+                    "x": round(r["x"], 1) if r["x"] is not None else None,
+                    "y": round(r["y"], 1) if r["y"] is not None else None,
+                    "r": round(r["r"], 1) if r["r"] is not None else None})
+    return out
 
 
 class _Handler(http.server.SimpleHTTPRequestHandler):

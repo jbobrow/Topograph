@@ -3,15 +3,10 @@
 from __future__ import annotations
 
 import json
-import re
 import warnings
 from importlib import resources
 
 import numpy as np
-
-STOP_EXTRA = {"https", "http", "amp", "rt", "t", "co", "www", "com", "just", "like", "im",
-              "don", "it's", "i'm", "via", "new", "one", "get", "got", "really", "know"}
-
 
 def load_vectors(lib, model: str):
     rows = lib.conn.execute("select item_id, vector from embedding where model=?", (model,)).fetchall()
@@ -40,7 +35,8 @@ def cluster(xy: np.ndarray, min_size: int | None = None) -> np.ndarray:
     if n < 10:
         return np.zeros(n, dtype=int)
     from sklearn.cluster import HDBSCAN
-    min_size = min_size or max(5, n // 60)
+    # Fine regions; build_tree nests them into larger ones for zoomed-out views.
+    min_size = min_size or max(12, n // 350)
     labels = HDBSCAN(min_cluster_size=min_size, min_samples=max(3, min_size // 3),
                      cluster_selection_method="leaf", copy=True).fit_predict(xy)
     if (labels >= 0).sum() == 0:
@@ -71,42 +67,43 @@ def load_concepts() -> list[str]:
     return [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
 
 
-def concept_labels(backend, vecs, labels, concepts) -> dict[int, str]:
-    if backend is None:
-        return {}
-    scores = backend.concept_scores(vecs, concepts)
-    if scores is None:
-        return {}
-    baseline = scores.mean(0)
-    clusters = sorted(set(labels) - {-1})
-    # Score each concept by how much more it fits this region than the archive
-    # as a whole, so generic concepts don't win everywhere.
-    table = np.array([scores[labels == c].mean(0) - baseline for c in clusters])
-    return {c: concepts[int(table[i].argmax())] for i, c in enumerate(clusters)}
+def load_modifiers() -> frozenset[str]:
+    """Phrases in concepts.txt's "look and feel" section, which qualify a region's parent."""
+    text = resources.files("topograph").joinpath("concepts.txt").read_text()
+    out, inside, prev = set(), False, ""
+    for ln in text.splitlines():
+        ln = ln.strip()
+        if ln.startswith("#"):
+            if not prev:                      # a section header follows a blank line
+                inside = ln.lower().startswith("# look and feel")
+        elif ln and inside:
+            out.add(ln)
+        prev = ln
+    return frozenset(out)
 
 
-def term_labels(texts: list[str | None], labels: np.ndarray, top: int = 5) -> dict[int, list[str]]:
-    from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS, TfidfVectorizer
-    clusters = sorted(set(labels) - {-1})
-    docs = []
-    for c in clusters:
-        joined = " ".join(t for t, l in zip(texts, labels) if l == c and t)
-        docs.append(re.sub(r"https?://\S+", " ", joined))
-    if not any(d.strip() for d in docs):
-        return {c: [] for c in clusters}
-    vec = TfidfVectorizer(stop_words=list(ENGLISH_STOP_WORDS | STOP_EXTRA), max_df=0.6,
-                          token_pattern=r"(?u)#?\b[a-zA-Z][a-zA-Z]{2,}\b", sublinear_tf=True)
-    try:
-        m = vec.fit_transform(docs)
-    except ValueError:
-        return {c: [] for c in clusters}
-    vocab = np.array(vec.get_feature_names_out())
-    out = {}
-    for row, c in enumerate(clusters):
-        r = m[row].toarray()[0]
-        best = r.argsort()[::-1][:top]
-        out[c] = [vocab[i] for i in best if r[i] > 0]
-    return out
+def phrase_embedder(lib, backend, model: str):
+    """CLIP vectors for candidate names, cached in the library (they never change)."""
+    if backend is None or not hasattr(backend, "phrases"):
+        return None
+
+    def embed(names):
+        c = lib.conn
+        have = {}
+        for i in range(0, len(names), 500):
+            chunk = names[i:i + 500]
+            q = "select phrase, vector from phrase_vec where model=? and phrase in (%s)" % ",".join("?" * len(chunk))
+            for r in c.execute(q, [model, *chunk]):
+                have[r["phrase"]] = np.frombuffer(r["vector"], dtype=np.float32)
+        todo = [nm for nm in names if nm not in have]
+        if todo:
+            vecs = backend.phrases(todo)
+            c.executemany("insert or replace into phrase_vec(model, phrase, vector) values (?,?,?)",
+                          [(model, nm, v.astype(np.float32).tobytes()) for nm, v in zip(todo, vecs)])
+            c.commit()
+            have.update(zip(todo, vecs))
+        return np.array([have[nm] for nm in names], dtype=np.float32)
+    return embed
 
 
 def compute_layout(lib, model: str, backend=None, log=print) -> int:
@@ -129,29 +126,13 @@ def compute_layout(lib, model: str, backend=None, log=print) -> int:
 
     texts = {r["id"]: r["text"] for r in lib.conn.execute("select id, text from item")}
     visual = {r[0] for r in lib.conn.execute("select distinct item_id from media where status='ok'")}
-    with step("Naming regions"):
-        terms = term_labels([texts.get(i) for i in ids], labels)
-        names = concept_labels(backend, vecs, labels, load_concepts())
-
-    clusters = sorted(set(labels) - {-1})
-    final = {}
-    for cl in clusters:
-        members = [ids[k] for k in np.flatnonzero(labels == cl)]
-        t = terms.get(cl, [])
-        mostly_text = sum(m in visual for m in members) < len(members) / 2
-        # Image concepts describe pictures; regions of words are named by their words.
-        if names.get(cl) and not mostly_text:
-            final[cl] = names[cl]
-        else:
-            final[cl] = ", ".join(t[:2]) if t else f"Region {cl + 1}"
-    # Disambiguate repeated names with each region's most distinctive word.
-    counts = {}
-    for name in final.values():
-        counts[name] = counts.get(name, 0) + 1
-    for cl, name in final.items():
-        if counts[name] > 1:
-            extra = next((w for w in terms.get(cl, []) if w.lower() not in name.lower()), None)
-            final[cl] = f"{name} ({extra})" if extra else name
+    from .regions import anchor, build_tree, name_tree
+    with step("Nesting regions"):
+        regions, roots = build_tree(xy, labels)
+    with step(f"Naming {len(regions):,} regions"):
+        name_tree(regions, roots, vecs, [texts.get(i) for i in ids],
+                  np.array([i in visual for i in ids]), load_concepts(),
+                  embed_phrases=phrase_embedder(lib, backend, model), modifiers=load_modifiers())
 
     c = lib.conn
     c.execute("delete from layout where model=?", (model,))
@@ -160,10 +141,14 @@ def compute_layout(lib, model: str, backend=None, log=print) -> int:
         "insert into layout(item_id, model, x, y, cluster, neighbors) values (?,?,?,?,?,?)",
         [(iid, model, float(xy[k, 0]), float(xy[k, 1]), int(labels[k]),
           json.dumps([ids[j] for j in nbrs[k]])) for k, iid in enumerate(ids)])
-    for cl in clusters:
-        c.execute("insert into cluster(model, id, label, terms) values (?,?,?,?)",
-                  (model, int(cl), final[cl], json.dumps(terms.get(cl, []))))
+    for rid, r in regions.items():
+        x, y, rad = anchor(xy, r.members)
+        c.execute("insert into cluster(model, id, label, terms, parent, depth, x, y, r) "
+                  "values (?,?,?,?,?,?,?,?,?)",
+                  (model, int(rid), r.label, json.dumps(r.terms), r.parent, r.depth, x, y, rad))
     c.commit()
-    log(f"  {len(clusters)} regions: " + ", ".join(final[cl] for cl in clusters[:8]) +
-        (", …" if len(clusters) > 8 else ""))
+    top = sorted(roots, key=lambda k: -len(regions[k].members))
+    log(f"  {len(regions)} regions in {max(r.depth for r in regions.values()) + 1 if regions else 0} "
+        f"levels; largest: " + ", ".join(regions[k].label for k in top[:8]))
+    log("  See them all with `topograph regions`.")
     return len(ids)

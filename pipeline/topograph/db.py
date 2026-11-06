@@ -72,7 +72,19 @@ create table if not exists cluster (
   id     integer not null,
   label  text,
   terms  text,
+  parent integer,          -- the region this one sits inside (null at the top)
+  depth  integer not null default 0,
+  x      real,             -- where its name goes on the map
+  y      real,
+  r      real,             -- its size (rms distance of members from its center)
   primary key (model, id)
+);
+
+create table if not exists phrase_vec (
+  model  text not null,
+  phrase text not null,
+  vector blob not null,
+  primary key (model, phrase)
 );
 
 create table if not exists meta (key text primary key, value text);
@@ -93,6 +105,14 @@ class Library:
         self.conn.execute("pragma foreign_keys = on")
         self.conn.execute("pragma journal_mode = wal")
         self.conn.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self):
+        have = {r[1] for r in self.conn.execute("pragma table_info(cluster)")}
+        for col, decl in (("parent", "integer"), ("depth", "integer not null default 0"),
+                          ("x", "real"), ("y", "real"), ("r", "real")):
+            if col not in have:
+                self.conn.execute(f"alter table cluster add column {col} {decl}")
 
     def close(self):
         self.conn.commit()

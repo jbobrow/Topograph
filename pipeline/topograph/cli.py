@@ -5,6 +5,7 @@
     topograph hydrate            # fetch media for likes/saves (slow, polite, resumable)
     topograph build              # embed + layout + export
     topograph serve              # open the viewer
+    topograph regions            # list the map's regions and their names
 """
 
 from __future__ import annotations
@@ -194,6 +195,31 @@ def _stats(lib):
     print(f"  media: {m} cached, {p} waiting to download")
 
 
+def cmd_regions(args, lib):
+    import json as _json
+
+    import numpy as np
+
+    from .regions import Region, outline
+    model = lib.get_meta("embedding_model")
+    rows = lib.conn.execute("select * from cluster where model=?", (model,)).fetchall()
+    if not rows:
+        sys.exit("No regions yet; run `topograph build` first.")
+    counts = dict(lib.conn.execute("select cluster, count(*) from layout where model=? group by cluster", (model,)).fetchall())
+    regions = {r["id"]: Region(r["id"], np.zeros(0, int), parent=r["parent"], depth=r["depth"] or 0,
+                               label=r["label"], terms=_json.loads(r["terms"] or "[]")) for r in rows}
+    sizes = {rid: counts.get(rid, 0) for rid in regions}
+    for rid, r in regions.items():
+        if r.parent in regions:
+            regions[r.parent].children.append(rid)
+    def total(rid):
+        return sizes[rid] + sum(total(k) for k in regions[rid].children)
+    for rid, r in regions.items():
+        r.members = np.zeros(total(rid), int)      # outline only needs the counts
+    roots = [rid for rid, r in regions.items() if r.parent is None]
+    print(outline(regions, roots, max_depth=args.depth))
+
+
 def cmd_stats(args, lib):
     _stats(lib)
 
@@ -239,6 +265,10 @@ def main(argv=None):
     p.add_argument("--port", type=int, default=8732)
     p.add_argument("--no-open", action="store_true")
     p.set_defaults(fn=cmd_serve)
+
+    p = sub.add_parser("regions", help="list the map's regions and their names")
+    p.add_argument("--depth", type=int, default=9, help="how many levels to show")
+    p.set_defaults(fn=cmd_regions)
 
     sub.add_parser("stats", help="summarize the library").set_defaults(fn=cmd_stats)
 

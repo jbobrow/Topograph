@@ -1,146 +1,680 @@
-# Vocabulary for naming clusters with CLIP (one phrase per line).
-# Edit freely; more specific phrases give more specific names.
+# Vocabulary for naming regions (one phrase per line, lines starting with # are notes).
+# Region names are chosen from these phrases plus words and hashtags found in your own
+# captions, file and folder names. Each phrase is matched against the region's pictures
+# and text with CLIP, so write what something looks like or is about, as you'd say it.
+# Short noun phrases make the best map labels. Edit freely.
+
+# architecture and places
 architecture
 brutalist architecture
-modernist interiors
+modernist architecture
+japanese architecture
+mid-century modern
+skyscrapers
+concrete buildings
+bridges
+staircases
+facades
+doors and windows
+ruins
+temples and churches
+houses
+tiny houses
+cabins
+interiors
 cozy interiors
 minimalist interiors
-furniture design
-lighting design
+kitchens
+bedrooms
+workspaces and desks
+studios and workshops
+libraries and bookshelves
+offices
+shop fronts
+restaurants and cafes
+hotels
+city streets
+city skylines
+cities at night
+alleyways
+parking lots
+suburbs
+gas stations
+public transit
+subway stations
+airports
+urban signage
+neon signs
+street art and graffiti
+murals
+playgrounds
+parks
 gardens
-houseplants
+japanese gardens
+greenhouses
+farms
+markets
+festivals
+
+# landscape and nature
 landscapes
 mountains
-the ocean and coastline
-forests
+volcanoes
+glaciers
 deserts
+canyons
+forests
+trees
+jungle
+fields and meadows
+rivers
+lakes
+waterfalls
+beaches
+the ocean
+coastlines
+islands
+underwater
+coral reefs
+caves
 night skies
-weather and clouds
-cities at night
-street photography
-urban signage
-travel photography
-portrait photography
-film photography
-black and white photography
-fashion
-streetwear
-sneakers
-jewelry
-hair and makeup
-tattoos
-typography
-graphic design
-posters
-logos and branding
-book covers
-editorial layout
-packaging design
-product design
-industrial design
-user interface design
-data visualization
-maps and cartography
-diagrams
-illustration
-comics
-anime illustration
-pixel art
-3d renders
-generative art
-glitch art
-abstract art
-painting
-watercolor
-drawing and sketches
-sculpture
-ceramics
-textiles and weaving
-woodworking
-crafts and handmade objects
-art installations
-museums and galleries
-film stills
-cinematography
-music and musicians
-concerts
-vinyl records
-musical instruments
-synthesizers
-dance
-theater
-food
-baking
-coffee
-cocktails
-restaurants
-cooking at home
-fruits and vegetables
-dogs
-cats
-birds
-wildlife
-insects
+stars and the milky way
+the moon
+sunsets
+sunrises
+clouds
+storms and lightning
+fog and mist
+rain
+snow
+ice
+autumn leaves
+spring blossoms
 flowers
+wildflowers
+roses
+tulips
+orchids
+succulents and cacti
+houseplants
 plants and botany
-science
-space and astronomy
-physics
-biology
-mathematics
-technology
-computers and code
-electronics and circuits
-robots
-3d printing
-cars
-motorcycles
-bicycles
-aviation
-boats
-trains
-sports
-running
-skateboarding
-surfing
-climbing
-hiking
-yoga and fitness
-games
-video games
-board games
-toys
-memes
-jokes and humor
-screenshots of text
-tweets and social media posts
-quotes
-news
-politics
-history
-old photographs
-vintage advertising
-retro computing
+mushrooms and fungi
+moss and lichen
+rocks and minerals
+crystals
+fossils
+seashells
+aerial photography
+satellite imagery
+
+# animals
+animals
+dogs
+puppies
+cats
+kittens
+birds
+owls
+parrots
+chickens
+horses
+cows
+sheep
+pigs
+rabbits
+foxes
+bears
+wolves
+deer
+monkeys
+elephants
+lions and big cats
+reptiles
+snakes
+frogs
+fish
+octopus and squid
+jellyfish
+whales and dolphins
+sharks
+insects
+butterflies and moths
+bees
+spiders
+wildlife
+pets
+zoo animals
+
+# people and life
+people
+portraits
+self-portraits
+selfies
+faces
+hands
+crowds
 children
+babies
 family
 friends
+couples
 weddings
-selfies
+birthdays
 parties
 holidays
-the sea at sunset
+christmas
+halloween
+graduation
+group photos
+people at work
+elderly people
+travel
+road trips
+camping
+picnics
+vacation photos
+everyday life
+morning routines
+
+# photography
+photography
+portrait photography
+street photography
+documentary photography
+fashion photography
+product photography
+food photography
+macro photography
+long exposure
+film photography
+black and white photography
+polaroids
+old photographs
+vintage photographs
+snapshots
 golden hour light
-pastel colors
-neon colors
-monochrome
-vivid colors
-earth tones
-patterns and textures
-geometric shapes
-nature close-ups
-water
 light and shadow
 reflections
-fog and mist
-snow
-rain
+silhouettes
+motion blur
+double exposure
+infrared photography
+drone photography
+cinematography
+film stills
+movie posters
+behind the scenes
+
+# art
+art
+fine art
+painting
+oil painting
+watercolor
+gouache
+acrylic painting
+abstract art
+abstract expressionism
+impressionism
+surrealism
+pop art
+minimalism
+modern art
+contemporary art
+classical art
+renaissance painting
+japanese prints
+ukiyo-e
+chinese ink painting
+folk art
+outsider art
+naive art
+religious art
+landscape painting
+still life
+portrait painting
+figure drawing
+drawing and sketches
+sketchbooks
+pencil drawings
+ink drawings
+charcoal drawings
+line art
+doodles
+illustration
+children's book illustration
+editorial illustration
+botanical illustration
+scientific illustration
+technical drawings
+blueprints
+comics
+manga
+anime
+cartoons
+animation
+character design
+concept art
+fantasy art
+science fiction art
+pixel art
+vector art
+collage
+printmaking
+linocut and woodcut
+screen printing
+risograph prints
+zines
+sculpture
+installation art
+land art
+light art
+kinetic sculpture
+performance art
+museums and galleries
+art exhibitions
+murals and frescoes
+mosaics
+stained glass
+calligraphy
+
+# design
+design
+graphic design
+swiss design
+bauhaus
+modernist graphic design
+posters
+gig posters
+typography
+type specimens
+lettering
+hand lettering
+hand-drawn type
+fonts
+logos
+branding and identity
+book covers
+book design
+album covers
+magazine covers
+editorial layout
+infographics
+data visualization
+charts and graphs
+maps and cartography
+old maps
+diagrams
+flowcharts
+icons
+pictograms
+signage and wayfinding
+packaging design
+labels and stickers
+patterns
+geometric patterns
+textile patterns
+color palettes
+gradients
+grids
+ui design
+app screens
+web design
+websites
+dashboards
+interface mockups
+wireframes
+design systems
+product design
+industrial design
+furniture design
+chairs
+lamps and lighting
+lighting design
+object design
+consumer electronics
+radios
+cameras
+watches
+headphones
+speakers
+keyboards
+mechanical keyboards
+tools
+hand tools
+kitchenware
+ceramics and pottery
+glassware
+textiles and weaving
+knitting
+embroidery
+quilts
+leatherwork
+woodworking
+metalwork
+jewelry
+crafts and handmade objects
+paper craft
+origami
+bookbinding
+
+# making and technology
+technology
+computers
+retro computing
+old computers
+computer code
+programming
+terminal screens
+github repositories
+software screenshots
+apps
+smartphones
+electronics
+circuit boards
+pcb design
+soldering
+breadboards
+arduino
+raspberry pi
+microcontrollers
+leds
+wiring
+sensors
+robots
+robotics
+drones
+3d printing
+3d printed objects
+cnc and laser cutting
+laser cut parts
+prototypes
+maker projects
+diy projects
+hardware startups
+cad models
+3d models
+3d renders
+generative art
+creative coding
+algorithmic art
+shaders
+procedural patterns
+fractals
+glitch art
+computer graphics
+virtual reality
+augmented reality
+artificial intelligence
+ai generated images
+machine learning
+data
+spreadsheets
+science
+physics
+chemistry
+biology
+microscopy
+anatomy
+medicine
+neuroscience
+space
+astronomy
+rockets
+satellites
+planets
+mathematics
+geometry
+equations
+engineering
+mechanisms
+gears
+machines
+factories
+manufacturing
+architecture models
+scale models
+dioramas
+
+# games and play
+games
+video games
+retro video games
+game design
+game screenshots
+board games
+card games
+tabletop games
+puzzles
+toys
+lego
+modular toys
+dice
+chess
+playing cards
+arcade machines
+game controllers
+pinball
+interactive installations
+playtesting
+
+# music and sound
+music
+musicians
+bands
+concerts
+live music
+festivals and crowds
+djs
+music studios
+synthesizers
+modular synthesizers
+drum machines
+music gear
+guitars
+pianos
+musical instruments
+vinyl records
+cassette tapes
+record stores
+sound design
+audio equipment
+
+# vehicles
+cars
+classic cars
+race cars
+trucks
+vans
+motorcycles
+bicycles
+scooters
+trains
+boats
+sailing
+airplanes
+aviation
+spacecraft
+
+# food and drink
+food
+breakfast
+baking
+bread
+pastries
+cakes
+desserts
+ice cream
+pizza
+burgers
+sushi
+ramen and noodles
+tacos
+salads
+fruit
+vegetables
+cooking at home
+recipes
+restaurant dishes
+street food
+coffee
+tea
+cocktails
+wine
+beer
+bars
+
+# fashion and the body
+fashion
+streetwear
+outfits
+vintage clothing
+shoes
+sneakers
+bags
+hats
+eyewear
+hair
+makeup
+tattoos
+nails
+costumes
+uniforms
+
+# sport and movement
+sports
+basketball
+soccer
+football
+baseball
+tennis
+running
+cycling
+skateboarding
+surfing
+snowboarding and skiing
+climbing
+hiking
+swimming
+yoga
+fitness and gym
+martial arts
+dance
+the olympics
+
+# culture, media and words
+books
+reading
+writing
+poetry
+quotes
+handwritten notes
+letters and postcards
+notebooks
+newspapers
+magazines
+news
+politics
+protests
+history
+old advertising
+vintage ads
+propaganda posters
+ephemera
+tickets
+receipts
+currency
+stamps
+flags
+memes
+jokes and humor
+reaction images
+screenshots of text
+screenshots of tweets
+social media posts
+text messages
+conversations
+announcements
+job posts
+events and invitations
+conference talks
+presentations and slides
+whiteboards
+classrooms
+education
+teaching
+kids' drawings
+museum labels
+film and television
+youtube videos
+podcasts
+celebrities
+philosophy
+religion
+spirituality
+astrology
+tarot
+mythology
+folklore
+
+# look and feel
+# These describe how something looks rather than what it is. Under a region that is a
+# thing, they qualify it: "purple" inside "orchids" is named "purple orchids".
+monochrome
+black and white
+high contrast
+pastel colors
+neon colors
+vivid colors
+earth tones
+muted colors
+blue
+red
+yellow
+green
+pink
+orange
+purple
+textured
+geometric
+minimal
+miniature
+dark and moody
+bright and airy
+cozy
+retro
+futuristic
+cyberpunk
+vaporwave
+y2k
+nostalgic
+whimsical
+cute
+weird
+uncanny
+eerie
+playful
+elegant
+rustic
+industrial
+handmade
+luxury
+vintage
+abstract
+close-up
+
+# forms and surfaces
+textures
+paper textures
+dot patterns
+stripes
+grids and lines
+geometric shapes
+circles
+organic shapes
+symmetry
+repetition
+miniatures
+close-ups
+wide views
+white space

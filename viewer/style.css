@@ -124,6 +124,14 @@ main { position: relative; min-height: 0; }
 .readout .sym { display: inline-block; width: 7px; height: 7px; margin: 0 4px 0 10px; vertical-align: 0; border: 1px solid var(--ink); }
 .readout .sym.sq { background: var(--ink); }
 .readout .sym.ci { border-radius: 50%; }
+.where {
+  position: absolute; left: 16px; top: 12px; display: flex; align-items: center; gap: 4px;
+  flex-wrap: wrap; max-width: calc(100% - 32px); z-index: 4;
+}
+.where .key:last-child { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.sep { color: var(--ink-2); font-size: 11px; padding: 0 1px; }
+.crumbs { margin: 0 0 10px; padding-right: 36px; }
+.key small { color: var(--ink-2); font-size: 10px; font-weight: 400; }
 .zoom { position: absolute; right: 16px; bottom: 12px; display: flex; flex-direction: column; gap: 4px; }
 .zoom .key { font-size: 11px; }
 

@@ -47,6 +47,7 @@ topograph files ~/Desktop ~/Downloads --dry-run   # see what it would take from 
 topograph files ~/Desktop ~/Downloads             # then read them
 topograph hydrate          # fetch images for liked/saved posts (slow and polite; resumable)
 topograph build            # embeddings + layout + region names
+topograph regions          # print the region tree and names
 topograph serve            # opens http://127.0.0.1:8732
 ```
 
@@ -85,10 +86,13 @@ On a Mac, install with the `xattr` package (included in the install line above).
 
 - **Terrain**: everything you've engaged with, placed by visual and semantic
   similarity. Elevation is how much it resonated (a save outweighs a like). Zoom in
-  and peaks resolve into images. Click a region name to see its contents and when
+  and peaks resolve into images. Regions nest: zoomed out you see the broad ones,
+  and as you zoom in their names give way to the regions inside them (the bar at
+  the top left shows where you are). Click a region name to see its contents and when
   it was on your mind; click an image for its details, your history with it and its
   nearest neighbors in taste.
-- **Strata**: each region as a layer through time.
+- **Strata**: each region as a layer through time (one level of the region tree,
+  about a dozen layers).
 - Things you made or posted are squares on the map (and solid frames on thumbnails);
   things you kept are circles. Your own files have a **show in finder** key.
 - **color / gray / 1-bit** switches how images are drawn. 1-bit dithers them to
@@ -126,7 +130,9 @@ pipeline/topograph/
   media.py     display copies, thumbnails, palettes, perceptual hashes
   hydrate.py   fetch media for links
   embed.py     CLIP (or lite) embeddings
-  layout.py    UMAP map, HDBSCAN regions, region names
+  layout.py    UMAP map, HDBSCAN regions
+  regions.py   nesting regions and naming them
+  concepts.txt vocabulary for region names (edit freely)
   export.py    viewer data + local server
 viewer/        static web viewer (d3 and IBM Plex fonts, bundled; Plex is under the SIL OFL)
 docs/SPEC.md   product spec

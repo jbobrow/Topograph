@@ -36,13 +36,36 @@
     d.search = ((d.t || "") + " @" + (d.a || "")).toLowerCase();
     d.mine = d.ix.some((x) => MINE.has(x[0]));
   });
+  // Regions nest: large ones when zoomed out, the ones inside them as you zoom in.
+  // Each item belongs to its finest region (d.c); `members` includes everything inside.
   const clusters = new Map(DATA.clusters.map((c) => [c.id, c]));
+  for (const c of clusters.values()) { c.children = []; c.own = []; }
   for (const c of clusters.values()) {
-    const m = items.filter((d) => d.c === c.id);
-    c.members = m;
-    c.cx = d3.median(m, (d) => d.x);
-    c.cy = d3.median(m, (d) => d.y);
+    const p = c.parent != null ? clusters.get(c.parent) : null;
+    if (p) p.children.push(c); else c.parent = null;
   }
+  for (const d of items) { const c = clusters.get(d.c); if (c) c.own.push(d); }
+  const roots = [...clusters.values()].filter((c) => c.parent == null);
+  (function settle(list, path) {
+    for (const c of list) {
+      c.path = [...path, c];
+      c.depth = path.length;
+      settle(c.children, c.path);
+      c.members = c.own.concat(...c.children.map((k) => k.members));
+      c.n = c.members.length;
+      if (c.x == null || c.r == null) {   // maps built before regions nested
+        const mx = d3.median(c.members, (d) => d.x), my = d3.median(c.members, (d) => d.y);
+        const a = d3.least(c.members, (d) => (d.x - mx) ** 2 + (d.y - my) ** 2);
+        c.x = a ? a.x : 500; c.y = a ? a.y : 500;
+        const cx = d3.mean(c.members, (d) => d.x), cy = d3.mean(c.members, (d) => d.y);
+        c.r = Math.max(4, Math.sqrt(d3.mean(c.members, (d) => (d.x - cx) ** 2 + (d.y - cy) ** 2) || 16));
+      }
+      c.cx = c.x; c.cy = c.y;
+    }
+  })(roots, []);
+  for (const c of clusters.values()) c.children.sort((a, b) => b.n - a.n);
+  roots.sort((a, b) => b.n - a.n);
+  const regionOf = (d) => clusters.get(d.c) || null;
 
   const groupsPresent = GROUPS.filter((g) => items.some((d) => g.types.some((t) => d.types.has(t))));
   const platformsPresent = [...new Set(items.map((d) => d.p))];
@@ -363,7 +386,146 @@
     t.restore();
   }
 
+  // ---------------------------------------------------------------- region names
+  // Which regions are named depends on zoom: a region hands over to the regions
+  // inside it once it is large on screen, and the finest regions step aside once
+  // you are well inside them. A name is either shown or not; changes take a
+  // short fade, never a half-visible resting state.
   let labelBoxes = [];
+  const expanded = new Set();
+  const labelAlpha = new Map();
+  let lastLabelFrame = 0, labelsMoving = false;
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+  let regionCount = new Map(), regionCountFor = null;
+  function countRegions() {
+    if (regionCountFor === visible) return regionCount;
+    regionCount = new Map();
+    for (const d of visible) {
+      const c = clusters.get(d.c);
+      if (c) for (const a of c.path) regionCount.set(a.id, (regionCount.get(a.id) || 0) + 1);
+    }
+    regionCountFor = visible;
+    return regionCount;
+  }
+  const expandAt = () => Math.min(W, H) * 0.3;     // a region this large (rms radius, px) opens up
+  const pastAt = () => Math.max(W, H) * 0.75;      // a finest region this large: you're inside it
+
+  function namedRegions(k) {
+    const counts = countRegions();
+    const T = expandAt(), PAST = pastAt();
+    const out = [];
+    const visit = (c) => {
+      if (!counts.get(c.id)) return;
+      const [sx, sy] = transform.apply([c.x, c.y]);
+      const size = c.r * k, reach = size * 3 + 120;
+      if (sx + reach < 0 || sx - reach > W || sy + reach < 0 || sy - reach > H) return;
+      const limit = c.children.length ? T : PAST;
+      // A little hysteresis so a name doesn't flicker at the threshold.
+      const open = expanded.has(c.id) ? size > limit * 0.85 : size > limit;
+      if (open) expanded.add(c.id); else expanded.delete(c.id);
+      if (!open) out.push(c);
+      else c.children.forEach(visit);
+    };
+    roots.forEach(visit);
+    return out;
+  }
+
+  function drawLabels(k, surface, ink, ink2) {
+    const counts = countRegions();
+    const mono = css("--mono");
+    const now = performance.now();
+    // Fades run on the clock, not on frame count, so a slow frame never leaves a
+    // name half-visible for long; the first step after a pause is one frame's worth.
+    const dt = labelsMoving ? Math.min(now - lastLabelFrame, 140) : 16;
+    lastLabelFrame = now;
+    const step = reduceMotion.matches ? 1 : Math.min(1, dt / 140);
+
+    const geometry = (c) => {
+      const [sx, sy] = transform.apply([c.x, c.y]);
+      const top = c.depth === 0;
+      const fs = top ? 12 : 11;
+      const count = (counts.get(c.id) || 0).toLocaleString();
+      ctx.font = `${top ? 600 : 500} ${fs}px ${mono}`;
+      const tw = ctx.measureText(c.label).width;
+      ctx.font = `400 10px ${mono}`;
+      const cw = ctx.measureText(count).width;
+      const lx = sx + 8, total = tw + 6 + cw;
+      return { c, sx, sy, fs, top, count, tw, lx, total,
+        box: [sx - 5, sy - fs / 2 - 3, lx + total + 4, sy + fs / 2 + 3] };
+    };
+
+    // Bigger regions claim their spot first; a name that would overlap is hidden.
+    labelBoxes = [];
+    const shown = new Map();
+    const wanted = namedRegions(k).sort((a, b) => a.depth - b.depth || b.n - a.n);
+    for (const c of wanted) {
+      const g = geometry(c);
+      const [x0, y0, x1, y1] = g.box;
+      if (x1 < 0 || x0 > W || y1 < 0 || y0 > H) continue;
+      if (labelBoxes.some((b) => !(x1 < b[0] || x0 > b[2] || y1 < b[1] || y0 > b[3]))) continue;
+      labelBoxes.push(Object.assign(g.box.slice(), { cluster: c }));
+      shown.set(c.id, g);
+    }
+    for (const id of shown.keys()) if (!labelAlpha.has(id)) labelAlpha.set(id, 0);
+    let moving = false;
+    const draw = [];
+    for (const [id, a0] of labelAlpha) {
+      const target = shown.has(id) ? 1 : 0;
+      const a = target === a0 ? a0 : target > a0 ? Math.min(1, a0 + step) : Math.max(0, a0 - step);
+      if (a <= 0 && !target) { labelAlpha.delete(id); continue; }
+      labelAlpha.set(id, a);
+      if (a !== target) moving = true;
+      draw.push([shown.get(id) || geometry(clusters.get(id)), a]);
+    }
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "left";
+    for (const [g, a] of draw) {
+      const { c, sx, sy, fs, top, count, tw, lx, total } = g;
+      ctx.globalAlpha = a;
+      ctx.fillStyle = top ? ink : surface;
+      ctx.fillRect(lx - 3, sy - fs / 2 - 3, total + 7, fs + 6);
+      ctx.strokeStyle = ink; ctx.lineWidth = 1;
+      ctx.strokeRect(Math.round(lx - 3) + 0.5, Math.round(sy - fs / 2 - 3) + 0.5, Math.round(total + 7), Math.round(fs + 6));
+      ctx.beginPath();
+      ctx.moveTo(sx - 4, sy); ctx.lineTo(sx + 4, sy); ctx.moveTo(sx, sy - 4); ctx.lineTo(sx, sy + 4);
+      ctx.stroke();
+      ctx.fillStyle = top ? surface : ink;
+      ctx.font = `${top ? 600 : 500} ${fs}px ${mono}`;
+      ctx.fillText(c.label, lx, sy + 0.5);
+      ctx.fillStyle = top ? surface : ink2;
+      ctx.font = `400 10px ${mono}`;
+      ctx.fillText(count, lx + tw + 6, sy + 0.5);
+    }
+    ctx.globalAlpha = 1;
+    labelsMoving = moving;
+    if (moving) requestDraw();
+  }
+
+  // Where you are: the regions you've zoomed inside, as keys that take you back out.
+  const whereEl = document.getElementById("where");
+  let whereKey = "";
+  function updateWhere() {
+    if (!whereEl) return;
+    const [cx, cy] = transform.invert([W / 2, H / 2]);
+    const d = quadtree && quadtree.find(cx, cy, 80 / transform.k);
+    const c = d ? clusters.get(d.c) : null;
+    const path = c ? c.path.filter((a) => expanded.has(a.id)) : [];
+    const keyNow = path.map((a) => a.id).join(">");
+    if (keyNow === whereKey) return;
+    whereKey = keyNow;
+    whereEl.replaceChildren();
+    whereEl.hidden = !path.length;
+    const all = el("button", { className: "key", textContent: "all" });
+    all.onclick = () => d3.select(canvas).transition().duration(500).call(zoom.transform, fitTransform());
+    whereEl.append(all);
+    for (const a of path) {
+      whereEl.append(el("span", { className: "sep", textContent: "›", ariaHidden: "true" }));
+      const b = el("button", { className: "key", textContent: a.label });
+      b.onclick = () => flyTo(a.x, a.y, (expandAt() * 0.7) / a.r);
+      whereEl.append(b);
+    }
+  }
+
   function thumbSize(k) { return Math.min(150, 6.5 * Math.pow(k, 0.9)); }
   function drawMap() {
     if (state.view !== "terrain" || !W) return;
@@ -471,45 +633,8 @@
       ctx.stroke();
     }
 
-    // Region names: a crosshair on the peak and a label beside it; larger regions win collisions.
-    labelBoxes = [];
-    const fade = k > 5 ? Math.max(0, 1 - (k - 5) / 4) : 1;
-    if (fade > 0) {
-      const visCount = d3.rollup(visible, (v) => v.length, (d) => d.c);
-      const order = [...clusters.values()].filter((c) => visCount.get(c.id)).sort((a, b) => b.n - a.n);
-      const mono = css("--mono");
-      ctx.textBaseline = "middle";
-      ctx.textAlign = "left";
-      for (const c of order) {
-        const [sx, sy] = transform.apply([c.cx, c.cy]);
-        if (sx < -100 || sx > W + 100 || sy < -20 || sy > H + 20) continue;
-        const fs = c.n > 400 ? 12 : 11;
-        const count = visCount.get(c.id).toLocaleString();
-        ctx.font = `500 ${fs}px ${mono}`;
-        const tw = ctx.measureText(c.label).width;
-        ctx.font = `400 10px ${mono}`;
-        const cw = ctx.measureText(count).width;
-        const lx = sx + 8, total = tw + 6 + cw;
-        const box = [sx - 5, sy - fs / 2 - 3, lx + total + 4, sy + fs / 2 + 3];
-        if (labelBoxes.some((b) => !(box[2] < b[0] || box[0] > b[2] || box[3] < b[1] || box[1] > b[3]))) continue;
-        labelBoxes.push(Object.assign(box, { cluster: c }));
-        ctx.globalAlpha = fade * (0.4 + 0.6 * (visCount.get(c.id) / c.n));
-        ctx.fillStyle = surface;
-        ctx.fillRect(lx - 3, sy - fs / 2 - 3, total + 7, fs + 6);
-        ctx.strokeStyle = ink; ctx.lineWidth = 1;
-        ctx.strokeRect(Math.round(lx - 3) + 0.5, Math.round(sy - fs / 2 - 3) + 0.5, Math.round(total + 7), Math.round(fs + 6));
-        ctx.beginPath();
-        ctx.moveTo(sx - 4, sy); ctx.lineTo(sx + 4, sy); ctx.moveTo(sx, sy - 4); ctx.lineTo(sx, sy + 4);
-        ctx.stroke();
-        ctx.fillStyle = ink;
-        ctx.font = `500 ${fs}px ${mono}`;
-        ctx.fillText(c.label, lx, sy + 0.5);
-        ctx.fillStyle = ink2;
-        ctx.font = `400 10px ${mono}`;
-        ctx.fillText(count, lx + tw + 6, sy + 0.5);
-      }
-      ctx.globalAlpha = 1;
-    }
+    drawLabels(k, surface, ink, ink2);
+    updateWhere();
 
     const legend = document.getElementById("legend");
     legend.replaceChildren();
@@ -669,9 +794,7 @@
     const c = clusters.get(d.c);
     if (c) {
       body.append(el("h3", { textContent: "region" }));
-      const a = el("button", { className: "key", textContent: c.label });
-      a.onclick = () => openRegion(c);
-      body.append(a);
+      body.append(regionPath(c.path));
     }
     const nb = (d.nb || []).map((j) => items[j]).filter(Boolean);
     if (nb.length) {
@@ -687,9 +810,20 @@
   function openRegion(c) {
     state.selected = null;
     body.replaceChildren();
+    if (c.path.length > 1) body.append(regionPath(c.path.slice(0, -1)));
     body.append(el("h2", { textContent: c.label }));
     const words = c.terms && c.terms.length ? `   words: ${c.terms.slice(0, 5).join(", ")}` : "";
     body.append(el("p", { className: "meta", textContent: `${c.n.toLocaleString()} items${words}` }));
+    if (c.children.length) {
+      body.append(el("h3", { textContent: "inside" }));
+      const keys = el("div", { className: "keys" });
+      for (const k of c.children) {
+        const b = el("button", { className: "key", textContent: `${k.label} ` }, el("small", { textContent: k.n.toLocaleString() }));
+        b.onclick = () => openRegion(k);
+        keys.append(b);
+      }
+      body.append(keys);
+    }
 
     // When this region was active.
     const times = c.members.filter((d) => d.time).map((d) => toDate(d.time));
@@ -712,7 +846,19 @@
     body.append(gridOf(list, (d) => openItem(d, true)));
     panel.hidden = false;
     panel.scrollTop = 0;
-    if (state.view === "terrain") flyTo(c.cx, c.cy, Math.max(transform.k, 2.6));
+    // Close enough that the regions inside it are named.
+    if (state.view === "terrain") flyTo(c.x, c.y, (expandAt() * (c.children.length ? 1.15 : 0.7)) / c.r);
+  }
+
+  function regionPath(path) {
+    const keys = el("div", { className: "keys crumbs" });
+    path.forEach((a, i) => {
+      if (i) keys.append(el("span", { className: "sep", textContent: "›", ariaHidden: "true" }));
+      const b = el("button", { className: "key", textContent: a.label });
+      b.onclick = () => openRegion(a);
+      keys.append(b);
+    });
+    return keys;
   }
 
   // ---------------------------------------------------------------- timeline
@@ -797,6 +943,19 @@
     { w: 2, h: 2, d: "M0 0h1v1h-1zM1 1h1v1h-1z" },                       // 50% screen
     { w: 4, h: 4, d: "M0 0h3v1h-3zM0 2h1v1h-1z" },                       // brick
   ];
+  // Strata shows a cut through the region tree with few enough layers to read:
+  // the largest regions are split into the regions inside them while that fits.
+  function strataRegions(maxLayers = 16) {
+    const cut = roots.slice();
+    for (;;) {
+      const open = cut.filter((c) => c.children.length && cut.length - 1 + c.children.length <= maxLayers)
+        .sort((a, b) => b.n - a.n)[0];
+      if (!open) break;
+      cut.splice(cut.indexOf(open), 1, ...open.children);
+    }
+    return cut.sort((a, b) => b.n - a.n);
+  }
+
   const strataTip = document.getElementById("strata-tip");
   function drawStrata() {
     if (state.view !== "strata") return;
@@ -807,15 +966,18 @@
     svg.selectAll("*").remove();
     const months = d3.timeMonth.range(tExtent[0], tExtent[1]);
     const idx = new Map(months.map((m, i) => [+m, i]));
-    const order = [...clusters.values()].sort((a, b) => b.n - a.n);
-    const keys = order.map((c) => String(c.id));
+    const layers = strataRegions();
+    const layerOf = new Map();
+    for (const c of layers) (function mark(r) { layerOf.set(r.id, c.id); r.children.forEach(mark); })(c);
+    const keys = layers.map((c) => String(c.id));
     const hasUnmapped = unmappedMonths.length > 0;
     if (hasUnmapped) keys.push("unmapped");
     const table = months.map((m) => { const r = { date: m }; keys.forEach((k) => (r[k] = 0)); return r; });
     for (const d of visible) {
-      if (!d.time || d.c < 0) continue;
+      const layer = d.time ? layerOf.get(d.c) : undefined;
+      if (layer == null) continue;
       const i = idx.get(+d3.timeMonth.floor(toDate(d.time)));
-      if (i != null) table[i][String(d.c)] += d.r;
+      if (i != null) table[i][String(layer)] += d.r;
     }
     if (hasUnmapped) for (const [m, n] of unmappedMonths) { const i = idx.get(+m); if (i != null) table[i].unmapped += n; }
     // Light smoothing so layers read as strata rather than noise.
@@ -937,5 +1099,5 @@
   document.fonts && document.fonts.ready.then(() => { requestDraw(); drawTimeline(); });
 
   // Handle for automated tests and the console.
-  window.topograph = { data: DATA, clusters, openItem, openRegion, flyTo, setView };
+  window.topograph = { data: DATA, clusters, openItem, openRegion, flyTo, setView, labelAlpha };
 })();

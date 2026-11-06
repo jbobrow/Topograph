@@ -351,3 +351,41 @@ def test_files_import_survives_bad_files_and_resumes(tmp_path, monkeypatch):
     report = files_mod.Report()
     again = list(files_mod.parse(files_mod.collect([root], opts, report), report, preview, done))
     assert again == [] and sum(report.already.values()) == 2
+
+
+# --- regions ------------------------------------------------------------------
+
+def test_regions_nest_and_get_distinct_names():
+    import numpy as np
+    from topograph.regions import build_tree, key, name_tree, ngrams, tokens
+
+    rng = np.random.default_rng(0)
+    topics = ["synth patch sequencer", "kerning typeface specimen", "fern moss garden",
+              "senate vote bill", "pinball arcade machine", "sourdough bread crumb",
+              "eurorack oscillator module", "lettering brush script", "succulent cactus pot",
+              "election ballot county"]
+    # Ten blobs in two big groups of five, one topic per blob.
+    xy, texts, leaf = [], [], []
+    for t, topic in enumerate(topics):
+        cx = (t % 5) * 60 + (0 if t < 5 else 600)
+        for _ in range(40):
+            xy.append([cx + rng.normal(0, 8), 300 + rng.normal(0, 8)])
+            texts.append(f"{topic} {rng.choice(['today', 'again', 'lol', ''])}")
+            leaf.append(t)
+    xy, leaf = np.array(xy), np.array(leaf)
+    regions, roots = build_tree(xy, leaf, top=2, branching=3)
+    assert len(roots) == 2 and all(len(regions[r].children) == 5 for r in roots)
+    assert all(regions[l].parent in roots for l in range(10))
+
+    vecs = np.zeros((len(xy), 4), np.float32)
+    name_tree(regions, roots, vecs, texts, np.zeros(len(xy), bool), concepts=["gardens"])
+    leaf_names = [regions[l].label for l in range(10)]
+    assert len({key(n) for n in leaf_names}) == 10                      # each name used once
+    for l, topic in enumerate(topics):
+        assert set(regions[l].label.split()) <= set(topic.split()), (l, regions[l].label)
+    for r in roots:                                                     # a child never repeats its parent
+        assert all(key(regions[k].label) != key(regions[r].label) for k in regions[r].children)
+
+    assert tokens("#GenerativeArt by @someone https://x.co/a") == ["generative", "art", "by"]
+    assert "drum machine" in ngrams(tokens("my new drum machine")) and "my new" not in ngrams(tokens("my new"))
+    assert key("Houseplants") == key("houseplant")
