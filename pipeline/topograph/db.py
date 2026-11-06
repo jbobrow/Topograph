@@ -20,7 +20,7 @@ create table if not exists item (
   text             text,
   created_at       integer,
   created_estimated integer not null default 0,
-  hydrated         integer not null default 0,   -- 0 link only, 1 fetched, -1 unreachable
+  hydrated         integer not null default 0,   -- 0 link only, 1 fetched, -1 unreachable or gone
   hydrate_attempts integer not null default 0
 );
 
@@ -194,3 +194,42 @@ def upsert_record(lib: Library, rec: Record, ingest_media) -> bool:
         if m.get("data") is not None:
             ingest_media(lib, rec.id, m["ord"], m["data"], m.get("kind", "image"), m.get("name"))
     return existing is None
+
+
+# An item is "gone" when the original can't be reached and we have nothing of it:
+# no text of its own and no picture. Gone items stay in the library (so a later
+# import doesn't bring them back as new, and hydrate doesn't keep retrying) but
+# are left off the map, Strata and counts.
+GONE_SQL = ("item.hydrated = -1 and coalesce(item.text, '') = '' and not exists "
+            "(select 1 from media m where m.item_id = item.id and m.status = 'ok')")
+
+
+def mark_unavailable(lib: Library) -> int:
+    """Clear X's "this post is unavailable" notices that were stored as text.
+
+    Returns how many items turned out to be gone. Their stale embeddings are
+    dropped so they leave the map on the next layout.
+    """
+    from .util import has_words, is_unavailable
+    c = lib.conn
+    rows = c.execute("select id, text from item where text like '%{learnmore}%' or text like '%unable to view this%' "
+                     "or text like 'This Post %' or text like 'This Tweet %'").fetchall()
+    ids = [r["id"] for r in rows if is_unavailable(r["text"])]
+    # Unreachable posts whose only text is a link: nothing left to show.
+    ids += [r["id"] for r in c.execute(
+        "select id, text from item where hydrated=-1 and coalesce(text, '') != '' and not exists "
+        "(select 1 from media m where m.item_id=item.id and m.status='ok')") if not has_words(r["text"])]
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        q = ",".join("?" * len(chunk))
+        c.execute("update item set text=null, hydrated=case when exists (select 1 from media m where "
+                  "m.item_id=item.id and m.status='ok') then hydrated else -1 end "
+                  f"where id in ({q})", chunk)
+    gone = [r[0] for r in c.execute(f"select id from item where {GONE_SQL}")]
+    for i in range(0, len(gone), 500):
+        chunk = gone[i:i + 500]
+        q = ",".join("?" * len(chunk))
+        c.execute(f"delete from embedding where item_id in ({q})", chunk)
+        c.execute(f"delete from layout where item_id in ({q})", chunk)
+    c.commit()
+    return len(gone)

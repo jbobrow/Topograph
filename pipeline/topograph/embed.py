@@ -17,6 +17,8 @@ from collections import defaultdict
 import numpy as np
 from PIL import Image
 
+from .util import has_words
+
 IMAGE_WEIGHT = 0.75  # image vs caption when an item has both
 
 WORD_RX = re.compile(r"[a-z][a-z0-9']+")
@@ -141,6 +143,10 @@ def auto_backend() -> str:
 
 
 def embed_library(lib, backend, log=print, force: bool = False) -> int:
+    from .db import mark_unavailable
+    gone = mark_unavailable(lib)
+    if gone:
+        log(f"  Leaving {gone:,} posts that are no longer online off the map.")
     c = lib.conn
     if force:
         c.execute("delete from embedding where model=?", (backend.name,))
@@ -153,7 +159,7 @@ def embed_library(lib, backend, log=print, force: bool = False) -> int:
             media[m["item_id"]].append(lib.root / m["local_path"])
 
     todo_img = [(r["id"], r["text"]) for r in rows if media.get(r["id"])]
-    todo_txt = [(r["id"], r["text"]) for r in rows if not media.get(r["id"]) and r["text"]]
+    todo_txt = [(r["id"], r["text"]) for r in rows if not media.get(r["id"]) and has_words(r["text"])]
     from .progress import Progress
     total = len(todo_img) + len(todo_txt)
     if not total:

@@ -68,12 +68,14 @@ def export(lib, model: str) -> Path:
             "nb": [index[n] for n in json.loads(row["neighbors"] or "[]") if n in index],
         })
 
-    # Items that could not be placed (bare links that never hydrated) still
-    # count toward Strata, as an "unmapped" layer.
+    # Items that could not be placed yet (links still waiting for their images)
+    # count toward Strata, as an "unmapped" layer. Posts that are gone don't.
+    from .db import GONE_SQL
+    gone = {r[0] for r in c.execute(f"select id from item where {GONE_SQL}")}
     placed = set(index)
     unmapped = Counter()
     for iid in items:
-        if iid not in placed:
+        if iid not in placed and iid not in gone:
             t = taste_time(iid)
             if t:
                 unmapped[_month(t)] += 1
@@ -81,8 +83,8 @@ def export(lib, model: str) -> Path:
     out = {
         "meta": {
             "generated": int(time.time()), "model": model,
-            "items": len(items), "placed": len(out_items),
-            "platforms": dict(Counter(i["platform"] for i in items.values())),
+            "items": len(items) - len(gone), "placed": len(out_items), "gone": len(gone),
+            "platforms": dict(Counter(i["platform"] for k, i in items.items() if k not in gone)),
             "interactions": dict(Counter(r["type"] for v in ixs.values() for r in v)),
             "weights": INTERACTION_WEIGHTS,
         },

@@ -12,7 +12,8 @@ import re
 from pathlib import PurePosixPath
 
 from ..db import Record
-from ..util import Archive, clean_text, ext_of, parse_twitter_date, snowflake_time, VIDEO_EXT
+from ..util import (Archive, clean_text, ext_of, is_unavailable, parse_twitter_date,
+                    snowflake_time, VIDEO_EXT)
 
 SHIM_RX = re.compile(r"^\s*window\.YTD\.[A-Za-z0-9_]+\.part\d+\s*=\s*", re.S)
 TCO_RX = re.compile(r"\s*https://t\.co/\w+\s*$")
@@ -147,6 +148,9 @@ def parse(archive: Archive):
                     break
             url = obj.get("expandedUrl") or f"https://x.com/i/web/status/{tid}"
             text = clean_text(obj.get("fullText") or obj.get("full_text"))
+            gone = is_unavailable(text)
+            if gone:
+                text = None     # X's notice, not the post; the post itself is gone
             yield Record(
                 id=f"x:{tid}",
                 platform="x",
@@ -155,6 +159,7 @@ def parse(archive: Archive):
                 text=text,
                 created_at=created,
                 created_estimated=False,
+                hydrated=-1 if gone else 0,
                 interactions=[{"type": ix_type, "at": at or created or 0,
                                "estimated": at is None, "source": src}],
             )

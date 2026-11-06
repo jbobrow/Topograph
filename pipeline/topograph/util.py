@@ -88,6 +88,28 @@ def deep_fix_mojibake(obj):
     return obj
 
 
+# What X puts in an archive (or a fetched page) in place of a post that is gone:
+# deleted, protected, suspended, withheld. Not anything you engaged with.
+UNAVAILABLE = re.compile(
+    r"\{learnmore\}"
+    r"|^\s*(you[’']re unable to view this (post|tweet)"
+    r"|this (post|tweet) (is from a suspended account|was deleted|is unavailable|has been deleted"
+    r"|is from an account that no longer exists|violated|has been withheld|is no longer available))",
+    re.IGNORECASE)
+
+
+def is_unavailable(text: str | None) -> bool:
+    return bool(text) and bool(UNAVAILABLE.search(text))
+
+
+def has_words(text: str | None) -> bool:
+    """Whether text says anything beyond links and @mentions."""
+    if not text:
+        return False
+    rest = re.sub(r"https?://\S+|www\.\S+|(?<!\w)@\w+", " ", text)
+    return len(re.sub(r"\W+", "", rest)) >= 3
+
+
 def clean_text(s: str | None) -> str | None:
     if not s:
         return None

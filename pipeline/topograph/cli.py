@@ -143,7 +143,9 @@ def cmd_embed(args, lib):
 
 
 def cmd_layout(args, lib, backend=None):
+    from .db import mark_unavailable
     from .layout import compute_layout
+    mark_unavailable(lib)
     model = lib.get_meta("embedding_model")
     if not model:
         sys.exit("Nothing embedded yet; run `topograph embed` first.")
@@ -183,10 +185,11 @@ def cmd_serve(args, lib):
 def _stats(lib):
     c = lib.conn
     print("\nLibrary:", lib.root)
-    for r in c.execute("select platform, count(*) n, sum(hydrated=1) h, sum(hydrated=-1) u "
+    from .db import GONE_SQL
+    for r in c.execute(f"select platform, count(*) n, sum(hydrated=1) h, sum({GONE_SQL}) g "
                        "from item group by platform"):
         print(f"  {r['platform']:10} {r['n']:6} items   {r['h'] or 0} with content, "
-              f"{r['u'] or 0} unreachable")
+              f"{r['g'] or 0} no longer online (left off the map)")
     ix = ", ".join(f"{r['type']} {r['n']}" for r in
                    c.execute("select type, count(*) n from interaction group by type order by n desc"))
     print(f"  interactions: {ix}")

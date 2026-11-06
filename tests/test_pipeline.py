@@ -389,3 +389,26 @@ def test_regions_nest_and_get_distinct_names():
     assert tokens("#GenerativeArt by @someone https://x.co/a") == ["generative", "art", "by"]
     assert "drum machine" in ngrams(tokens("my new drum machine")) and "my new" not in ngrams(tokens("my new"))
     assert key("Houseplants") == key("houseplant")
+
+
+def test_unavailable_posts_leave_the_map(tmp_path):
+    from topograph.db import GONE_SQL, Record, mark_unavailable, upsert_record
+    from topograph.util import is_unavailable
+
+    assert is_unavailable("You’re unable to view this Post because this account owner limits who can "
+                          "view their Posts. {learnmore}")
+    assert is_unavailable("This Post is from a suspended account. {learnmore}")
+    assert is_unavailable("This Tweet was deleted by the Tweet author. Learn more")
+    assert not is_unavailable("This post is about suspended ceilings")
+
+    lib = Library(tmp_path / "lib")
+    notice = "This Post is from a suspended account. {learnmore}"
+    for i, text in enumerate([notice, "a real liked post", notice]):
+        upsert_record(lib, Record(id=f"x:{i}", platform="x", kind="text", text=text,
+                                  interactions=[{"type": "like", "at": 0}]), lambda *a, **k: True)
+    lib.conn.execute("insert into embedding(item_id, model, vector) values ('x:0', 'm', x'00')")
+    assert mark_unavailable(lib) == 2
+    gone = {r[0] for r in lib.conn.execute(f"select id from item where {GONE_SQL}")}
+    assert gone == {"x:0", "x:2"}
+    assert lib.conn.execute("select count(*) from embedding").fetchone()[0] == 0
+    assert lib.conn.execute("select text from item where id='x:1'").fetchone()[0] == "a real liked post"

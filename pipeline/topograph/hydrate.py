@@ -24,7 +24,7 @@ import urllib.request
 
 from . import media as media_mod
 from .config import USER_AGENT
-from .util import instagram_shortcode, parse_twitter_date
+from .util import instagram_shortcode, is_unavailable, parse_twitter_date
 
 MAX_ATTEMPTS = 3
 
@@ -107,7 +107,12 @@ def hydrate_x(item) -> dict | None:
         return None
     if data.get("__typename") == "TweetTombstone" or not data:
         return None
-    return parse_x_syndication(data)
+    found = parse_x_syndication(data)
+    if is_unavailable(found.get("text")) and not found["media"]:
+        return None
+    if is_unavailable(found.get("text")):
+        found["text"] = None
+    return found
 
 
 # --- Instagram ----------------------------------------------------------------
