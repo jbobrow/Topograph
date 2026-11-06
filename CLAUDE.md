@@ -147,6 +147,7 @@ mac/
   TopographCore/    Swift package with no UI: Library (read-only GRDB), DensityField
                     (d3.contourDensity port), TerrainStyle, MapTransform, and tests
   Topograph/        SwiftUI shell, MTKView input, TerrainRenderer, Terrain.metal
+  tools/            make_icon.swift draws the app icon at every size
 ```
 
 The project uses a folder-synced group, so a new file in `mac/Topograph/` joins the
