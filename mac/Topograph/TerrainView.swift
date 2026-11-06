@@ -15,6 +15,12 @@ final class TerrainController {
     /// Put a spot on the map at the middle of the view, right away, as a drag on the minimap does.
     func center(x: Double, y: Double) { view?.center(x: x, y: y) }
 
+    /// The minimap keeps its own cursor; everything else on top of the map gets an arrow.
+    var pointerIsOnMinimap: Bool {
+        get { view?.pointerIsOnMinimap ?? false }
+        set { view?.pointerIsOnMinimap = newValue }
+    }
+
     /// Move to a spot on the map at a given zoom.
     func fly(x: Double, y: Double, k: Double) { view?.fly(x: x, y: y, k: k) }
 
@@ -127,6 +133,7 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
     private var labelsMoving = false
 
     private var hovered: Int32?
+    var pointerIsOnMinimap = false
     private var whereKey: [Int] = []
 
     var onHover: ((Hover?) -> Void)?
@@ -385,10 +392,19 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
     }
 
     /// False when the minimap, a key or the side panel is on top of the map there.
-    private var pointerIsOverMap: Bool {
-        guard let window, let content = window.contentView else { return false }
+    private var pointerIsOverMap: Bool { viewUnderPointer === self }
+
+    private var viewUnderPointer: NSView? {
+        guard let window, let content = window.contentView else { return nil }
         let point = window.mouseLocationOutsideOfEventStream
-        return content.hitTest(content.superview?.convert(point, from: nil) ?? point) === self
+        return content.hitTest(content.superview?.convert(point, from: nil) ?? point)
+    }
+
+    /// The map's crosshair covers its whole area, so whatever sits on top of it needs telling
+    /// apart. Text fields look after their own cursor.
+    private func setCursorOverChrome() {
+        guard !pointerIsOnMinimap, !(viewUnderPointer is NSText), !(viewUnderPointer is NSTextField) else { return }
+        NSCursor.arrow.set()
     }
 
     /// The rectangle being drawn, once the pointer has moved enough to mean it.
@@ -447,7 +463,12 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
     }
 
     override func mouseMoved(with event: NSEvent) {
-        guard pointerIsOverMap else { return clearHover() }
+        // Hidden under another view, the map has no say in the cursor.
+        guard isActive else { return }
+        guard pointerIsOverMap else {
+            setCursorOverChrome()
+            return clearHover()
+        }
         if spaceHeld {
             NSCursor.openHand.set()
             return

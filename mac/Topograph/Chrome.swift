@@ -104,7 +104,19 @@ struct TimeBar: View {
                         .onEnded { ended($0, width: geometry.size.width) })
             }
             .frame(height: 50)
-            rangeLabel.frame(minWidth: 168, alignment: .trailing)
+            rangeLabel
+                .frame(minWidth: 212, alignment: .trailing)
+                // In width kept free for it, so it doesn't resize the ruler mid-drag.
+                .overlay(alignment: .leading) {
+                    if model.filter.range != nil {
+                        Button("all time") {
+                            model.stopPlaying()
+                            model.filter.range = nil
+                        }
+                        .buttonStyle(KeyStyle(theme: theme))
+                        .help("Show the entire timeline")
+                    }
+                }
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)

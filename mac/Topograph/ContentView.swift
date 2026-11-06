@@ -123,7 +123,8 @@ struct Lamp: View {
         }
         .padding(.horizontal, 9)
         .frame(height: 26)
-        .background(theme.surface.color)
+        // Given a shape, it stays inside the key. A plain color fills on up into the title bar.
+        .background(theme.surface.color, in: RoundedRectangle(cornerRadius: 3))
         .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(theme.rule.color, lineWidth: 1))
     }
 }
@@ -155,7 +156,8 @@ private struct MapChrome: View {
                 Button("fit", action: model.controller.fit).accessibilityLabel("Show everything")
             }
             .buttonStyle(SquareKeyStyle(theme: theme))
-            .padding(.trailing, 16)
+            // Beside the side panel when it's open, not behind it.
+            .padding(.trailing, 16 + (model.selection == nil ? 0 : DetailPanel.width))
             .padding(.bottom, 12)
             .frame(maxWidth: .infinity, alignment: .trailing)
 
@@ -212,8 +214,14 @@ private struct MinimapPanel: View {
                     NSCursor.openHand.set()
                 })
             .onContinuousHover { phase in
-                if case .active = phase, grab == nil { NSCursor.openHand.set() }
+                if case .active = phase {
+                    model.controller.pointerIsOnMinimap = true
+                    if grab == nil { NSCursor.openHand.set() }
+                } else {
+                    model.controller.pointerIsOnMinimap = false
+                }
             }
+            .onDisappear { model.controller.pointerIsOnMinimap = false }
             .accessibilityLabel("Minimap")
             .task(id: scene.id) { await draw(scene) }
         }
