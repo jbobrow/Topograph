@@ -210,6 +210,7 @@ def download_pending_media(lib, item_id: str | None = None, delay: float = 0.3, 
             log(f"  media failed: {e}")
             lib.conn.execute("update media set status='failed' where item_id=? and ord=?",
                              (row["item_id"], row["ord"]))
+            lib.conn.commit()
             continue
         # The URL already points at a poster frame for videos.
         if media_mod.ingest(lib, row["item_id"], row["ord"], data, "image"):
@@ -217,8 +218,8 @@ def download_pending_media(lib, item_id: str | None = None, delay: float = 0.3, 
                 lib.conn.execute("update media set kind='video' where item_id=? and ord=?",
                                  (row["item_id"], row["ord"]))
             done += 1
+        lib.conn.commit()
         time.sleep(delay)
-    lib.conn.commit()
     return done
 
 
@@ -274,6 +275,9 @@ def hydrate(lib, limit: int | None = None, delay: float = 1.5, platforms=None, l
             for o, m in enumerate(found["media"][:4]):
                 c.execute("insert or ignore into media(item_id, ord, kind, original_url) values (?,?,?,?)",
                           (item["id"], o, "video" if m["video"] else "image", m["url"]))
+            # Never hold the library while waiting on the network: nothing else could write to it,
+            # and hydrate runs for days.
+            c.commit()
             stats["media"] += download_pending_media(lib, item["id"], delay=0.2, log=log)
             stats["hydrated"] += 1
         else:
@@ -284,8 +288,8 @@ def hydrate(lib, limit: int | None = None, delay: float = 1.5, platforms=None, l
                 (attempts, attempts, MAX_ATTEMPTS, item["id"]))
             if attempts >= MAX_ATTEMPTS:
                 stats["unreachable"] += 1
+        lib.conn.commit()
         if i % 10 == 0:
-            lib.conn.commit()
             if not progress:
                 log(f"  {i}/{len(rows)}  hydrated {stats['hydrated']}, unreachable {stats['unreachable']}")
         if consecutive_failures >= 10:

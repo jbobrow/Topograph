@@ -94,13 +94,17 @@ create index if not exists media_status on media(status);
 """
 
 
+BUSY_TIMEOUT = 120  # seconds
+
+
 class Library:
     def __init__(self, root: Path):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.media_dir = self.root / "media"
         self.media_dir.mkdir(exist_ok=True)
-        self.conn = sqlite3.connect(self.root / "topograph.sqlite")
+        # Tools can run side by side, like a build during a long hydrate. One waits its turn.
+        self.conn = sqlite3.connect(self.root / "topograph.sqlite", timeout=BUSY_TIMEOUT)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("pragma foreign_keys = on")
         self.conn.execute("pragma journal_mode = wal")

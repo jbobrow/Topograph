@@ -124,3 +124,34 @@ def test_map_vectors_line_up_with_ids(tmp_path):
 def test_layout_model_names():
     assert layout_model("clip-vit-b-32", "pictures") == "clip-vit-b-32"
     assert layout_model("clip-vit-b-32", "blended") == "clip-vit-b-32+blended"
+
+
+def test_hydrate_never_holds_the_library_while_fetching(tmp_path, monkeypatch):
+    """It runs for days, and a write it leaves open stops every other tool from writing."""
+    from topograph import hydrate as hydrate_mod
+    lib = Library(tmp_path / "lib")
+    lib.conn.executemany("insert into item(id, platform) values (?, 'x')", [("x:1",), ("x:2",)])
+    lib.conn.commit()
+    open_during_fetch = []
+
+    def found(item):
+        open_during_fetch.append(lib.conn.in_transaction)
+        return {"text": "words", "author": None, "created_at": None,
+                "media": [{"url": "https://example.test/a.jpg", "video": False}]}
+
+    def fetch(url, accept=None):
+        open_during_fetch.append(lib.conn.in_transaction)
+        raise hydrate_mod.FetchError("no network in tests")
+
+    monkeypatch.setitem(hydrate_mod.HYDRATORS, "x", found)
+    monkeypatch.setattr(hydrate_mod, "fetch", fetch)
+    hydrate_mod.hydrate(lib, delay=0, log=lambda _: None)
+    assert open_during_fetch == [False, False, False, False]
+    assert not lib.conn.in_transaction
+    lib.close()
+
+
+def test_a_tool_waits_for_another_one_to_finish_writing(tmp_path):
+    lib = Library(tmp_path / "lib")
+    assert lib.conn.execute("pragma busy_timeout").fetchone()[0] == 120_000
+    lib.close()

@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -348,6 +349,10 @@ def main(argv=None):
     lib = Library(args.library or default_library())
     try:
         args.fn(args, lib)
+    except sqlite3.OperationalError as error:
+        if "locked" not in str(error):
+            raise
+        sys.exit("Another Topograph task kept the library busy for too long. Try again in a moment.")
     finally:
         try:
             lib.close()
