@@ -7,7 +7,8 @@ import UniformTypeIdentifiers
 struct SourcesScreen: View {
     let model: AppModel
     let theme: Theme
-    @State private var guide = Guide.instagram
+    /// The source whose steps for getting an archive are showing.
+    @State private var showingGuide: String?
     @State private var targeted = false
     @State private var folderCheck: [URL]?
     @State private var connecting: String?
@@ -47,24 +48,6 @@ struct SourcesScreen: View {
                 .padding(.top, 10)
             dropZone.padding(.top, 22)
             jobStatus.padding(.top, 12)
-
-            HStack(spacing: 8) {
-                Text("getting your \(guide.title)").font(PlexMono.font(.medium, size: 12)).foregroundStyle(theme.secondary.color)
-                Rectangle().fill(theme.rule.color).frame(height: 1)
-            }
-            .padding(.top, 26)
-            .padding(.bottom, 12)
-            ForEach(Array(guide.steps.enumerated()), id: \.offset) { position, step in
-                HStack(alignment: .top, spacing: 12) {
-                    Text(String(format: "%02d", position + 1)).font(PlexMono.font(.medium, size: 12)).foregroundStyle(theme.ink.color)
-                    Text(step).font(PlexSans.font(size: 14)).foregroundStyle(theme.ink.color)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .padding(.bottom, 8)
-            }
-            Button("\(guide.linkTitle) ↗") { NSWorkspace.shared.open(guide.link) }
-                .buttonStyle(KeyStyle(theme: theme))
-                .padding(.top, 4)
         }
     }
 
@@ -235,7 +218,8 @@ struct SourcesScreen: View {
                     Text(note).font(PlexMono.font(.regular, size: 10)).foregroundStyle(theme.secondary.color)
                 }
                 if row.canHydrate, let progress = hydrateProgress(found) { hydrateRow(progress, key: row.key) }
-                if !added, row.guide != nil || row.isSync { notAddedActions(row) }
+                if !added, row.isSync { notAddedActions(row) }
+                if let guide = row.guide { guideActions(row, guide: guide, added: added) }
             }
             Spacer(minLength: 16)
             if added {
@@ -249,8 +233,41 @@ struct SourcesScreen: View {
             }
         }
         .padding(.vertical, 14)
-        .contentShape(Rectangle())
-        .onTapGesture { if let g = row.guide { guide = g } }
+    }
+
+    /// How to get this source's archive, opened from its row. Worth having after it's added
+    /// too, for bringing in a newer one.
+    @ViewBuilder
+    private func guideActions(_ row: Row, guide: Guide, added: Bool) -> some View {
+        let open = showingGuide == row.key
+        HStack(spacing: 12) {
+            Button("how to get the archive \(open ? "▴" : "▾")") { showingGuide = open ? nil : row.key }
+                .buttonStyle(.plain)
+                .font(PlexMono.font(.regular, size: 10))
+                .underline()
+                .foregroundStyle(theme.ink.color)
+            if !added {
+                Button(isRequested(row.key) ? "not requested after all" : "i’ve requested it") { toggleRequested(row.key) }
+                    .buttonStyle(.plain)
+                    .font(PlexMono.font(.regular, size: 10))
+                    .foregroundStyle(theme.secondary.color)
+            }
+        }
+        if open {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(Array(guide.steps.enumerated()), id: \.offset) { position, step in
+                    HStack(alignment: .top, spacing: 12) {
+                        Text(String(format: "%02d", position + 1)).font(PlexMono.font(.medium, size: 12)).foregroundStyle(theme.ink.color)
+                        Text(step).font(PlexSans.font(size: 14)).foregroundStyle(theme.ink.color)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Button("\(guide.linkTitle) ↗") { NSWorkspace.shared.open(guide.link) }
+                    .buttonStyle(KeyStyle(theme: theme))
+            }
+            .padding(.top, 6)
+            .padding(.bottom, 4)
+        }
     }
 
     private func subtitle(_ row: Row, found: [LibrarySources.Platform], waiting: Bool) -> String {
@@ -322,18 +339,6 @@ struct SourcesScreen: View {
                     .font(PlexMono.font(.regular, size: 10)).foregroundStyle(theme.secondary.color)
             } else {
                 Button("connect") { connecting = row.key }.buttonStyle(KeyStyle(theme: theme, led: false))
-            }
-        } else if let guide = row.guide {
-            HStack(spacing: 12) {
-                Button("how to request it ↗") { self.guide = guide; NSWorkspace.shared.open(guide.link) }
-                    .buttonStyle(.plain)
-                    .font(PlexMono.font(.regular, size: 10))
-                    .underline()
-                    .foregroundStyle(theme.ink.color)
-                Button(isRequested(row.key) ? "not requested after all" : "i’ve requested it") { toggleRequested(row.key) }
-                    .buttonStyle(.plain)
-                    .font(PlexMono.font(.regular, size: 10))
-                    .foregroundStyle(theme.secondary.color)
             }
         }
     }
