@@ -10,15 +10,22 @@ struct StrataScreen: View {
     @State private var strata: StrataModel?
     @State private var tip: StrataTip?
 
+    /// The chart stays clear of the side panel, or recent months end up behind it.
+    private var panel: Double { model.selection == nil ? 0 : DetailPanel.width }
+
     var body: some View {
         ZStack(alignment: .topLeading) {
             if let strata = model.scene?.strata ?? strata, let map = model.map {
+                let window = model.strataWindow
                 StrataCanvas(model: strata, labels: { map.regions.regions[$0]?.label }, patterns: Dictionary(map.regions.strataLayers().enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a }),
-                             colors: nil, range: model.scene?.range, marked: markedItem(in: map), theme: theme,
+                             colors: nil, range: model.strataShowsSelection ? nil : model.filter.range, marked: markedItem(in: map), theme: theme,
+                             window: window, easing: model.strataEasingTo == window, quiet: model.pointerIsOnStrataMinimap,
                              onTip: { tip = $0 },
-                             onPick: { model.openRegion($0) })
-                    // The chart stays clear of the side panel, or recent months end up behind it.
-                    .padding(.trailing, model.selection == nil ? 0 : DetailPanel.width)
+                             onPick: { model.openRegion($0) },
+                             onZoom: { model.zoomStrata(by: $0, atX: $1, width: $2, inset: $3) },
+                             onPan: { model.panStrata(byX: $0, width: $1, inset: $2) })
+                    .padding(.trailing, panel)
+                controls
             } else {
                 LoadingNote(text: "laying down the strata", theme: theme)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -38,6 +45,7 @@ struct StrataScreen: View {
             }
         }
         .background(theme.ground.color)
+        .onAppear { model.prepareStrataOverview() }
         // For a scene made while another view was showing, which has no chart of its own.
         .task(id: model.scene?.id) {
             guard let scene = model.scene, scene.strata == nil, let axis = model.axis else { return }
@@ -50,6 +58,43 @@ struct StrataScreen: View {
 }
 
 extension StrataScreen {
+    /// What sits on the canvas: the switch, the zoom keys, and while it's fitted to a selection,
+    /// a minimap to show where that is in all of time.
+    @ViewBuilder
+    private var controls: some View {
+        HStack(spacing: 4) {
+            Button("selection") { model.strataShowsSelection = true }
+                .buttonStyle(KeyStyle(theme: theme, led: model.strataShowsSelection))
+            Button("all time") { model.strataShowsSelection = false }
+                .buttonStyle(KeyStyle(theme: theme, led: !model.strataShowsSelection))
+        }
+        .padding(.top, 12)
+        .padding(.trailing, 16 + panel)
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        VStack(spacing: 4) {
+            Spacer()
+            // Their shortcuts are in the Map menu. Stacked this closely, labels go to the side.
+            Button("+", action: model.zoomIn).accessibilityLabel("Zoom in")
+                .hotkey("⌘+", placement: .beside, model: model, theme: theme)
+            Button("−", action: model.zoomOut).accessibilityLabel("Zoom out")
+                .hotkey("⌘-", placement: .beside, model: model, theme: theme)
+            Button("fit", action: model.fit).accessibilityLabel("Show everything")
+                .hotkey("⌘0", placement: .beside, model: model, theme: theme)
+        }
+        .buttonStyle(SquareKeyStyle(theme: theme))
+        .padding(.trailing, 16 + panel)
+        .padding(.bottom, 36)
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        if model.strataShowsSelection, !model.strataWindow.isWhole, let overview = model.strataOverview {
+            StrataMinimap(model: overview, selection: model.strataWindow, theme: theme,
+                          onMove: { model.centerStrataSelection(at: $0) },
+                          onPointer: { model.pointerIsOnStrataMinimap = $0 })
+                .padding(.leading, 16)
+                .padding(.bottom, 36)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+        }
+    }
+
     private func markedItem(in map: LibraryMap) -> MapItem? {
         if case .item(let index) = model.selection { return map.items[Int(index)] }
         return nil
@@ -60,6 +105,85 @@ struct StrataTip: Equatable {
     let text: String
     let x: Double
     let y: Double
+}
+
+/// A small Strata of all of time, with what's selected outlined, the same part the timeline
+/// shows. Press or drag to move it: taking hold of the outline moves it from there, and
+/// anywhere else jumps to that spot.
+private struct StrataMinimap: View {
+    let model: StrataModel
+    let selection: StrataWindow
+    let theme: Theme
+    let onMove: (Double) -> Void
+    let onPointer: (Bool) -> Void
+    @State private var grab: Double?
+    private let size = CGSize(width: 320, height: 88)
+
+    var body: some View {
+        // Never too small to see or to take hold of.
+        let width = max(selection.span * size.width, 6)
+        let middle = (selection.start + selection.end) / 2 * size.width
+        let left = min(max(middle - width / 2, 0), size.width - width)
+        ZStack(alignment: .topLeading) {
+            theme.surface.color
+            Canvas { context, canvas in draw(in: &context, size: canvas) }
+            // What isn't selected stands back, so the outline reads over any part of it.
+            theme.surface.color.opacity(0.6).frame(width: left)
+            theme.surface.color.opacity(0.6)
+                .frame(width: max(size.width - left - width, 0))
+                .offset(x: left + width)
+            Rectangle()
+                .strokeBorder(theme.ink.color, lineWidth: 1.5)
+                .frame(width: width, height: size.height)
+                .offset(x: left)
+        }
+        .frame(width: size.width, height: size.height)
+        .clipShape(RoundedRectangle(cornerRadius: 3))
+        .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(theme.ink.color, lineWidth: 1))
+        .contentShape(Rectangle())
+        .gesture(DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                if grab == nil {
+                    grab = abs(value.startLocation.x - middle) <= width / 2 ? value.startLocation.x - middle : 0
+                    NSCursor.closedHand.set()
+                }
+                onMove((value.location.x - (grab ?? 0)) / size.width)
+            }
+            .onEnded { _ in
+                grab = nil
+                NSCursor.openHand.set()
+            })
+        .onContinuousHover { phase in
+            if case .active = phase {
+                onPointer(true)
+                if grab == nil { NSCursor.openHand.set() }
+            } else {
+                onPointer(false)
+                NSCursor.arrow.set()
+            }
+        }
+        .onDisappear { onPointer(false) }
+        .accessibilityLabel("Minimap")
+    }
+
+    /// The layers as one dark shape with a light line between each, since patterns are too
+    /// coarse to show at this size.
+    private func draw(in context: inout GraphicsContext, size canvas: CGSize) {
+        let axis = model.axis
+        let span = max(model.high - model.low, 1e-9)
+        func point(_ month: Int, _ value: Double) -> CGPoint {
+            CGPoint(x: axis.fraction(of: axis.edges[month]) * canvas.width,
+                    y: canvas.height - 3 - (value - model.low) / span * (canvas.height - 6))
+        }
+        for layer in model.layers {
+            let path = CGMutablePath()
+            BasisCurve.append((0..<axis.count).map { point($0, layer.top[$0]) }, to: path, joined: false)
+            BasisCurve.append((0..<axis.count).reversed().map { point($0, layer.bottom[$0]) }, to: path, joined: true)
+            path.closeSubpath()
+            context.fill(Path(path), with: .color(theme.ink.color))
+            context.stroke(Path(path), with: .color(theme.surface.color), lineWidth: 0.5)
+        }
+    }
 }
 
 struct StrataCanvas: NSViewRepresentable {
@@ -73,14 +197,27 @@ struct StrataCanvas: NSViewRepresentable {
     let range: ClosedRange<Int>?
     let marked: MapItem?
     let theme: Theme
+    /// The part of time to show, and whether to ease there or follow it directly.
+    var window = StrataWindow.whole
+    var easing = false
+    /// Whether the pointer is on something above the chart, so it shouldn't answer.
+    var quiet = false
     let onTip: (StrataTip?) -> Void
     let onPick: (Int) -> Void
+    /// Zooming by a factor at a place on the canvas, of a width, with an inset, and moving by
+    /// an amount. Without them, the chart stays put.
+    var onZoom: ((Double, Double, Double, Double) -> Void)?
+    var onPan: ((Double, Double, Double) -> Void)?
 
     func makeNSView(context: Context) -> StrataNSView { StrataNSView() }
 
     func updateNSView(_ view: StrataNSView, context: Context) {
         view.onTip = onTip
         view.onPick = onPick
+        view.onZoom = onZoom
+        view.onPan = onPan
+        view.quiet = quiet
+        view.show(window, easing: easing)
         view.update(model: model, labels: labels, patterns: patterns, colors: colors, range: range, marked: marked, theme: theme)
     }
 }
@@ -109,6 +246,18 @@ final class StrataNSView: NSView {
     private var names: [Int: ShownName] = [:]
     private var lastNameStep: CFTimeInterval = 0
     private var namesMoving = false
+    /// The part of time on screen right now, what it was last told to show, and where it's easing to.
+    private var shownTime = StrataWindow.whole
+    private var asked = StrataWindow.whole
+    private var windowGoal: StrataWindow?
+    fileprivate var quiet = false {
+        didSet {
+            guard quiet, !oldValue else { return }
+            hovered = nil
+            onTip?(nil)
+            needsDisplay = true
+        }
+    }
 
     private struct ShownName {
         var name: String
@@ -122,6 +271,8 @@ final class StrataNSView: NSView {
 
     var onTip: ((StrataTip?) -> Void)?
     var onPick: ((Int) -> Void)?
+    var onZoom: ((Double, Double, Double, Double) -> Void)?
+    var onPan: ((Double, Double, Double) -> Void)?
 
     private let margin = NSEdgeInsets(top: 24, left: 24, bottom: 28, right: 24)
 
@@ -161,7 +312,40 @@ final class StrataNSView: NSView {
     // MARK: Geometry
 
     private func x(_ time: Int, axis: MonthAxis) -> Double {
-        margin.left + axis.fraction(of: time) * (bounds.width - margin.left - margin.right)
+        shownTime.x(ofFraction: axis.fraction(of: time), width: bounds.width, inset: margin.left)
+    }
+
+    /// The months on screen, first and last, with the one past each end.
+    private func monthsShown(_ axis: MonthAxis) -> ClosedRange<Int> {
+        let first = axis.index(of: axis.time(atFraction: shownTime.start)) ?? 0
+        let last = axis.index(of: axis.time(atFraction: shownTime.end)) ?? axis.count - 1
+        return first...max(first, last)
+    }
+
+    /// Show a part of time, easing there if asked to. Names keep their place in time as it moves.
+    fileprivate func show(_ next: StrataWindow, easing: Bool) {
+        guard next != asked else { return }
+        asked = next
+        if easing, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            windowGoal = next
+            startMotion()
+        } else {
+            windowGoal = nil
+            place(next)
+        }
+    }
+
+    private func place(_ next: StrataWindow) {
+        guard next != shownTime else { return }
+        for (id, shown) in names {
+            let center = shownTime.fraction(atX: shown.center.x, width: bounds.width, inset: margin.left)
+            let goal = shownTime.fraction(atX: shown.goal.x, width: bounds.width, inset: margin.left)
+            names[id]?.center.x = next.x(ofFraction: center, width: bounds.width, inset: margin.left)
+            names[id]?.goal.x = next.x(ofFraction: goal, width: bounds.width, inset: margin.left)
+        }
+        shownTime = next
+        builtFor = .zero
+        needsDisplay = true
     }
 
     private func y(_ value: Double, model: StrataModel) -> Double {
@@ -202,6 +386,16 @@ final class StrataNSView: NSView {
     @objc private func stepMotion() {
         guard let model, let shown = shownScale else { return stopEasing() }
         let now = CACurrentMediaTime()
+        if let goal = windowGoal {
+            let share = 1 - exp(-(now - lastScaleStep) / 0.07)
+            if abs(goal.start - shownTime.start) + abs(goal.end - shownTime.end) < 0.0005 {
+                windowGoal = nil
+                place(goal)
+            } else {
+                place(StrataWindow(start: shownTime.start + (goal.start - shownTime.start) * share,
+                                   end: shownTime.end + (goal.end - shownTime.end) * share))
+            }
+        }
         if let morph {
             builtFor = .zero
             needsDisplay = true
@@ -215,7 +409,7 @@ final class StrataNSView: NSView {
                 shownScale = (model.low, model.high)
                 builtFor = .zero
             }
-            if !namesMoving { stopEasing() }
+            if !namesMoving, windowGoal == nil { stopEasing() }
         } else {
             shownScale = (shown.low + (model.low - shown.low) * share, shown.high + (model.high - shown.high) * share)
             builtFor = .zero
@@ -242,10 +436,13 @@ final class StrataNSView: NSView {
         guard let model, builtFor != bounds.size else { return }
         builtFor = bounds.size
         let axis = model.axis
+        // Only what's on screen, with enough on each side for the curves to arrive from.
+        let shown = monthsShown(axis)
+        let months = max(shown.lowerBound - 3, 0)...min(shown.upperBound + 3, axis.count - 1)
         paths = model.layers.map { layer in
             let (top, bottom) = edges(of: layer, model: model)
-            let tops = (0..<axis.count).map { CGPoint(x: x(axis.edges[$0], axis: axis), y: top[$0]) }
-            let bottoms = (0..<axis.count).reversed().map { CGPoint(x: x(axis.edges[$0], axis: axis), y: bottom[$0]) }
+            let tops = months.map { CGPoint(x: x(axis.edges[$0], axis: axis), y: top[$0]) }
+            let bottoms = months.reversed().map { CGPoint(x: x(axis.edges[$0], axis: axis), y: bottom[$0]) }
             let path = CGMutablePath()
             BasisCurve.append(tops, to: path, joined: false)
             BasisCurve.append(bottoms, to: path, joined: true)
@@ -326,6 +523,9 @@ final class StrataNSView: NSView {
             c.fill(CGRect(x: left, y: margin.top - 8, width: max(1, right - left), height: bounds.height - margin.top - margin.bottom + 8))
         }
 
+        let side = shownTime.inset(margin.left)
+        c.saveGState()
+        c.clip(to: CGRect(x: side, y: 0, width: bounds.width - 2 * side, height: bounds.height))
         for (index, layer) in model.layers.enumerated() {
             c.saveGState()
             if let hovered, hovered != index { c.setAlpha(0.22) }
@@ -350,6 +550,7 @@ final class StrataNSView: NSView {
             }
             c.restoreGState()
         }
+        c.restoreGState()
         drawNames(c, model: model)
         drawAxis(c, axis: axis)
         drawMarker(c, model: model)
@@ -359,6 +560,7 @@ final class StrataNSView: NSView {
     private func drawMarker(_ c: CGContext, model: StrataModel) {
         guard let marked, let place = model.place(of: marked) else { return }
         let at = x(place.time, axis: model.axis).rounded() + 0.5
+        guard at >= 0, at <= bounds.width else { return }
         let bottom = bounds.height - margin.bottom
 
         // A ground-colored edge keeps the rule visible over any pattern.
@@ -400,7 +602,9 @@ final class StrataNSView: NSView {
     /// ones, and each eases to where it's going, fading in or out when it comes or goes.
     private func drawNames(_ c: CGContext, model: StrataModel) {
         let axis = model.axis
-        let step = (bounds.width - margin.left - margin.right) / max(1, Double(axis.count - 1))
+        let side = shownTime.inset(margin.left)
+        let step = (bounds.width - 2 * side) / max(1, Double(axis.count - 1) * shownTime.span)
+        let months = monthsShown(axis)
         func thinnest(_ layer: StrataModel.Layer, around month: Int, half: Int) -> Double {
             var lowest = Double.infinity
             for j in (month - half)...(month + half) {
@@ -412,16 +616,18 @@ final class StrataNSView: NSView {
         for layer in model.layers {
             guard let id = layer.region, let name = labels(id) else { continue }
             let half = Int((((Double(name.count) * 6.8 + 10) / 2) / step).rounded(.up))
-            guard half < axis.count - half else { continue }
+            // The whole name has to be on screen.
+            let first = max(half, months.lowerBound + half), past = min(axis.count - half, months.upperBound - half + 1)
+            guard first < past else { continue }
             var best = -1.0, at = -1
-            for i in half..<(axis.count - half) {
+            for i in first..<past {
                 let lowest = thinnest(layer, around: i, half: half)
                 if lowest > best {
                     best = lowest
                     at = i
                 }
             }
-            if let shown = names[id], shown.target > 0, shown.month >= half, shown.month < axis.count - half {
+            if let shown = names[id], shown.target > 0, shown.month >= first, shown.month < past {
                 let there = thinnest(layer, around: shown.month, half: half)
                 if there >= 14, there >= best * 0.7 {
                     best = there
@@ -497,20 +703,56 @@ final class StrataNSView: NSView {
         if moving { startMotion() }
     }
 
+    private static let monthName: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM"
+        return formatter
+    }()
+
+    /// Years, and once there's room, months. A year keeps its place over a month beside it,
+    /// and with no new year on screen, the first month says which it is.
     private func drawAxis(_ c: CGContext, axis: MonthAxis) {
         let top = bounds.height - margin.bottom
+        let side = shownTime.inset(margin.left)
         c.setStrokeColor(theme.ink.cg)
         c.setLineWidth(1)
-        c.move(to: CGPoint(x: margin.left, y: top + 0.5))
-        c.addLine(to: CGPoint(x: bounds.width - margin.right, y: top + 0.5))
+        c.move(to: CGPoint(x: side, y: top + 0.5))
+        c.addLine(to: CGPoint(x: bounds.width - side, y: top + 0.5))
         let font = NSFont(name: "IBMPlexMono-Regular", size: 10) ?? .monospacedSystemFont(ofSize: 10, weight: .regular)
         let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor(cgColor: theme.secondary.cg) ?? .gray]
-        for year in axis.years() {
+        var taken: [CGRect] = []
+        func label(_ string: String, at x: Double) {
+            let text = NSAttributedString(string: string, attributes: attributes)
+            let size = text.size()
+            // At the sides of the canvas, it stays whole.
+            let rect = CGRect(x: min(max(x - size.width / 2, 2), bounds.width - size.width - 2), y: top + 7,
+                              width: size.width, height: size.height)
+            guard !taken.contains(where: { $0.insetBy(dx: -4, dy: 0).intersects(rect) }) else { return }
+            taken.append(rect)
+            text.draw(at: rect.origin)
+        }
+        let years = axis.years().filter { (-1...bounds.width + 1).contains(x($0.time, axis: axis)) }
+        for year in years {
             let at = x(year.time, axis: axis).rounded() + 0.5
             c.move(to: CGPoint(x: at, y: top))
             c.addLine(to: CGPoint(x: at, y: top + 5))
-            let text = NSAttributedString(string: String(year.year), attributes: attributes)
-            text.draw(at: CGPoint(x: at - text.size().width / 2, y: top + 7))
+            label(String(year.year), at: at)
+        }
+        let perMonth = (bounds.width - 2 * side) / max(1, Double(axis.count) * shownTime.span)
+        if perMonth >= 10 {
+            let shown = monthsShown(axis)
+            let calendar = Calendar.current
+            let firstVisible = shown.first { x(axis.edges[$0], axis: axis) >= 24 }
+            for month in shown {
+                let at = x(axis.edges[month], axis: axis).rounded() + 0.5
+                guard (-1...bounds.width + 1).contains(at) else { continue }
+                c.move(to: CGPoint(x: at, y: top))
+                c.addLine(to: CGPoint(x: at, y: top + 3))
+                let date = Date(timeIntervalSince1970: TimeInterval(axis.edges[month]))
+                guard calendar.component(.month, from: date) != 1, perMonth >= 28 else { continue }
+                let name = Self.monthName.string(from: date).lowercased()
+                label(month == firstVisible && years.isEmpty ? "\(name) \(calendar.component(.year, from: date))" : name, at: at)
+            }
         }
         c.strokePath()
     }
@@ -522,7 +764,7 @@ final class StrataNSView: NSView {
     }
 
     override func mouseMoved(with event: NSEvent) {
-        guard let model else { return }
+        guard let model, !quiet else { return }
         let point = convert(event.locationInWindow, from: nil)
         let index = layerIndex(at: point)
         if index != hovered {
@@ -535,7 +777,7 @@ final class StrataNSView: NSView {
         }
         let layer = model.layers[index]
         let axis = model.axis
-        let fraction = (point.x - margin.left) / (bounds.width - margin.left - margin.right)
+        let fraction = shownTime.fraction(atX: point.x, width: bounds.width, inset: margin.left)
         let time = axis.time(atFraction: fraction)
         let month = axis.index(of: time)
         let raw = month.map { layer.raw[$0] } ?? 0
@@ -549,6 +791,23 @@ final class StrataNSView: NSView {
         hovered = nil
         onTip?(nil)
         needsDisplay = true
+    }
+
+    /// Scrolling up and down zooms around the pointer, and sideways moves along the chart.
+    override func scrollWheel(with event: NSEvent) {
+        guard let onZoom, let onPan else { return super.scrollWheel(with: event) }
+        let dx = event.scrollingDeltaX, dy = event.scrollingDeltaY
+        if event.hasPreciseScrollingDeltas, abs(dx) > abs(dy) {
+            onPan(dx, bounds.width, margin.left)
+        } else {
+            let at = convert(event.locationInWindow, from: nil).x
+            onZoom(pow(2, dy * (event.hasPreciseScrollingDeltas ? 0.01 : 0.05)), at, bounds.width, margin.left)
+        }
+    }
+
+    override func magnify(with event: NSEvent) {
+        guard let onZoom else { return super.magnify(with: event) }
+        onZoom(1 + event.magnification, convert(event.locationInWindow, from: nil).x, bounds.width, margin.left)
     }
 
     override func mouseUp(with event: NSEvent) {

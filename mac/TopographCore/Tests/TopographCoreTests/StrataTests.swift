@@ -187,4 +187,60 @@ final class StrataTests: XCTestCase {
         XCTAssertEqual(top.top[0], 0.5, accuracy: 1e-9, "centered, not wandering")
         XCTAssertEqual(bottom.bottom[axis.count - 1], -0.5, accuracy: 1e-9)
     }
+
+    func testAWindowZoomsAroundThePointer() {
+        let width = 1000.0, inset = 24.0
+        var window = StrataWindow.whole
+        for (factor, x) in [(1.5, 300.0), (2, 300.0), (1.3, 300.0)] {
+            let before = window.fraction(atX: x, width: width, inset: inset)
+            window = window.zoomed(by: factor, atX: x, width: width, inset: inset, minSpan: 0.02, limit: .whole)
+            XCTAssertEqual(window.fraction(atX: x, width: width, inset: inset), before, accuracy: 1e-9)
+        }
+        XCTAssertEqual(window.span, 1 / 3.9, accuracy: 1e-9)
+    }
+
+    func testAWindowStaysInsideItsLimit() {
+        let limit = StrataWindow(start: 0.25, end: 0.5)
+        let zoomedOut = limit.zoomed(by: 0.1, atX: 200, width: 1000, inset: 24, minSpan: 0.02, limit: limit)
+        XCTAssertEqual(zoomedOut, limit)
+        let inside = limit.zoomed(by: 4, atX: 0, width: 1000, inset: 24, minSpan: 0.02, limit: limit)
+        XCTAssertEqual(inside.start, 0.25, accuracy: 1e-9)
+        XCTAssertEqual(inside.panned(byX: 5000, width: 1000, inset: 24, limit: limit).start, 0.25, accuracy: 1e-9)
+        XCTAssertEqual(inside.panned(byX: -5000, width: 1000, inset: 24, limit: limit).end, 0.5, accuracy: 1e-9)
+        XCTAssertEqual(StrataWindow(start: 0, end: 0.1).clamped(to: limit).start, 0.25, accuracy: 1e-9)
+        XCTAssertEqual(StrataWindow.whole.clamped(to: limit), limit)
+        // A zoom can't go tighter than the smallest allowed, unless the selection already is.
+        XCTAssertEqual(StrataWindow.whole.zoomed(by: 1000, atX: 500, width: 1000, inset: 24, minSpan: 0.1, limit: .whole).span, 0.1, accuracy: 1e-9)
+        let tiny = StrataWindow(start: 0.5, end: 0.51)
+        XCTAssertEqual(tiny.zoomed(by: 2, atX: 500, width: 1000, inset: 24, minSpan: 0.1, limit: tiny).span, 0.01, accuracy: 1e-9)
+    }
+
+    func testASelectionGrowsAndShrinksAroundThePointerOnAChartOfAllTime() {
+        let selection = StrataWindow(start: 0.2, end: 0.4)
+        let tighter = selection.zoomed(by: 2, aroundFraction: 0.3, minSpan: 0.01)
+        XCTAssertEqual(tighter.start, 0.25, accuracy: 1e-9)
+        XCTAssertEqual(tighter.end, 0.35, accuracy: 1e-9)
+        XCTAssertTrue(selection.zoomed(by: 0.01, aroundFraction: 0.3, minSpan: 0.01).isWhole)
+        // Zooming in never widens one that's already narrower than the usual smallest.
+        let tiny = StrataWindow(start: 0.5, end: 0.51)
+        XCTAssertEqual(tiny.zoomed(by: 2, aroundFraction: 0.5, minSpan: 0.1).span, 0.01, accuracy: 1e-9)
+    }
+
+    func testMovingAWindowPastTheEndsKeepsItsSize() {
+        let window = StrataWindow(start: 0.1, end: 0.3)
+        XCTAssertEqual(window.centered(at: 0, limit: .whole).span, 0.2, accuracy: 1e-9)
+        XCTAssertEqual(window.centered(at: 1, limit: .whole).end, 1, accuracy: 1e-9)
+        XCTAssertEqual(window.centered(at: 1, limit: .whole).span, 0.2, accuracy: 1e-9)
+        XCTAssertEqual(window.panned(byX: 5000, width: 1000, inset: 24, limit: .whole).span, 0.2, accuracy: 1e-9)
+        XCTAssertEqual(window.zoomed(by: 0.5, atX: 0, width: 1000, inset: 24, minSpan: 0.01, limit: .whole).span, 0.4, accuracy: 1e-9)
+    }
+
+    func testASelectionMeetsTheSidesOfTheCanvas() {
+        let window = StrataWindow(start: 0.2, end: 0.4)
+        XCTAssertEqual(window.x(ofFraction: 0.2, width: 1000, inset: 24), 0, accuracy: 1e-9)
+        XCTAssertEqual(window.x(ofFraction: 0.4, width: 1000, inset: 24), 1000, accuracy: 1e-9)
+        // The whole axis keeps its margins.
+        XCTAssertEqual(StrataWindow.whole.x(ofFraction: 0, width: 1000, inset: 24), 24, accuracy: 1e-9)
+        XCTAssertEqual(StrataWindow.whole.x(ofFraction: 1, width: 1000, inset: 24), 976, accuracy: 1e-9)
+    }
 }

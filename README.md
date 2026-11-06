@@ -141,6 +141,11 @@ when you ask. It finds them in this repo's `.venv`, or at `TOPOGRAPH_CLI`. Folde
 dry run first, so you see what would be read. It's also where you build maps and switch
 between them.
 
+In **Strata**, scrolling zooms in and out around the pointer and sideways scrolling moves along
+time. Both change the time selected, the same one the timeline shows, so it also applies to the
+other views. **Selection** fits the canvas to it, with a small Strata of all of time as a minimap,
+and **all time** shows the whole timeline with that part shaded.
+
 Find matches words in captions and names. The **by meaning** key next to it finds what
 things are about, using CLIP on your Mac. It needs a model of about 600 MB, which is too
 large for the repository, so make it once from the weights the pipeline already uses:

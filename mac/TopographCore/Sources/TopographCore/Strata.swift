@@ -369,3 +369,78 @@ public enum BasisCurve {
         path.addLine(to: p1)
     }
 }
+
+/// A part of the time axis, as fractions of the axis from 0 to 1: the time you've selected,
+/// or what a chart shows.
+public struct StrataWindow: Sendable, Equatable {
+    public let start: Double
+    public let end: Double
+
+    public static let whole = StrataWindow(start: 0, end: 1)
+
+    public init(start: Double, end: Double) {
+        let low = min(max(start, 0), 1), high = min(max(end, 0), 1)
+        self.start = min(low, high)
+        self.end = max(max(low, high), min(low, high) + 1e-6)
+    }
+
+    public var span: Double { end - start }
+    public var isWhole: Bool { span >= 1 - 1e-6 }
+
+    /// The chart keeps a little room at its sides for the whole axis, and runs to the edges
+    /// once it's zoomed in, so what's selected meets the sides of the canvas.
+    public func inset(_ full: Double) -> Double {
+        full * max(0, 1 - (1 / span - 1) / 0.25)
+    }
+
+    public func x(ofFraction fraction: Double, width: Double, inset full: Double) -> Double {
+        let side = inset(full)
+        return side + (fraction - start) / span * (width - 2 * side)
+    }
+
+    public func fraction(atX x: Double, width: Double, inset full: Double) -> Double {
+        let side = inset(full)
+        return start + (x - side) / max(width - 2 * side, 1) * span
+    }
+
+    /// Slid and trimmed to fit inside `limit`.
+    public func clamped(to limit: StrataWindow) -> StrataWindow {
+        Self.fitted(start: start, span: span, in: limit)
+    }
+
+    /// A window of `span` starting as near `start` as `limit` allows. Sliding it keeps its size,
+    /// where the plain initializer would trim whatever ran past the axis.
+    public static func fitted(start: Double, span: Double, in limit: StrataWindow) -> StrataWindow {
+        guard span < limit.span else { return limit }
+        let at = min(max(start, limit.start), limit.end - span)
+        return StrataWindow(start: at, end: at + span)
+    }
+
+    /// Bigger factors zoom in. The moment of time at `x` stays at `x`.
+    public func zoomed(by factor: Double, atX x: Double, width: Double, inset full: Double,
+                       minSpan: Double, limit: StrataWindow) -> StrataWindow {
+        let held = fraction(atX: x, width: width, inset: full)
+        let next = min(max(span / factor, min(minSpan, span)), limit.span)
+        let sized = StrataWindow(start: 0, end: next)
+        let side = sized.inset(full)
+        let share = (x - side) / max(width - 2 * side, 1)
+        return Self.fitted(start: held - share * next, span: next, in: limit)
+    }
+
+    /// For a selection on a chart of all time, where what's under the pointer is `fraction`
+    /// and it's the selection that changes around it.
+    public func zoomed(by factor: Double, aroundFraction fraction: Double, minSpan: Double) -> StrataWindow {
+        let next = min(max(span / factor, min(minSpan, span)), 1)
+        let scale = next / span
+        return Self.fitted(start: fraction - (fraction - start) * scale, span: next, in: .whole)
+    }
+
+    public func panned(byX dx: Double, width: Double, inset full: Double, limit: StrataWindow) -> StrataWindow {
+        let shift = -dx / max(width - 2 * inset(full), 1) * span
+        return Self.fitted(start: start + shift, span: span, in: limit)
+    }
+
+    public func centered(at fraction: Double, limit: StrataWindow) -> StrataWindow {
+        Self.fitted(start: fraction - span / 2, span: span, in: limit)
+    }
+}

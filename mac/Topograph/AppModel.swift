@@ -195,6 +195,7 @@ final class AppModel {
                 let map = loaded.withRegions(loaded.regions.renamed(regionNames(on: loaded.recipe)))
                 // Places mean nothing from one map to the next, so don't stay zoomed in on one.
                 if let before = self.map, before.recipe != map.recipe { controller.fit() }
+                strataOverview = nil
                 self.map = map
                 embeddingsTask = nil
                 let times = map.items.compactMap(\.time)
@@ -326,9 +327,94 @@ final class AppModel {
 
     // MARK: Zoom, for whichever view can
 
-    func zoomIn() { section == .palette ? palette.zoomIn() : controller.zoomIn() }
-    func zoomOut() { section == .palette ? palette.zoomOut() : controller.zoomOut() }
-    func fit() { section == .palette ? palette.fit() : controller.fit() }
+    func zoomIn() {
+        switch section {
+        case .palette: palette.zoomIn()
+        case .strata: zoomStrata(by: 1.8)
+        default: controller.zoomIn()
+        }
+    }
+
+    func zoomOut() {
+        switch section {
+        case .palette: palette.zoomOut()
+        case .strata: zoomStrata(by: 1 / 1.8)
+        default: controller.zoomOut()
+        }
+    }
+
+    func fit() {
+        switch section {
+        case .palette: palette.fit()
+        case .strata: selectStrata(.whole, animated: true)
+        default: controller.fit()
+        }
+    }
+
+    // MARK: Strata's view of time
+
+    /// Whether Strata's canvas fits the time you've selected, or shows all of time with that part
+    /// shaded. Either way, zooming and moving change the selection, so the timeline and the
+    /// minimap can never disagree.
+    var strataShowsSelection = UserDefaults.standard.object(forKey: "strataShowsSelection") as? Bool ?? true {
+        didSet {
+            guard strataShowsSelection != oldValue else { return }
+            UserDefaults.standard.set(strataShowsSelection, forKey: "strataShowsSelection")
+            strataEasingTo = strataWindow
+        }
+    }
+    /// Where the chart is easing to. Anything else, like a moving selection, it follows directly.
+    private(set) var strataEasingTo: StrataWindow?
+    var pointerIsOnStrataMinimap = false
+    /// All of time for the current filter, whatever's selected, for the minimap.
+    private(set) var strataOverview: StrataModel?
+    /// A chart of a month or two says little, and its curves are drawn month by month.
+    private var strataMinSpan: Double { 3 / Double(max(axis?.count ?? 1, 1)) }
+
+    private var strataSelection: StrataWindow {
+        guard let range = filter.range, let axis else { return .whole }
+        return StrataWindow(start: axis.fraction(of: range.lowerBound), end: axis.fraction(of: range.upperBound))
+    }
+
+    var strataWindow: StrataWindow { strataShowsSelection ? strataSelection : .whole }
+
+    func selectStrata(_ selection: StrataWindow, animated: Bool = false) {
+        guard let axis else { return }
+        if isPlaying { stopPlaying() }
+        filter.range = selection.isWhole ? nil : axis.time(atFraction: selection.start)...axis.time(atFraction: selection.end)
+        strataEasingTo = animated ? strataWindow : nil
+    }
+
+    func zoomStrata(by factor: Double, atX x: Double, width: Double, inset: Double) {
+        let selection = strataSelection
+        selectStrata(strataShowsSelection
+            ? selection.zoomed(by: factor, atX: x, width: width, inset: inset, minSpan: strataMinSpan, limit: .whole)
+            : selection.zoomed(by: factor, aroundFraction: StrataWindow.whole.fraction(atX: x, width: width, inset: inset),
+                               minSpan: strataMinSpan))
+    }
+
+    func panStrata(byX dx: Double, width: Double, inset: Double) {
+        let selection = strataSelection
+        // Fitted to the selection, the chart follows your fingers. On all of time, the selection does.
+        selectStrata(strataShowsSelection
+            ? selection.panned(byX: dx, width: width, inset: inset, limit: .whole)
+            : selection.panned(byX: -dx / selection.span, width: width, inset: inset, limit: .whole))
+    }
+
+    func centerStrataSelection(at fraction: Double) {
+        selectStrata(strataSelection.centered(at: fraction, limit: .whole))
+    }
+
+    func prepareStrataOverview() {
+        if strataOverview == nil { applyFilter() }
+    }
+
+    private func zoomStrata(by factor: Double) {
+        let selection = strataSelection
+        let span = min(max(selection.span / factor, min(strataMinSpan, selection.span)), 1)
+        let middle = (selection.start + selection.end) / 2
+        selectStrata(.fitted(start: middle - span / 2, span: span, in: .whole), animated: true)
+    }
 
     func openItem(_ index: Int32, pan: Bool = false) {
         // Closing it goes back to the band it was picked from.
@@ -411,9 +497,10 @@ final class AppModel {
         let (filter, peak, generation) = (self.filter, fullPeak, mapGeneration)
         let current = slicer?.filter == filter.ignoringTime ? slicer : nil
         let (axis, order, wantsStrata) = (self.axis, current == nil ? nil : strataOrder, section == .strata)
+        let wantsOverview = wantsStrata && (current == nil || strataOverview == nil)
         let wantsColors = section == .palette && paletteView == .time
         let share = paletteShowsShare
-        let (scene, newSlicer, newOrder, counts) = await Task.detached(priority: .userInitiated) { () -> (TerrainScene, TimeSlicer, [Int]?, [Int]?) in
+        let (scene, newSlicer, newOrder, counts, overview) = await Task.detached(priority: .userInitiated) { () -> (TerrainScene, TimeSlicer, [Int]?, [Int]?, StrataModel?) in
             let slicer = current ?? TimeSlicer(filter: filter, items: map.items, search: search)
             let counts = current == nil ? axis?.counts(of: slicer.times) : nil
             // A search by meaning keeps the best of what's in range, not a slice of its best.
@@ -421,13 +508,15 @@ final class AppModel {
             let order = order ?? axis.map { StrataModel.stackingOrder(map: map, visible: slicer.all, axis: $0) }
             let strata = wantsStrata ? axis.map { StrataModel(map: map, visible: visible, axis: $0, order: order) } : nil
             let colors = wantsColors ? axis.map { StrataModel(colorsOf: map, visible: visible, axis: $0, share: share) } : nil
-            return (TerrainScene(map: map, visible: visible, fullPeak: peak, strata: strata, colorStrata: colors, range: filter.range), slicer, order, counts)
+            let overview = wantsOverview ? axis.map { StrataModel(map: map, visible: slicer.all, axis: $0, order: order) } : nil
+            return (TerrainScene(map: map, visible: visible, fullPeak: peak, strata: strata, colorStrata: colors, range: filter.range), slicer, order, counts, overview)
         }.value
         guard generation == mapGeneration else { return }
         self.scene = scene
         slicer = newSlicer
         strataOrder = newOrder
         if let counts { monthCounts = counts }
+        if let overview { strataOverview = overview }
     }
 
     /// The order of Strata's layers for the current filter, whatever the time range.
