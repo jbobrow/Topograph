@@ -1,3 +1,4 @@
+import Accelerate
 import Foundation
 
 /// The terrain's elevation: a resonance-weighted density of the items on a grid.
@@ -29,49 +30,55 @@ public struct DensityField: Sendable {
         let n = Int(Self.mapSize + Self.origin * 2) >> 2
         var values = [Float](repeating: 0, count: n * n)
         let origin = Float(Self.origin), toCell = Float(1 / Self.cellSize)
-        func add(_ item: MapItem) {
-            let cx = (item.x + origin) * toCell, cy = (item.y + origin) * toCell
-            guard cx >= 0, cy >= 0, cx < Float(n), cy < Float(n) else { return }
-            let weight = item.resonance > 0 ? item.resonance : 1
-            let x0 = Int(cx), y0 = Int(cy)
-            let tx = cx - Float(x0) - 0.5, ty = cy - Float(y0) - 0.5
-            let x1 = min(x0 + 1, n - 1), y1 = min(y0 + 1, n - 1)
-            values[x0 + y0 * n] += (1 - tx) * (1 - ty) * weight
-            values[x1 + y0 * n] += tx * (1 - ty) * weight
-            values[x1 + y1 * n] += tx * ty * weight
-            values[x0 + y1 * n] += (1 - tx) * ty * weight
-        }
-        if let visible {
-            for index in visible { add(items[Int(index)]) }
-        } else {
-            items.forEach(add)
+        values.withUnsafeMutableBufferPointer { cells in
+            items.withUnsafeBufferPointer { items in
+                func add(_ item: borrowing MapItem) {
+                    let cx = (item.x + origin) * toCell, cy = (item.y + origin) * toCell
+                    guard cx >= 0, cy >= 0, cx < Float(n), cy < Float(n) else { return }
+                    let weight = item.resonance > 0 ? item.resonance : 1
+                    let x0 = Int(cx), y0 = Int(cy)
+                    let tx = cx - Float(x0) - 0.5, ty = cy - Float(y0) - 0.5
+                    let x1 = min(x0 + 1, n - 1), y1 = min(y0 + 1, n - 1)
+                    cells[x0 + y0 * n] += (1 - tx) * (1 - ty) * weight
+                    cells[x1 + y0 * n] += tx * (1 - ty) * weight
+                    cells[x1 + y1 * n] += tx * ty * weight
+                    cells[x0 + y1 * n] += (1 - tx) * ty * weight
+                }
+                if let visible {
+                    for index in visible { add(items[Int(index)]) }
+                } else {
+                    for index in items.indices { add(items[index]) }
+                }
+            }
         }
 
+        // This runs for every step of the timeline as it plays, so it has to be quick.
+        // Three blurs across then three down, each copying from one buffer to the other,
+        // which leaves the result back in `values`.
         var scratch = values
-        let radius = Self.radius / Self.cellSize
-        for pass in 0..<3 {
-            for row in 0..<n {
-                if pass % 2 == 0 {
-                    Self.boxBlur(radius, from: values, to: &scratch, start: row * n, count: n, step: 1)
-                } else {
-                    Self.boxBlur(radius, from: scratch, to: &values, start: row * n, count: n, step: 1)
+        let blur = Blur(radius: Self.radius / Self.cellSize, count: n)
+        values.withUnsafeMutableBufferPointer { first in
+            scratch.withUnsafeMutableBufferPointer { second in
+                nonisolated(unsafe) let a = first.baseAddress!
+                nonisolated(unsafe) let b = second.baseAddress!
+                for pass in 0..<6 {
+                    let across = pass < 3
+                    let (source, target) = pass % 2 == 0 ? (a, b) : (b, a)
+                    nonisolated(unsafe) let from = source
+                    nonisolated(unsafe) let to = target
+                    DispatchQueue.concurrentPerform(iterations: n) { line in
+                        if across {
+                            blur.run(from: from, to: to, start: line * n, step: 1)
+                        } else {
+                            blur.run(from: from, to: to, start: line, step: n)
+                        }
+                    }
                 }
             }
         }
-        // After three passes the latest copy is in `scratch`.
-        for pass in 0..<3 {
-            for column in 0..<n {
-                if pass % 2 == 0 {
-                    Self.boxBlur(radius, from: scratch, to: &values, start: column, count: n, step: n)
-                } else {
-                    Self.boxBlur(radius, from: values, to: &scratch, start: column, count: n, step: n)
-                }
-            }
-        }
-        // And after three more it is in `values`.
 
         let unit = Float(Self.cellSize * Self.cellSize)
-        let highest = (values.max() ?? 0) / unit
+        let highest = vDSP.maximum(values) / unit
         let scale = Float(fullPeak ?? 0) > 0 ? Float(fullPeak!) : highest
         width = n
         height = n
@@ -81,19 +88,45 @@ public struct DensityField: Sendable {
 
     /// A box blur with a fractional radius (`d3.blur2`): whole cells inside the
     /// radius count fully, the next one out in proportion, and edges repeat.
-    private static func boxBlur(_ radius: Double, from source: [Float], to target: inout [Float],
-                                start: Int, count: Int, step: Int) {
-        let whole = Int(radius.rounded(.down))
-        let fraction = radius - Double(whole)
-        let scale = 1 / (2 * radius + 1)
-        let last = count - 1
-        @inline(__always) func at(_ i: Int) -> Double { Double(source[start + min(max(i, 0), last) * step]) }
+    private struct Blur: Sendable {
+        let whole: Int
+        let fraction: Double
+        let scale: Double
+        let count: Int
+        /// Where each position's edges fall, with the ends repeated: the cell leaving the
+        /// box, the one just inside its lower edge, and the one just past its upper edge.
+        let below: [Int32]
+        let leaving: [Int32]
+        let above: [Int32]
 
-        var sum = 0.0
-        for i in -whole...whole { sum += at(i) }
-        for i in 0...last {
-            target[start + i * step] = Float((sum + fraction * (at(i - whole - 1) + at(i + whole + 1))) * scale)
-            sum += at(i + whole + 1) - at(i - whole)
+        init(radius: Double, count: Int) {
+            let whole = Int(radius.rounded(.down))
+            self.whole = whole
+            fraction = radius - Double(whole)
+            scale = 1 / (2 * radius + 1)
+            self.count = count
+            let last = count - 1
+            below = (0..<count).map { Int32(max($0 - whole - 1, 0)) }
+            leaving = (0..<count).map { Int32(max($0 - whole, 0)) }
+            above = (0..<count).map { Int32(min($0 + whole + 1, last)) }
+        }
+
+        func run(from source: UnsafePointer<Float>, to target: UnsafeMutablePointer<Float>, start: Int, step: Int) {
+            let last = count - 1
+            var sum = 0.0
+            for i in -whole...whole { sum += Double(source[start + min(max(i, 0), last) * step]) }
+            below.withUnsafeBufferPointer { below in
+                leaving.withUnsafeBufferPointer { leaving in
+                    above.withUnsafeBufferPointer { above in
+                        for i in 0..<count {
+                            let high = Double(source[start + Int(above[i]) * step])
+                            let low = Double(source[start + Int(below[i]) * step])
+                            target[start + i * step] = Float((sum + fraction * (low + high)) * scale)
+                            sum += high - Double(source[start + Int(leaving[i]) * step])
+                        }
+                    }
+                }
+            }
         }
     }
 }

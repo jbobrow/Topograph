@@ -78,6 +78,51 @@ public struct MapFilter: Sendable, Equatable {
     }
 }
 
+/// What a filter shows at any time range, ready to answer quickly. The timeline changes
+/// the range many times a second, so the rest of the filter is worked out once, here.
+public struct TimeSlicer: Sendable {
+    /// The filter this was made for, without its range.
+    public let filter: MapFilter
+    /// Everything it shows at any time.
+    public let all: [Int32]
+    /// What has a time, soonest first, with those times.
+    private let timed: [Int32]
+    public let times: [Int]
+
+    public init(filter: MapFilter, items: [MapItem], search: SearchIndex) {
+        let timeless = filter.ignoringTime
+        self.filter = timeless
+        all = timeless.visible(in: items, search: search)
+        let sorted = all.compactMap { index in items[Int(index)].time.map { (index, $0) } }.sorted { $0.1 < $1.1 }
+        timed = sorted.map(\.0)
+        times = sorted.map(\.1)
+    }
+
+    /// The items showing in a range. Same items as `MapFilter.visible`, soonest first.
+    public func visible(in range: ClosedRange<Int>?) -> [Int32] {
+        guard let range else { return all }
+        return Array(timed[firstIndex(atOrAfter: range.lowerBound)..<firstIndex(after: range.upperBound)])
+    }
+
+    private func firstIndex(atOrAfter time: Int) -> Int {
+        var low = 0, high = times.count
+        while low < high {
+            let middle = (low + high) / 2
+            if times[middle] < time { low = middle + 1 } else { high = middle }
+        }
+        return low
+    }
+
+    private func firstIndex(after time: Int) -> Int {
+        var low = 0, high = times.count
+        while low < high {
+            let middle = (low + high) / 2
+            if times[middle] <= time { low = middle + 1 } else { high = middle }
+        }
+        return low
+    }
+}
+
 /// Every item's text and @author, lowercased, in one buffer that can be scanned quickly.
 public struct SearchIndex: Sendable {
     private let bytes: [UInt8]

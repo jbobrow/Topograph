@@ -1,4 +1,5 @@
 import CoreGraphics
+import Foundation
 import ImageIO
 @preconcurrency import Metal
 import TopographCore
@@ -21,7 +22,7 @@ final class ThumbnailStore {
 
     private static let tiers = [96, 192, 320]
     private static let budget = 768 * 1024 * 1024
-    private static let parallel = 6
+    private static let parallel = max(ProcessInfo.processInfo.activeProcessorCount - 2, 2)
 
     private let device: MTLDevice
     private let queue: MTLCommandQueue

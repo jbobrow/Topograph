@@ -6,51 +6,90 @@ struct FilterBar: View {
     @Bindable var model: AppModel
     let theme: Theme
     @State private var query = ""
+    @FocusState private var findFocused: Bool
+    /// Counts tries to turn off the last of creation and consumption.
+    @State private var triedLastOff = 0
+    @State private var showingStaysOn = false
 
-    private static let groups: [(ActionGroups, String)] = [(.creation, "creation"), (.consumption, "consumption")]
+    private static let groups: [(ActionGroups, String, KeyEquivalent)] = [
+        (.creation, "creation", "["), (.consumption, "consumption", "]"),
+    ]
+
+    private static let imageKeys: [ImageMode: KeyEquivalent] = [.color: "l", .gray: "g", .dither: "b"]
 
     var body: some View {
         HStack(spacing: 14) {
             HStack(spacing: 4) {
-                ForEach(model.platforms, id: \.self) { platform in
+                ForEach(Array(model.platforms.enumerated()), id: \.element) { position, platform in
                     let on = !model.filter.hiddenPlatforms.contains(platform)
                     Button(Format.platform(platform)) {
                         if on { model.filter.hiddenPlatforms.insert(platform) } else { model.filter.hiddenPlatforms.remove(platform) }
                     }
                     .buttonStyle(KeyStyle(theme: theme, led: on))
+                    .hotkey("⇧⌘\(position + 1)", key: KeyEquivalent(Character(String(position + 1))), modifiers: [.command, .shift], model: model, theme: theme)
                 }
             }
             HStack(spacing: 4) {
-                ForEach(Self.groups, id: \.1) { group, label in
+                ForEach(Self.groups, id: \.1) { group, label, key in
                     let on = model.filter.groups.isSuperset(of: group)
                     Button(label) {
                         if !on {
                             model.filter.groups.formUnion(group)
                         } else if model.filter.groups != group {
-                            // The last one stays on: with neither, the map would be empty.
                             model.filter.groups.subtract(group)
+                        } else {
+                            // The last one stays on: with neither, the map would be empty.
+                            triedLastOff += 1
                         }
                     }
                     .buttonStyle(KeyStyle(theme: theme, led: on))
+                    .hotkey("⌘\(key.character)", key: key, model: model, theme: theme)
                 }
+            }
+            .overlay(alignment: .topLeading) {
+                if showingStaysOn {
+                    Text("one has to stay on")
+                        .font(PlexMono.font(.medium, size: 11))
+                        .foregroundStyle(theme.ground.color)
+                        .fixedSize()
+                        .padding(.horizontal, 8)
+                        .frame(height: 22)
+                        .background(theme.ink.color)
+                        .offset(y: 32)
+                        .allowsHitTesting(false)
+                }
+            }
+            .task(id: triedLastOff) {
+                guard triedLastOff > 0 else { return }
+                showingStaysOn = true
+                try? await Task.sleep(for: .seconds(2))
+                // A newer try has started its own two seconds.
+                if !Task.isCancelled { showingStaysOn = false }
             }
             HStack(spacing: 4) {
                 ForEach(ImageMode.allCases, id: \.self) { mode in
+                    let key = Self.imageKeys[mode] ?? "g"
                     Button(mode.label) { model.imageMode = mode }
                         .buttonStyle(KeyStyle(theme: theme, led: model.imageMode == mode))
+                        .hotkey("⌘\(key.character)", key: key, model: model, theme: theme)
                 }
             }
             Spacer(minLength: 0)
             HStack(spacing: 4) {
                 HStack(spacing: 0) {
-                    Text("find")
-                        .font(PlexMono.font(.regular, size: 11))
-                        .foregroundStyle(theme.secondary.color)
-                        .padding(.horizontal, 8)
-                        .frame(height: 26)
-                        .overlay(alignment: .trailing) { Rectangle().fill(theme.rule.color).frame(width: 1) }
+                    Button { findFocused = true } label: {
+                        Text("find")
+                            .font(PlexMono.font(.regular, size: 11))
+                            .foregroundStyle(theme.secondary.color)
+                            .padding(.horizontal, 8)
+                            .frame(height: 26)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .overlay(alignment: .trailing) { Rectangle().fill(theme.rule.color).frame(width: 1) }
                     TextField("", text: $query, prompt: Text(model.findsByMeaning ? "what it's about" : "words or @author").foregroundStyle(theme.secondary.color))
                         .textFieldStyle(.plain)
+                        .focused($findFocused)
                         .font(PlexMono.font(.regular, size: 11))
                         .foregroundStyle(theme.ink.color)
                         .padding(.horizontal, 8)
@@ -59,8 +98,11 @@ struct FilterBar: View {
                 .frame(height: 26)
                 .background(theme.surface.color)
                 .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(theme.rule.color, lineWidth: 1))
+                // On the whole field, or its outline draws over the label.
+                .hotkey("⌘F", key: "f", placement: .belowLeft, model: model, theme: theme)
                 Button("by meaning") { model.findsByMeaning.toggle() }
                     .buttonStyle(KeyStyle(theme: theme, led: model.findsByMeaning))
+                    .hotkey("⌘Y", key: "y", model: model, theme: theme)
                     .disabled(!model.canFindByMeaning)
                     .help(model.canFindByMeaning
                           ? "Find what things are about, using the CLIP model on this Mac"
@@ -98,18 +140,27 @@ struct TimeBar: View {
 
     private let margin = 16.0
     private let barsHeight = 34.0
+    private static let edgeReach = 6.0
 
     var body: some View {
         HStack(spacing: 12) {
             Button(model.isPlaying ? "■" : "▶") { model.togglePlay() }
                 .buttonStyle(SquareKeyStyle(theme: theme))
                 .accessibilityLabel(model.isPlaying ? "Pause" : "Play through time")
+                .hotkey("⌘P", key: "p", model: model, theme: theme)
             GeometryReader { geometry in
                 ruler(width: geometry.size.width)
                     .contentShape(Rectangle())
                     .gesture(DragGesture(minimumDistance: 0)
                         .onChanged { changed($0, width: geometry.size.width) }
                         .onEnded { ended($0, width: geometry.size.width) })
+                    .onContinuousHover { phase in
+                        guard drag == nil else { return }
+                        switch phase {
+                        case .active(let point): setCursor(at: point.x, width: geometry.size.width)
+                        case .ended: NSCursor.arrow.set()
+                        }
+                    }
             }
             .frame(height: 50)
             rangeLabel
@@ -123,6 +174,7 @@ struct TimeBar: View {
                         }
                         .buttonStyle(KeyStyle(theme: theme))
                         .help("Show the entire timeline")
+                        .hotkey("⌘T", key: "t", model: model, theme: theme)
                     }
                 }
         }
@@ -190,6 +242,17 @@ struct TimeBar: View {
         .foregroundStyle(theme.ink.color)
     }
 
+    /// Whether a position is close enough to one of the time window's edges to grab it.
+    private func isOnEdge(_ position: Double, width: Double) -> Bool {
+        guard let axis = model.axis, let range = model.filter.range else { return false }
+        return abs(position - x(range.lowerBound, axis: axis, width: width)) < Self.edgeReach
+            || abs(position - x(range.upperBound, axis: axis, width: width)) < Self.edgeReach
+    }
+
+    private func setCursor(at position: Double, width: Double) {
+        (isOnEdge(position, width: width) ? NSCursor.resizeLeftRight : .arrow).set()
+    }
+
     private func changed(_ value: DragGesture.Value, width: Double) {
         guard let axis = model.axis else { return }
         let now = time(atX: value.location.x, axis: axis, width: width)
@@ -198,10 +261,12 @@ struct TimeBar: View {
             let start = time(atX: value.startLocation.x, axis: axis, width: width)
             if let range = model.filter.range {
                 let lo = x(range.lowerBound, axis: axis, width: width), hi = x(range.upperBound, axis: axis, width: width)
-                if abs(value.startLocation.x - lo) < 6 {
+                if abs(value.startLocation.x - lo) < Self.edgeReach {
                     drag = .lowerEdge
-                } else if abs(value.startLocation.x - hi) < 6 {
+                    NSCursor.resizeLeftRight.set()
+                } else if abs(value.startLocation.x - hi) < Self.edgeReach {
                     drag = .upperEdge
+                    NSCursor.resizeLeftRight.set()
                 } else if value.startLocation.x > lo, value.startLocation.x < hi {
                     drag = .moving(offset: start - range.lowerBound)
                 } else {
@@ -235,5 +300,6 @@ struct TimeBar: View {
     private func ended(_ value: DragGesture.Value, width: Double) {
         if abs(value.translation.width) < 2, case .fresh = drag { model.filter.range = nil }
         drag = nil
+        setCursor(at: value.location.x, width: width)
     }
 }

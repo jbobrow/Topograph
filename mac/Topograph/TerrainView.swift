@@ -64,6 +64,7 @@ struct TerrainView: NSViewRepresentable {
     let imageMode: ImageMode
     let selected: Int32?
     let isActive: Bool
+    let isPlaying: Bool
     var onFailure: (String) -> Void
     var onHover: (Hover?) -> Void
     var onPickItem: (Int32) -> Void
@@ -91,6 +92,7 @@ struct TerrainView: NSViewRepresentable {
         view.onWhere = onWhere
         view.onViewport = onViewport
         view.isActive = isActive
+        view.isPlaying = isPlaying
         view.show(scene, root: root, imageMode: imageMode, selected: selected)
     }
 }
@@ -145,6 +147,8 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
     var isActive = true {
         didSet { if !isActive { setSpaceHeld(false) } }
     }
+    /// While the timeline plays, space pauses it instead of moving the map.
+    var isPlaying = false
     private var lastViewport: MapViewport?
 
     var zoom: Double { transform.k }
@@ -240,6 +244,9 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
             let mode = lifted ? ImageMode.color : imageMode
             let dither = mode == .dither
             let texture = thumbnails.texture(item: index, path: path, pixels: long * scale, dither: dither)
+            // Stays a dot until its picture is ready. With the timeline playing, pictures arrive
+            // faster than they can load, and empty frames would flicker across the map.
+            if texture == nil, !lifted { return }
             out.append(ThumbPlacement(center: screen(item), size: size, frame: item.mine || lifted ? 2 : 1, mine: item.mine || lifted,
                                       texture: texture, mode: mode,
                                       nearest: dither && long * scale >= Double(texture?.width ?? 0)))
@@ -368,8 +375,10 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
             setSpaceHeld(false)
             return nil
         }
-        guard isActive, !(window?.firstResponder is NSText),
+        guard isActive, !isPlaying, !(window?.firstResponder is NSText),
               event.modifierFlags.intersection([.command, .control, .option]).isEmpty else { return event }
+        // Still down from the press that paused playing, it isn't asking to move the map.
+        if event.isARepeat, !spaceHeld { return nil }
         setSpaceHeld(true)
         return nil
     }

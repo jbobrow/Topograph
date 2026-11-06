@@ -93,7 +93,39 @@ public struct StrataModel: Sendable {
     /// Each region's layer, as a position in `layers`.
     private let layerOfRegion: [Int: Int]
 
-    public init(map: LibraryMap, visible: [Int32], axis: MonthAxis) {
+    /// `order` keeps the layers in a set order, from `stackingOrder`. Without it they're
+    /// ordered by what's in `visible`, which would swap them around as a time range moves.
+    public init(map: LibraryMap, visible: [Int32], axis: MonthAxis, order: [Int]? = nil) {
+        let (keys, table) = Self.table(map: map, visible: visible, axis: axis)
+
+        // Light smoothing so layers read as strata rather than noise.
+        let smooth = table.map(Self.smoothed)
+        let stacked = Self.stack(smooth, order: order)
+        layers = stacked.map { (index, bottom, top) in
+            Layer(region: keys[index], raw: table[index], bottom: bottom, top: top)
+        }
+        var layerOf: [Int: Int] = [:]
+        for (position, layer) in stacked.enumerated() {
+            guard let id = keys[layer.index] else { continue }
+            func mark(_ id: Int) {
+                layerOf[id] = position
+                map.regions.regions[id]?.children.forEach(mark)
+            }
+            mark(id)
+        }
+        layerOfRegion = layerOf
+        low = layers.flatMap(\.bottom).min() ?? 0
+        high = layers.flatMap(\.top).max() ?? 1
+        self.axis = axis
+    }
+
+    /// The order to stack layers in for everything a filter shows, across all of time.
+    public static func stackingOrder(map: LibraryMap, visible: [Int32], axis: MonthAxis) -> [Int] {
+        insideOut(table(map: map, visible: visible, axis: axis).values.map(smoothed))
+    }
+
+    /// Each layer's resonance per month, with which region each layer is.
+    private static func table(map: LibraryMap, visible: [Int32], axis: MonthAxis) -> (keys: [Int?], values: [[Double]]) {
         let cut = map.regions.strataLayers()
         var layerOf: [Int: Int] = [:]
         func mark(_ id: Int, as layer: Int) {
@@ -114,19 +146,7 @@ public struct StrataModel: Sendable {
             keys.append(nil)
             table.append(axis.counts(of: map.waitingTimes).map(Double.init))
         }
-
-        // Light smoothing so layers read as strata rather than noise.
-        let smooth = table.map(Self.smoothed)
-        let stacked = Self.stack(smooth)
-        layers = stacked.map { (index, bottom, top) in
-            Layer(region: keys[index], raw: table[index], bottom: bottom, top: top)
-        }
-        // Regions inside a layer's region belong to that layer too.
-        let positionOfCut = Dictionary(uniqueKeysWithValues: stacked.enumerated().map { ($1.index, $0) })
-        layerOfRegion = layerOf.compactMapValues { positionOfCut[$0] }
-        low = layers.flatMap(\.bottom).min() ?? 0
-        high = layers.flatMap(\.top).max() ?? 1
-        self.axis = axis
+        return (keys, table)
     }
 
     /// Where an item belongs on the chart: its time, and the height of the middle of its
@@ -154,9 +174,9 @@ public struct StrataModel: Sendable {
 
     /// `d3.stack` with `stackOrderInsideOut` and `stackOffsetWiggle`. Returns each
     /// series' original index with its bottom and top edges, bottom of the stack first.
-    static func stack(_ series: [[Double]]) -> [(index: Int, bottom: [Double], top: [Double])] {
+    static func stack(_ series: [[Double]], order given: [Int]? = nil) -> [(index: Int, bottom: [Double], top: [Double])] {
         guard let months = series.first?.count, months > 0 else { return [] }
-        let order = insideOut(series)
+        let order = given ?? insideOut(series)
 
         // Wiggle: choose a baseline that minimizes how much the layers slope.
         var baseline = [Double](repeating: 0, count: months)

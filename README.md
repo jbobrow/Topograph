@@ -120,7 +120,7 @@ it's open, and **Map → Reload Library** (⌘R) shows a new layout. Drag to dra
 to zoom into, or hold space and drag to move the map (esc cancels a rectangle). Two
 fingers also move it, pinching zooms, and with a mouse the wheel zooms. While you're
 zoomed in, a minimap at the bottom left shows where you are: press or drag on it to go
-somewhere else.
+somewhere else. Hold ⌘, or rest on a key for a second, to see its shortcut. Space also pauses the timeline while it's playing.
 
 **Sources** adds your history by running the `topograph` commands below for you, only
 when you ask. It finds them in this repo's `.venv`, or at `TOPOGRAPH_CLI`. Folders get a

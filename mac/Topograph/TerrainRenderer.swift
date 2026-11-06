@@ -12,10 +12,16 @@ struct TerrainScene: Sendable {
     let spatial: SpatialIndex
     /// Visible items with pictures, most resonant first.
     let pictures: [Int32]
+    /// The chart for these items, made together with them while Strata is showing so its
+    /// shape and its time range change in the same frame.
+    let strata: StrataModel?
+    let range: ClosedRange<Int>?
 
-    init(map: LibraryMap, visible: [Int32], fullPeak: Double) {
+    init(map: LibraryMap, visible: [Int32], fullPeak: Double, strata: StrataModel? = nil, range: ClosedRange<Int>? = nil) {
         self.map = map
         self.visible = visible
+        self.strata = strata
+        self.range = range
         field = DensityField(items: map.items, visible: visible, fullPeak: fullPeak)
         counts = map.regions.counts(items: map.items, visible: visible)
         spatial = SpatialIndex(items: map.items, visible: visible)

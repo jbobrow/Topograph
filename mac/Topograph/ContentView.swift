@@ -9,14 +9,19 @@ struct ContentView: View {
         let theme = Theme.of(scheme)
         VStack(spacing: 0) {
             TopBar(model: model, theme: theme)
+                // Shortcut labels reach a little way into the row below.
+                .zIndex(2)
             if model.section.isFiltered {
                 FilterBar(model: model, theme: theme)
+                    // Its message hangs down over the map.
+                    .zIndex(1)
             }
             Rectangle().fill(theme.ink.color).frame(height: 1)
             ZStack(alignment: .topTrailing) {
                 // The map stays alive under other views so it keeps your place.
                 TerrainView(scene: model.scene, root: model.library?.root, controller: model.controller,
                             imageMode: model.imageMode, selected: selectedItem, isActive: model.section == .terrain,
+                            isPlaying: model.isPlaying,
                             onFailure: { model.fail($0) },
                             onHover: { model.hover = $0 },
                             onPickItem: { model.openItem($0) },
@@ -95,9 +100,10 @@ struct TopBar: View {
         HStack(spacing: 8) {
             Text("topograph").font(PlexMono.font(.semibold, size: 15)).foregroundStyle(theme.ink.color)
                 .padding(.trailing, 12)
-            ForEach(Section.allCases, id: \.self) { section in
+            ForEach(Array(Section.allCases.enumerated()), id: \.element) { position, section in
                 Button(section.rawValue) { model.section = section }
                     .buttonStyle(KeyStyle(theme: theme, on: model.section == section))
+                    .hotkey("⌘\(position + 1)", key: KeyEquivalent(Character(String(position + 1))), model: model, theme: theme)
             }
             Spacer()
             if model.section == .sources, let summary = model.sourcesSummary {
@@ -151,9 +157,13 @@ private struct MapChrome: View {
 
             VStack(spacing: 4) {
                 Spacer()
+                // Their shortcuts are in the Map menu. Stacked this closely, labels go to the side.
                 Button("+", action: model.controller.zoomIn).accessibilityLabel("Zoom in")
+                    .hotkey("⌘+", placement: .beside, model: model, theme: theme)
                 Button("−", action: model.controller.zoomOut).accessibilityLabel("Zoom out")
+                    .hotkey("⌘-", placement: .beside, model: model, theme: theme)
                 Button("fit", action: model.controller.fit).accessibilityLabel("Show everything")
+                    .hotkey("⌘0", placement: .beside, model: model, theme: theme)
             }
             .buttonStyle(SquareKeyStyle(theme: theme))
             // Beside the side panel when it's open, not behind it.
@@ -181,6 +191,7 @@ private struct MinimapPanel: View {
     let theme: Theme
     @State private var picture: CGImage?
     @State private var grab: CGSize?
+    @State private var drawing = false
     @Environment(\.displayScale) private var displayScale
 
     private let side = 168.0
@@ -223,7 +234,7 @@ private struct MinimapPanel: View {
             }
             .onDisappear { model.controller.pointerIsOnMinimap = false }
             .accessibilityLabel("Minimap")
-            .task(id: scene.id) { await draw(scene) }
+            .task(id: scene.id) { await drawLatest() }
         }
     }
 
@@ -248,13 +259,21 @@ private struct MinimapPanel: View {
         model.controller.center(x: min(max(x, 0), DensityField.mapSize), y: min(max(y, 0), DensityField.mapSize))
     }
 
-    private func draw(_ scene: TerrainScene) async {
+    /// One at a time, always going on to whatever's newest, since scenes can change faster
+    /// than this draws them while the timeline plays.
+    private func drawLatest() async {
+        guard !drawing else { return }
+        drawing = true
+        defer { drawing = false }
         let pixels = Int(side * displayScale)
         let dot = max(Int(displayScale), 1)
-        let next = await Task.detached(priority: .utility) {
-            Minimap.image(mask: Minimap.mask(field: scene.field, side: pixels, dot: dot), side: pixels)
-        }.value
-        if !Task.isCancelled { picture = next }
+        var drawn: UUID?
+        while let scene = model.scene, scene.id != drawn {
+            drawn = scene.id
+            picture = await Task.detached(priority: .utility) {
+                Minimap.image(mask: Minimap.mask(field: scene.field, side: pixels, dot: dot), side: pixels)
+            }.value
+        }
     }
 }
 

@@ -1,3 +1,5 @@
+import AppKit
+import QuartzCore
 import SwiftUI
 import TopographCore
 
@@ -38,6 +40,8 @@ final class AppModel {
     private(set) var platforms: [String] = []
     private(set) var isPlaying = false
     var section = Section.terrain
+    /// ⌘ is down, so every key shows its shortcut.
+    private(set) var commandHeld = false
     var selection: Selection?
     var hover: Hover?
     var imageMode: ImageMode {
@@ -69,15 +73,47 @@ final class AppModel {
 
     private var search: SearchIndex?
     private var fullPeak = 0.0
-    private var filtering = 0
-    /// What the timeline's bars were last counted for.
-    private var countedFilter: MapFilter?
+    private var updating = false
+    private var updateAgain = false
+    private var lastUpdate: CFTimeInterval = 0
+    /// Terrain and Strata are cheap to redraw and worth seeing at full speed. The other views
+    /// do more work per update, so they follow more slowly.
+    private var updateStep: CFTimeInterval {
+        switch section {
+        case .terrain, .strata: 0
+        default: 0.14
+        }
+    }
+    /// Goes up with each newly loaded map, so work on an older one isn't shown.
+    private var mapGeneration = 0
+    /// The current filter's items by time. Its times also make the timeline's bars.
+    private var slicer: TimeSlicer?
     private var player: Timer?
+    private var lastPlayStep: CFTimeInterval = 0
+    /// Seconds of the timeline per second of playing: about seven months.
+    private static let playSpeed = 30.0 * 86400 / 0.14
     private var embeddingsTask: Task<EmbeddingStore?, Never>?
     private var encoderTask: Task<CLIPEncoder?, Never>?
 
     init() {
         imageMode = UserDefaults.standard.string(forKey: "imageMode").flatMap(ImageMode.init) ?? .gray
+        NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            let held = event.modifierFlags.contains(.command)
+            MainActor.assumeIsolated { self?.commandHeld = held }
+            return event
+        }
+        // While it's playing, space pauses. It's for moving the map the rest of the time.
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.keyCode == 49, !(NSApp.keyWindow?.firstResponder is NSText) else { return event }
+            let playing = MainActor.assumeIsolated { self?.isPlaying ?? false }
+            guard playing else { return event }
+            MainActor.assumeIsolated { self?.stopPlaying() }
+            return nil
+        }
+        // A key released in another app never reaches this one.
+        NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.commandHeld = false }
+        }
     }
 
     func load() {
@@ -86,7 +122,7 @@ final class AppModel {
         Task {
             do {
                 let filter = self.filter
-                let (library, loaded, search, peak, scene, counted) = try await Task.detached(priority: .userInitiated) {
+                let (library, loaded, search, peak, scene, slicer) = try await Task.detached(priority: .userInitiated) {
                     let library = try Library()
                     let map = try library.map()
                     let search = SearchIndex(items: map.items)
@@ -94,11 +130,7 @@ final class AppModel {
                     let shown = map.items.indices.filter { map.items[$0].platform != "google" }.map(Int32.init)
                     let peak = DensityField(items: map.items, visible: shown).peak
                     let scene = TerrainScene(map: map, visible: filter.visible(in: map.items, search: search), fullPeak: peak)
-                    let times = map.items.compactMap(\.time)
-                    let counted = MonthAxis(times: times + map.waitingTimes).map {
-                        Self.monthCounts(filter: filter, map: map, search: search, axis: $0)
-                    }
-                    return (library, map, search, peak, scene, counted)
+                    return (library, map, search, peak, scene, TimeSlicer(filter: filter, items: map.items, search: search))
                 }.value
                 self.library = library
                 let map = loaded.withRegions(loaded.regions.renamed(regionNames))
@@ -106,8 +138,10 @@ final class AppModel {
                 embeddingsTask = nil
                 let times = map.items.compactMap(\.time)
                 axis = MonthAxis(times: times + map.waitingTimes)
-                monthCounts = counted ?? []
-                countedFilter = filter.ignoringTime
+                monthCounts = axis?.counts(of: slicer.times) ?? []
+                self.slicer = slicer
+                strataOrder = nil
+                mapGeneration += 1
                 // Largest first, like the viewer's chips in the order they turn up.
                 let tally = map.items.reduce(into: [String: Int]()) { $0[$1.platform, default: 0] += 1 }
                 platforms = tally.keys.sorted { tally[$0]! > tally[$1]! }
@@ -223,7 +257,7 @@ final class AppModel {
 
     // MARK: Time
 
-    /// Slide a window (the current selection, or two years) through time, a month at a step.
+    /// Slide a window (the current selection, or two years) through time at an even pace.
     func togglePlay() {
         if isPlaying {
             stopPlaying()
@@ -236,7 +270,9 @@ final class AppModel {
         if range.upperBound >= axis.end { range = axis.start...(axis.start + span) }
         filter.range = range
         isPlaying = true
-        let timer = Timer(timeInterval: 0.14, repeats: true) { [weak self] _ in
+        lastPlayStep = CACurrentMediaTime()
+        // Steps come as fast as the display, and each moves by the time that's passed.
+        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.stepPlay() }
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -245,8 +281,12 @@ final class AppModel {
 
     private func stepPlay() {
         guard let axis, let range = filter.range else { return stopPlaying() }
-        let month = 30 * 86400
-        let next = (range.lowerBound + month)...(range.upperBound + month)
+        let now = CACurrentMediaTime()
+        // Moving the range redraws whatever's showing, so wait for what it can keep up with.
+        guard now - lastPlayStep >= updateStep else { return }
+        let seconds = Int((now - lastPlayStep) * Self.playSpeed)
+        lastPlayStep = now
+        let next = (range.lowerBound + seconds)...(range.upperBound + seconds)
         if next.upperBound > axis.end { return stopPlaying() }
         filter.range = next
     }
@@ -257,30 +297,49 @@ final class AppModel {
         isPlaying = false
     }
 
-    /// The latest filter wins; one that's been overtaken is dropped.
+    /// One update at a time. Whatever changed meanwhile goes into the next, so a slow machine
+    /// shows fewer steps rather than none: finished work is never thrown away for being late.
     private func applyFilter() {
-        guard let map, let search else { return }
-        filtering += 1
-        let ticket = filtering
-        let (filter, peak) = (self.filter, fullPeak)
-        // Dragging across the timeline changes only the range, which the bars ignore.
-        let axis = filter.ignoringTime == countedFilter ? nil : self.axis
+        guard map != nil, search != nil else { return }
+        guard !updating else {
+            updateAgain = true
+            return
+        }
+        let wait = updateStep - (CACurrentMediaTime() - lastUpdate)
+        updating = true
         Task {
-            let (scene, counts) = await Task.detached(priority: .userInitiated) {
-                let scene = TerrainScene(map: map, visible: filter.visible(in: map.items, search: search), fullPeak: peak)
-                return (scene, axis.map { Self.monthCounts(filter: filter, map: map, search: search, axis: $0) })
-            }.value
-            guard ticket == filtering else { return }
-            self.scene = scene
-            if let counts {
-                monthCounts = counts
-                countedFilter = filter.ignoringTime
+            if wait > 0 { try? await Task.sleep(for: .seconds(wait)) }
+            await update()
+            updating = false
+            lastUpdate = CACurrentMediaTime()
+            if updateAgain {
+                updateAgain = false
+                applyFilter()
             }
         }
     }
 
-    /// Items per month under a filter, whatever its time range.
-    private nonisolated static func monthCounts(filter: MapFilter, map: LibraryMap, search: SearchIndex, axis: MonthAxis) -> [Int] {
-        axis.counts(of: filter.ignoringTime.visible(in: map.items, search: search).compactMap { map.items[Int($0)].time })
+    private func update() async {
+        guard let map, let search else { return }
+        let (filter, peak, generation) = (self.filter, fullPeak, mapGeneration)
+        let current = slicer?.filter == filter.ignoringTime ? slicer : nil
+        let (axis, order, wantsStrata) = (self.axis, current == nil ? nil : strataOrder, section == .strata)
+        let (scene, newSlicer, newOrder, counts) = await Task.detached(priority: .userInitiated) { () -> (TerrainScene, TimeSlicer, [Int]?, [Int]?) in
+            let slicer = current ?? TimeSlicer(filter: filter, items: map.items, search: search)
+            let counts = current == nil ? axis?.counts(of: slicer.times) : nil
+            // A search by meaning keeps the best of what's in range, not a slice of its best.
+            let visible = filter.nearest == nil ? slicer.visible(in: filter.range) : filter.visible(in: map.items, search: search)
+            let order = order ?? axis.map { StrataModel.stackingOrder(map: map, visible: slicer.all, axis: $0) }
+            let strata = wantsStrata ? axis.map { StrataModel(map: map, visible: visible, axis: $0, order: order) } : nil
+            return (TerrainScene(map: map, visible: visible, fullPeak: peak, strata: strata, range: filter.range), slicer, order, counts)
+        }.value
+        guard generation == mapGeneration else { return }
+        self.scene = scene
+        slicer = newSlicer
+        strataOrder = newOrder
+        if let counts { monthCounts = counts }
     }
+
+    /// The order of Strata's layers for the current filter, whatever the time range.
+    private(set) var strataOrder: [Int]?
 }

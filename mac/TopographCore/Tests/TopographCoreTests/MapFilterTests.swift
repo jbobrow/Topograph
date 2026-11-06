@@ -21,6 +21,24 @@ final class MapFilterTests: XCTestCase {
         XCTAssertEqual(filter.ignoringTime.groups, .creation)
     }
 
+    func testTimeSlicerShowsWhatTheFilterShows() {
+        var items: [MapItem] = []
+        for index in 0..<200 {
+            items.append(MapItem(id: "\(index)", x: 0, y: 0, resonance: 1, groups: index % 3 == 0 ? .made : .liked,
+                                 platform: index % 2 == 0 ? "x" : "files", time: index % 17 == 0 ? nil : 1000 + (index * 37) % 500))
+        }
+        let search = SearchIndex(items: items)
+        var filter = MapFilter()
+        filter.hiddenPlatforms = ["files"]
+        let slicer = TimeSlicer(filter: filter, items: items, search: search)
+        XCTAssertEqual(slicer.visible(in: nil), filter.visible(in: items, search: search))
+        for range in [1000...1499, 1100...1200, 1037...1037, 2000...3000, 0...999] {
+            filter.range = range
+            XCTAssertEqual(Set(slicer.visible(in: range)), Set(filter.visible(in: items, search: search)), "\(range)")
+        }
+        XCTAssertEqual(slicer.times, slicer.times.sorted())
+    }
+
     func testCreationAndConsumptionSplitWhatYouDid() {
         func shows(_ item: ActionGroups, in position: ActionGroups) -> Bool {
             var filter = MapFilter()

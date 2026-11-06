@@ -17,6 +17,8 @@ struct TopographApp: App {
         .defaultSize(width: 1280, height: 860)
         .commands {
             CommandGroup(replacing: .newItem) {}
+            // ⌘P plays the timeline, and there's nothing here to print.
+            CommandGroup(replacing: .printItem) {}
             CommandMenu("Map") {
                 Button("Zoom In") { model.controller.zoomIn() }.keyboardShortcut("=")
                 Button("Zoom Out") { model.controller.zoomOut() }.keyboardShortcut("-")

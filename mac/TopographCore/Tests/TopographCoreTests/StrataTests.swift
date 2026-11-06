@@ -99,4 +99,33 @@ final class StrataTests: XCTestCase {
         unplaced.region = nil
         XCTAssertNil(try XCTUnwrap(model.place(of: unplaced)).height)
     }
+
+    func testLayersKeepTheirOrderAsATimeRangeMoves() throws {
+        let t0 = 1_579_046_400
+        var items: [MapItem] = []
+        // Three regions that each peak at a different time.
+        for (region, peak) in [(1, 2), (2, 14), (3, 26)] {
+            for month in 0..<30 {
+                let amount = max(1, 12 - abs(month - peak))
+                for copy in 0..<amount {
+                    items.append(MapItem(id: "\(region)-\(month)-\(copy)", x: 0, y: 0, resonance: 1, region: region, time: t0 + month * 30 * 86400))
+                }
+            }
+        }
+        let records = (1...3).map { RegionTree.Record(id: $0, label: "r\($0)", x: 1, y: 1, r: 4) }
+        let map = LibraryMap(items: items, regions: RegionTree(records: records, items: items))
+        let axis = try XCTUnwrap(MonthAxis(times: items.compactMap(\.time), calendar: utc))
+        let all = items.indices.map(Int32.init)
+        let order = StrataModel.stackingOrder(map: map, visible: all, axis: axis)
+        // With everything showing, the set order is what it would have chosen anyway.
+        XCTAssertEqual(StrataModel(map: map, visible: all, axis: axis, order: order).layers.map(\.region),
+                       StrataModel(map: map, visible: all, axis: axis).layers.map(\.region))
+        func stack(months: Range<Int>) -> [Int?] {
+            let range = (t0 + months.lowerBound * 30 * 86400)...(t0 + months.upperBound * 30 * 86400)
+            let visible = all.filter { range.contains(items[Int($0)].time!) }
+            return StrataModel(map: map, visible: visible, axis: axis, order: order).layers.map(\.region)
+        }
+        XCTAssertEqual(stack(months: 0..<6), stack(months: 12..<18))
+        XCTAssertEqual(stack(months: 12..<18), stack(months: 24..<30))
+    }
 }

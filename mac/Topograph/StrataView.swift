@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 import SwiftUI
 import TopographCore
 
@@ -11,8 +12,8 @@ struct StrataScreen: View {
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            if let strata, let map = model.map {
-                StrataCanvas(model: strata, map: map, range: model.filter.range, marked: markedItem(in: map), theme: theme,
+            if let strata = model.scene?.strata ?? strata, let map = model.map {
+                StrataCanvas(model: strata, map: map, range: model.scene?.range, marked: markedItem(in: map), theme: theme,
                              onTip: { tip = $0 },
                              onPick: { model.openRegion($0) })
                     // The chart stays clear of the side panel, or recent months end up behind it.
@@ -33,10 +34,12 @@ struct StrataScreen: View {
             }
         }
         .background(theme.ground.color)
+        // For a scene made while another view was showing, which has no chart of its own.
         .task(id: model.scene?.id) {
-            guard let scene = model.scene, let axis = model.axis else { return }
+            guard let scene = model.scene, scene.strata == nil, let axis = model.axis else { return }
+            let order = model.strataOrder
             strata = await Task.detached(priority: .userInitiated) {
-                StrataModel(map: scene.map, visible: scene.visible, axis: axis)
+                StrataModel(map: scene.map, visible: scene.visible, axis: axis, order: order)
             }.value
         }
     }
@@ -87,6 +90,22 @@ final class StrataNSView: NSView {
     private var tilesFor: (theme: RGB, scale: Double)?
     private var tracking: NSTrackingArea?
     private var builtFor: CGSize = .zero
+    private var shownScale: (low: Double, high: Double)?
+    private var scaleLink: CADisplayLink?
+    private var lastScaleStep: CFTimeInterval = 0
+    private var names: [Int: ShownName] = [:]
+    private var lastNameStep: CFTimeInterval = 0
+    private var namesMoving = false
+
+    private struct ShownName {
+        var name: String
+        var center: CGPoint
+        var alpha: Double
+        /// 1 while it's wanted, 0 once it's on its way out.
+        var target: Double
+        var goal: CGPoint
+        var month: Int
+    }
 
     var onTip: ((StrataTip?) -> Void)?
     var onPick: ((Int) -> Void)?
@@ -103,6 +122,7 @@ final class StrataNSView: NSView {
         self.theme = theme
         patternOf = Dictionary(map.regions.strataLayers().enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })
         builtFor = .zero
+        easeScale()
         needsDisplay = true
     }
 
@@ -123,8 +143,60 @@ final class StrataNSView: NSView {
 
     private func y(_ value: Double, model: StrataModel) -> Double {
         let top = margin.top, bottom = bounds.height - margin.bottom
-        let span = max(model.high - model.low, 1e-9)
-        return bottom + (value - model.low) / span * (top - bottom)
+        let (low, high) = shownScale ?? (model.low, model.high)
+        let span = max(high - low, 1e-9)
+        return bottom + (value - low) / span * (top - bottom)
+    }
+
+    // MARK: Scale
+
+    /// A burst of activity coming into a time range rescales the whole chart. Eased, so
+    /// that's a movement rather than a jump.
+    private func easeScale() {
+        guard let model else { return }
+        if shownScale == nil || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            shownScale = (model.low, model.high)
+            return
+        }
+        if !scaleIsSettled(model) { startMotion() }
+    }
+
+    /// Runs while the scale or the names are on their way somewhere.
+    private func startMotion() {
+        guard scaleLink == nil else { return }
+        lastScaleStep = CACurrentMediaTime()
+        let link = displayLink(target: self, selector: #selector(stepMotion))
+        link.add(to: .main, forMode: .common)
+        scaleLink = link
+    }
+
+    private func scaleIsSettled(_ model: StrataModel) -> Bool {
+        guard let shownScale else { return true }
+        let tolerance = (model.high - model.low) * 0.001
+        return abs(shownScale.low - model.low) <= tolerance && abs(shownScale.high - model.high) <= tolerance
+    }
+
+    @objc private func stepMotion() {
+        guard let model, let shown = shownScale else { return stopEasing() }
+        let now = CACurrentMediaTime()
+        let share = 1 - exp(-(now - lastScaleStep) / 0.09)
+        lastScaleStep = now
+        if scaleIsSettled(model) {
+            if shown != (model.low, model.high) {
+                shownScale = (model.low, model.high)
+                builtFor = .zero
+            }
+            if !namesMoving { stopEasing() }
+        } else {
+            shownScale = (shown.low + (model.low - shown.low) * share, shown.high + (model.high - shown.high) * share)
+            builtFor = .zero
+        }
+        needsDisplay = true
+    }
+
+    private func stopEasing() {
+        scaleLink?.invalidate()
+        scaleLink = nil
     }
 
     private func buildPaths() {
@@ -231,7 +303,7 @@ final class StrataNSView: NSView {
             c.strokePath()
             c.restoreGState()
         }
-        drawNames(model: model)
+        drawNames(c, model: model)
         drawAxis(c, axis: axis)
         drawMarker(c, model: model)
     }
@@ -275,45 +347,106 @@ final class StrataNSView: NSView {
 
     /// Name each layer where the whole name fits inside it: the stretch of months under
     /// the label must all be at least a line tall.
-    private func drawNames(model: StrataModel) {
+    ///
+    /// The best spot changes with every step of a moving time range. So a name stays at its
+    /// month until a clearly better one comes along, shown names keep their place over new
+    /// ones, and each eases to where it's going, fading in or out when it comes or goes.
+    private func drawNames(_ c: CGContext, model: StrataModel) {
         guard let map else { return }
         let axis = model.axis
         let step = (bounds.width - margin.left - margin.right) / max(1, Double(axis.count - 1))
-        var candidates: [(best: Double, month: Int, layer: StrataModel.Layer, name: String)] = []
+        func thinnest(_ layer: StrataModel.Layer, around month: Int, half: Int) -> Double {
+            var lowest = Double.infinity
+            for j in (month - half)...(month + half) {
+                lowest = min(lowest, y(layer.bottom[j], model: model) - y(layer.top[j], model: model))
+            }
+            return lowest
+        }
+        var candidates: [(best: Double, month: Int, layer: StrataModel.Layer, id: Int, name: String)] = []
         for layer in model.layers {
             guard let id = layer.region, let name = map.regions.regions[id]?.label else { continue }
             let half = Int((((Double(name.count) * 6.8 + 10) / 2) / step).rounded(.up))
+            guard half < axis.count - half else { continue }
             var best = -1.0, at = -1
-            if half < axis.count - half {
-                for i in half..<(axis.count - half) {
-                    var lowest = Double.infinity
-                    for j in (i - half)...(i + half) {
-                        lowest = min(lowest, y(layer.bottom[j], model: model) - y(layer.top[j], model: model))
-                    }
-                    if lowest > best {
-                        best = lowest
-                        at = i
-                    }
+            for i in half..<(axis.count - half) {
+                let lowest = thinnest(layer, around: i, half: half)
+                if lowest > best {
+                    best = lowest
+                    at = i
                 }
             }
-            if at >= 0, best >= 14 { candidates.append((best, at, layer, name)) }
+            if let shown = names[id], shown.target > 0, shown.month >= half, shown.month < axis.count - half {
+                let there = thinnest(layer, around: shown.month, half: half)
+                if there >= 14, there >= best * 0.7 {
+                    best = there
+                    at = shown.month
+                }
+            }
+            if at >= 0, best >= 14 { candidates.append((best, at, layer, id, name)) }
+        }
+
+        let font = NSFont(name: "IBMPlexMono-Medium", size: 11) ?? .monospacedSystemFont(ofSize: 11, weight: .medium)
+        func favored(_ candidate: (best: Double, month: Int, layer: StrataModel.Layer, id: Int, name: String)) -> Double {
+            (names[candidate.id]?.target ?? 0) > 0 ? candidate.best * 1.5 : candidate.best
         }
         var placed: [CGRect] = []
-        let font = NSFont(name: "IBMPlexMono-Medium", size: 11) ?? .monospacedSystemFont(ofSize: 11, weight: .medium)
-        for candidate in candidates.sorted(by: { $0.best > $1.best }) {
+        var wanted: Set<Int> = []
+        for candidate in candidates.sorted(by: { favored($0) > favored($1) }) {
             let middle = (y(candidate.layer.bottom[candidate.month], model: model) + y(candidate.layer.top[candidate.month], model: model)) / 2
-            let fill = NSAttributedString(string: candidate.name, attributes: [.font: font, .foregroundColor: NSColor(cgColor: theme.ink.cg) ?? .black])
-            let size = fill.size()
-            let rect = CGRect(x: x(axis.edges[candidate.month], axis: axis) - size.width / 2, y: middle - size.height / 2,
-                              width: size.width, height: size.height)
+            let size = NSAttributedString(string: candidate.name, attributes: [.font: font]).size()
+            let center = CGPoint(x: x(axis.edges[candidate.month], axis: axis), y: middle)
+            let rect = CGRect(x: center.x - size.width / 2, y: center.y - size.height / 2, width: size.width, height: size.height)
             if placed.contains(where: { $0.intersects(rect) }) { continue }
             placed.append(rect)
-            let halo = NSAttributedString(string: candidate.name, attributes: [
+            wanted.insert(candidate.id)
+            var shown = names[candidate.id] ?? ShownName(name: candidate.name, center: center, alpha: 0, target: 1, goal: center, month: candidate.month)
+            shown.name = candidate.name
+            // Coming back after fading out, it starts where it's going, not where it was.
+            if shown.alpha == 0 { shown.center = center }
+            shown.goal = center
+            shown.target = 1
+            shown.month = candidate.month
+            names[candidate.id] = shown
+        }
+        for id in names.keys where !wanted.contains(id) { names[id]?.target = 0 }
+
+        let now = CACurrentMediaTime()
+        let elapsed = min(now - lastNameStep, 0.05)
+        lastNameStep = now
+        let still = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let move = still ? 1 : 1 - exp(-elapsed / 0.12)
+        let fade = still ? 1 : elapsed / 0.14
+        var moving = false
+        for (id, var shown) in names {
+            shown.center.x += (shown.goal.x - shown.center.x) * move
+            shown.center.y += (shown.goal.y - shown.center.y) * move
+            if abs(shown.goal.x - shown.center.x) < 0.25, abs(shown.goal.y - shown.center.y) < 0.25 {
+                shown.center = shown.goal
+            } else {
+                moving = true
+            }
+            shown.alpha = shown.target > shown.alpha ? min(shown.target, shown.alpha + fade) : max(shown.target, shown.alpha - fade)
+            if shown.alpha != shown.target { moving = true }
+            if shown.alpha == 0, shown.target == 0 {
+                names[id] = nil
+                continue
+            }
+            names[id] = shown
+
+            let fill = NSAttributedString(string: shown.name, attributes: [.font: font, .foregroundColor: NSColor(cgColor: theme.ink.cg) ?? .black])
+            let size = fill.size()
+            let rect = CGRect(x: shown.center.x - size.width / 2, y: shown.center.y - size.height / 2, width: size.width, height: size.height)
+            let halo = NSAttributedString(string: shown.name, attributes: [
                 .font: font, .strokeColor: NSColor(cgColor: theme.ground.cg) ?? .white, .strokeWidth: 36,
             ])
+            c.saveGState()
+            c.setAlpha(shown.alpha)
             halo.draw(in: rect)
             fill.draw(in: rect)
+            c.restoreGState()
         }
+        namesMoving = moving
+        if moving { startMotion() }
     }
 
     private func drawAxis(_ c: CGContext, axis: MonthAxis) {

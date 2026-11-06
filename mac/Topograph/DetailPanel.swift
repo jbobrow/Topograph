@@ -44,6 +44,7 @@ struct DetailPanel: View {
                 .buttonStyle(SquareKeyStyle(theme: theme))
                 .keyboardShortcut(.cancelAction)
                 .accessibilityLabel("Close")
+                .hotkey("esc", model: model, theme: theme)
                 .padding(16)
         }
         .frame(width: Self.width)

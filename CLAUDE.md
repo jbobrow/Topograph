@@ -159,6 +159,11 @@ The plan is in SPEC §6 and §8:
 - **Performance target:** tens of thousands of thumbnails at display refresh rate.
   The web viewer is already fast enough at the current size, so the native app is
   about feel, integration and the native pipeline, not rescuing performance.
+- **The timeline:** playing and scrubbing update the map up to 60 times a second, so
+  a map update has about 2 ms to run. `TimeSlicer` works out everything but the time
+  range once, `DensityField` blurs across all cores, and `TopographCore` is optimized even
+  in Debug builds. `AppModel.applyFilter` runs one update at a time and never discards a
+  finished one: dropping late results is how playback once showed 4 frames out of 58.
 
 The Xcode project is `mac/Topograph.xcodeproj`, beside the Python pipeline:
 
