@@ -100,6 +100,23 @@ On a Mac, install with the `xattr` package (included in the install line above).
 - **Time scrubber**: drag across the bar to watch the terrain for a period, or press
   play to slide through the years.
 
+## The Mac app
+
+The native app is in progress. It opens the library you built above read-only and
+draws the same terrain as the viewer, in Metal: elevation, contours and a marker for
+each item. Region names, thumbnails, Strata, item detail and search are still to come,
+so keep using the viewer for those. It needs macOS 14 or later and Xcode.
+
+```bash
+xcodebuild -downloadComponent MetalToolchain   # once, if Xcode doesn't have it yet
+open mac/Topograph.xcodeproj                   # then press Run
+```
+
+It reads `~/Library/Application Support/Topograph/`, or the folder in
+`TOPOGRAPH_LIBRARY`. Pipeline commands can keep running while it's open; use
+**Map → Reload Library** (⌘R) to see a new layout. Drag or scroll with two fingers to
+pan, and pinch to zoom. With a mouse, the wheel zooms.
+
 ## What to expect from each export
 
 - **Your own posts** come with their images and captions, so they map immediately.

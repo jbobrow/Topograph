@@ -10,3 +10,9 @@ __pycache__/
 topograph.json
 media/
 exports/
+# Xcode and SwiftPM build output.
+mac/build/
+mac/**/.build/
+mac/**/.swiftpm/
+xcuserdata/
+DerivedData/

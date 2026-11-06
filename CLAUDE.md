@@ -33,10 +33,12 @@ pipeline/topograph/
   progress.py     terminal progress lines
 viewer/           index.html, style.css, app.js (d3 v7 vendored), IBM Plex fonts
 tests/            pytest; fixtures build fake X and Instagram archives
+mac/              the native app (M1), see "Native app" below
 ```
 
 Run tests with `python -m pytest -q tests` (they use the lite backend and need no
-network). Install with `pip install -e ".[clip,dev]"`.
+network). Install with `pip install -e ".[clip,dev]"`. Test the Mac app's core with
+`swift test --package-path mac/TopographCore`.
 
 ## The library (what a native app opens)
 
@@ -123,9 +125,11 @@ The plan is in SPEC §6 and §8:
   GRDB (vectors later in `sqlite-vec`), Core ML CLIP, Apple Vision for OCR and
   dedupe, `URLSession` plus a signed-in `WKWebView` for Instagram hydration, and
   FSEvents later to watch folders.
-- **M1, the next step:** a native shell that opens the prototype's library read-only,
+- **M1, in progress:** a native shell that opens the prototype's library read-only,
   with Terrain (Metal), Strata, item detail and search. Python stays the reference
-  for import, embedding, layout and naming until M2 ports them.
+  for import, embedding, layout and naming until M2 ports them. So far `mac/` draws
+  the terrain and item markers, with pan and zoom. Next on Terrain: region names and
+  thumbnails.
 - **Approach:**
   - Open the SQLite file read-only. It's in WAL mode and the Python tools may be
     writing at the same time.
@@ -136,8 +140,19 @@ The plan is in SPEC §6 and §8:
   The web viewer is already fast enough at the current size, so the native app is
   about feel, integration and the native pipeline, not rescuing performance.
 
-Suggested home for the Xcode project: `mac/` at the repo root. Keep the Python
-pipeline working alongside it.
+The Xcode project is `mac/Topograph.xcodeproj`, beside the Python pipeline:
+
+```
+mac/
+  TopographCore/    Swift package with no UI: Library (read-only GRDB), DensityField
+                    (d3.contourDensity port), TerrainStyle, MapTransform, and tests
+  Topograph/        SwiftUI shell, MTKView input, TerrainRenderer, Terrain.metal
+```
+
+The project uses a folder-synced group, so a new file in `mac/Topograph/` joins the
+target by itself. The app isn't sandboxed, because the library lives outside any app
+container. Building needs Xcode's Metal toolchain
+(`xcodebuild -downloadComponent MetalToolchain`).
 
 ## Working agreements
 
