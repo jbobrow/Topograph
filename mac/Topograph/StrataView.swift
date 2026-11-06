@@ -20,6 +20,7 @@ struct StrataScreen: View {
                 StrataCanvas(model: strata, labels: { map.regions.regions[$0]?.label }, patterns: Dictionary(map.regions.strataLayers().enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a }),
                              colors: nil, range: model.strataShowsSelection ? nil : model.filter.range, marked: markedItem(in: map), theme: theme,
                              window: window, easing: model.strataEasingTo == window, quiet: model.pointerIsOnStrataMinimap,
+                             isPlaying: model.isPlaying,
                              onTip: { tip = $0 },
                              onPick: { model.openRegion($0) },
                              onZoom: { model.zoomStrata(by: $0, atX: $1, width: $2, inset: $3) },
@@ -202,6 +203,8 @@ struct StrataCanvas: NSViewRepresentable {
     var easing = false
     /// Whether the pointer is on something above the chart, so it shouldn't answer.
     var quiet = false
+    /// While the timeline plays, space pauses it instead of moving the chart.
+    var isPlaying = false
     let onTip: (StrataTip?) -> Void
     let onPick: (Int) -> Void
     /// Zooming by a factor at a place on the canvas, of a width, with an inset, and moving by
@@ -217,6 +220,7 @@ struct StrataCanvas: NSViewRepresentable {
         view.onZoom = onZoom
         view.onPan = onPan
         view.quiet = quiet
+        view.isPlaying = isPlaying
         view.show(window, easing: easing)
         view.update(model: model, labels: labels, patterns: patterns, colors: colors, range: range, marked: marked, theme: theme)
     }
@@ -250,6 +254,15 @@ final class StrataNSView: NSView {
     private var shownTime = StrataWindow.whole
     private var asked = StrataWindow.whole
     private var windowGoal: StrataWindow?
+    fileprivate var isPlaying = false
+    /// Space is down, so a drag moves along time.
+    private var spaceHeld = false
+    /// Where a drag that's moving along time last was.
+    private var panningFrom: Double?
+    /// Whether the press going on now began with space down, so letting go shouldn't pick a layer.
+    private var pressMovesChart = false
+    private var keyMonitor: Any?
+    private var resignObserver: NSObjectProtocol?
     fileprivate var quiet = false {
         didSet {
             guard quiet, !oldValue else { return }
@@ -764,7 +777,7 @@ final class StrataNSView: NSView {
     }
 
     override func mouseMoved(with event: NSEvent) {
-        guard let model, !quiet else { return }
+        guard let model, !quiet, !spaceHeld else { return }
         let point = convert(event.locationInWindow, from: nil)
         let index = layerIndex(at: point)
         if index != hovered {
@@ -810,7 +823,86 @@ final class StrataNSView: NSView {
         onZoom(1 + event.magnification, convert(event.locationInWindow, from: nil).x, bounds.width, margin.left)
     }
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        keyMonitor = nil
+        if let resignObserver { NotificationCenter.default.removeObserver(resignObserver) }
+        resignObserver = nil
+        guard let window else { return setSpaceHeld(false) }
+        // Through a monitor rather than keyDown, so space works whatever has focus,
+        // short of somewhere you're typing.
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
+            guard let self else { return event }
+            return self.handleKey(event)
+        }
+        // A key released in another app never reaches this one.
+        resignObserver = NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.setSpaceHeld(false) }
+        }
+    }
+
+    private func handleKey(_ event: NSEvent) -> NSEvent? {
+        guard event.window === window, event.keyCode == 49, onPan != nil else { return event }
+        if event.type == .keyUp {
+            guard spaceHeld else { return event }
+            setSpaceHeld(false)
+            return nil
+        }
+        guard !isPlaying, !(window?.firstResponder is NSText),
+              event.modifierFlags.intersection([.command, .control, .option]).isEmpty else { return event }
+        // Still down from the press that paused playing, it isn't asking to move the chart.
+        if event.isARepeat, !spaceHeld { return nil }
+        setSpaceHeld(true)
+        return nil
+    }
+
+    private func setSpaceHeld(_ held: Bool) {
+        guard held != spaceHeld else { return }
+        spaceHeld = held
+        if held {
+            hovered = nil
+            onTip?(nil)
+            needsDisplay = true
+        }
+        updateCursor()
+    }
+
+    private var cursor: NSCursor {
+        panningFrom != nil ? .closedHand : spaceHeld ? .openHand : .arrow
+    }
+
+    private func updateCursor() {
+        window?.invalidateCursorRects(for: self)
+        cursor.set()
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: cursor)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        pressMovesChart = spaceHeld
+        guard spaceHeld else { return }
+        panningFrom = convert(event.locationInWindow, from: nil).x
+        updateCursor()
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let from = panningFrom else { return }
+        let x = convert(event.locationInWindow, from: nil).x
+        panningFrom = x
+        onPan?(x - from, bounds.width, margin.left)
+    }
+
     override func mouseUp(with event: NSEvent) {
+        if pressMovesChart {
+            pressMovesChart = false
+            panningFrom = nil
+            updateCursor()
+            return
+        }
         guard let model, let index = layerIndex(at: convert(event.locationInWindow, from: nil)),
               let region = model.layers[index].region else { return }
         onPick?(region)

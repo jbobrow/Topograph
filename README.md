@@ -141,8 +141,8 @@ when you ask. It finds them in this repo's `.venv`, or at `TOPOGRAPH_CLI`. Folde
 dry run first, so you see what would be read. It's also where you build maps and switch
 between them.
 
-In **Strata**, scrolling zooms in and out around the pointer and sideways scrolling moves along
-time. Both change the time selected, the same one the timeline shows, so it also applies to the
+In **Strata**, scrolling zooms in and out around the pointer, and sideways scrolling or holding
+space and dragging moves along time. These change the time selected, the same one the timeline shows, so it also applies to the
 other views. **Selection** fits the canvas to it, with a small Strata of all of time as a minimap,
 and **all time** shows the whole timeline with that part shaded.
 
