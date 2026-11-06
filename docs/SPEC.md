@@ -340,11 +340,11 @@ prototype built.
 | Milestone | Scope |
 |---|---|
 | **M0 — Prototype** (now) | Instagram + X import, hydration, media cache, CLIP embeddings, UMAP + clusters, web viewer with Terrain and Strata |
-| **M1 — Native shell** | SwiftUI app opening the prototype's library: Terrain (Metal), Strata, item detail, search |
-| **M2 — Native pipeline** | Import, hydration (incl. signed-in web view), Core ML embeddings, in-app layout |
+| **M1 — Native shell** (done, but search is by words for now) | SwiftUI app opening the prototype's library: Terrain (Metal), Strata, item detail, search |
+| **M2 — Native pipeline** (partly: the app runs the Python tools) | Import, hydration (incl. signed-in web view), Core ML embeddings, in-app layout |
 | **M0.5 — Facebook, your files** (now) | Facebook importer, files importer with folder review, made/kept on the map |
-| **M3 — More sources** | YouTube + Google Takeout, Photos library, Bluesky + Are.na live sync |
-| **M4 — Depth** | Process sequences, Tributaries, Echoes, Palette, Drift, AI cluster names, export a region as a moodboard |
+| **M3 — More sources** (partly: no Photos library; tested on fixtures only) | YouTube + Google Takeout, Photos library, Bluesky + Are.na live sync |
+| **M4 — Depth** (done, in the Mac app) | Process sequences, Tributaries, Echoes, Palette, Drift, AI cluster names, export a region as a moodboard |
 | **M5 — Watching** | The native app watches your folders (FSEvents) and adds new screenshots and downloads as they appear |
 
 ## 9. Open questions

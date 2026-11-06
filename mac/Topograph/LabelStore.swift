@@ -9,6 +9,7 @@ import TopographCore
 final class LabelStore {
     private struct Key: Hashable {
         let id: Int
+        let name: String
         let count: Int
         let dark: Bool
         let scale: Int
@@ -46,7 +47,7 @@ final class LabelStore {
     }
 
     func texture(label: PlacedLabel, name: String, theme: Theme, dark: Bool, scale: Double) -> MTLTexture? {
-        let key = Key(id: label.id, count: label.count, dark: dark, scale: Int(scale))
+        let key = Key(id: label.id, name: name, count: label.count, dark: dark, scale: Int(scale))
         if let known = textures[key] { return known }
         guard let texture = draw(label: label, name: name, theme: theme, scale: scale) else { return nil }
         textures[key] = texture

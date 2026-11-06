@@ -99,3 +99,80 @@ final class MoodboardTests: XCTestCase {
         XCTAssertEqual(Array(data.prefix(4)), [0x89, 0x50, 0x4E, 0x47])
     }
 }
+
+
+final class RegionNamerTests: XCTestCase {
+    private final class Stub: URLProtocol, @unchecked Sendable {
+        nonisolated(unsafe) static var status = 200
+        nonisolated(unsafe) static var body: [String: Any] = [:]
+        nonisolated(unsafe) static var seen: URLRequest?
+
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+        override func stopLoading() {}
+        override func startLoading() {
+            Stub.seen = request
+            let response = HTTPURLResponse(url: request.url!, statusCode: Stub.status, httpVersion: nil, headerFields: nil)!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: try! JSONSerialization.data(withJSONObject: Stub.body))
+            client?.urlProtocolDidFinishLoading(self)
+        }
+    }
+
+    private func namer() -> RegionNamer {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [Stub.self]
+        return RegionNamer(key: "test-key", session: URLSession(configuration: config))
+    }
+
+    func testAsksWithYourKeySendsOnlyTheSampleAndReadsTheName() async throws {
+        Stub.status = 200
+        Stub.body = ["stop_reason": "end_turn", "content": [["type": "thinking", "thinking": ""], ["type": "text", "text": " \"Folded Paper Forms\".\n"]]]
+        let picture = FileManager.default.temporaryDirectory.appending(path: "\(UUID().uuidString).webp")
+        try Data([1, 2, 3]).write(to: picture)
+        defer { try? FileManager.default.removeItem(at: picture) }
+        let samples = (0..<12).map { RegionNamer.Sample(thumbnail: picture, caption: "caption \($0)") }
+        let name = try await namer().suggest(samples: samples, siblings: ["soldering"])
+        XCTAssertEqual(name, "folded paper forms")
+
+        let request = try namer().request(samples: samples, siblings: ["soldering"])
+        XCTAssertEqual(request.url?.host, "api.anthropic.com")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "x-api-key"), "test-key")
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: request.httpBody!) as? [String: Any])
+        XCTAssertEqual(body["model"] as? String, "claude-opus-5-5")
+        XCTAssertEqual(body["fallbacks"] as? String, "default")
+        let content = try XCTUnwrap(((body["messages"] as? [[String: Any]])?.first)?["content"] as? [[String: Any]])
+        XCTAssertEqual(content.filter { $0["type"] as? String == "image" }.count, RegionNamer.sampleLimit, "no more pictures than it says")
+        let text = try XCTUnwrap(content.last?["text"] as? String)
+        XCTAssertTrue(text.contains("caption 7") && !text.contains("caption 8"), "no more captions than it says")
+        XCTAssertTrue(text.contains("soldering"))
+    }
+
+    func testFailuresSayWhatHappened() async {
+        func failure(status: Int, body: [String: Any]) async -> RegionNamer.Failure? {
+            Stub.status = status
+            Stub.body = body
+            do {
+                _ = try await namer().suggest(samples: [], siblings: [])
+                return nil
+            } catch { return error as? RegionNamer.Failure }
+        }
+        let badKey = await failure(status: 401, body: [:])
+        XCTAssertEqual(badKey, .badKey)
+        let declined = await failure(status: 200, body: ["stop_reason": "refusal", "content": []])
+        XCTAssertEqual(declined, .declined)
+        let busy = await failure(status: 529, body: ["error": ["message": "overloaded"]])
+        XCTAssertEqual(busy, .service(status: 529, message: "overloaded"))
+        let empty = await failure(status: 200, body: ["stop_reason": "end_turn", "content": [["type": "text", "text": "  "]]])
+        XCTAssertEqual(empty, .unreadable)
+    }
+
+    func testRenamingKeepsEverythingElse() {
+        let items = [MapItem(x: 1, y: 1, resonance: 1, region: 1)]
+        let tree = RegionTree(records: [.init(id: 1, label: "old", x: 1, y: 1, r: 4)], items: items)
+        let renamed = tree.renamed([1: "new"])
+        XCTAssertEqual(renamed.regions[1]?.label, "new")
+        XCTAssertEqual(renamed.regions[1]?.count, 1)
+        XCTAssertEqual(renamed.members(of: 1), [0])
+    }
+}

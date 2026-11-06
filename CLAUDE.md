@@ -22,7 +22,9 @@ pipeline/topograph/
                   build, serve, regions, stats
   db.py           SQLite schema, Library, upsert_record, gone-item rules  <- source of truth for the schema
   config.py       interaction weights, image sizes, default library path
-  importers/      x.py, instagram.py, facebook.py (archive ZIPs), files.py (folders on disk)
+  importers/      x.py, instagram.py, facebook.py, youtube.py, google.py (archive ZIPs),
+                  files.py (folders on disk)
+  sync.py         Bluesky and Are.na: public data, no login, at a human pace
   hydrate.py      fetch text and media for liked or saved links (polite, resumable)
   media.py        display copies, thumbnails, palettes, perceptual hashes, video posters
   embed.py        CLIP (OpenCLIP ViT-B-32, laion2b_s34b_b79k) or "lite" fallback
@@ -125,11 +127,22 @@ The plan is in SPEC §6 and §8:
   GRDB (vectors later in `sqlite-vec`), Core ML CLIP, Apple Vision for OCR and
   dedupe, `URLSession` plus a signed-in `WKWebView` for Instagram hydration, and
   FSEvents later to watch folders.
-- **M1, in progress:** a native shell that opens the prototype's library read-only,
-  with Terrain (Metal), Strata, item detail and search. Python stays the reference
-  for import, embedding, layout and naming until M2 ports them. So far `mac/` draws
-  the terrain and item markers, with pan and zoom. Next on Terrain: region names and
-  thumbnails.
+- **Status of `mac/`:**
+  - M1 is done except search by meaning, which needs Core ML CLIP (text search works).
+  - M2 is partly done: the Sources page runs the Python pipeline. Still to port to Swift:
+    importers, Core ML embeddings, layout and naming, and hydration through a signed-in
+    `WKWebView`. Python stays the reference until then. Port the files importer's privacy
+    rules with their tests, not from memory.
+  - M3: YouTube and Google Takeout importers and Bluesky and Are.na sync exist in Python,
+    tested on fixtures only. Photos library isn't started.
+  - M4 is done except showing a Process sequence as one item on the map, and keeping
+    region names across re-layouts (they're matched by region number, so a re-layout
+    clears them).
+- **Opening the library:** always through `Library`, whose reads go through a read-only
+  connection. Strict read-only can't open a WAL file with no `-wal` or `-shm`, which is
+  how the Python tools leave it on exit, so `Library` handles that. `query_only` isn't
+  enough: GRDB resets it after each read.
+- **Testing anything that writes:** set `TOPOGRAPH_LIBRARY` to a throwaway folder.
 - **Approach:**
   - Open the SQLite file read-only. It's in WAL mode and the Python tools may be
     writing at the same time.
@@ -145,8 +158,11 @@ The Xcode project is `mac/Topograph.xcodeproj`, beside the Python pipeline:
 ```
 mac/
   TopographCore/    Swift package with no UI: Library (read-only GRDB), DensityField
-                    (d3.contourDensity port), TerrainStyle, MapTransform, and tests
-  Topograph/        SwiftUI shell, MTKView input, TerrainRenderer, Terrain.metal
+                    (d3.contourDensity port), Regions, Strata, Depth (Echoes, Palette,
+                    Tributaries, Process), MapFilter, Moodboard, RegionNamer, and tests
+  Topograph/        SwiftUI shell, TerrainView (MTKView), TerrainRenderer, Terrain.metal,
+                    ThumbnailStore, LabelStore, DetailPanel, StrataView, DepthViews,
+                    SourcesView, PipelineRunner (runs the Python tools)
   tools/            make_icon.swift draws the app icon at every size
 ```
 

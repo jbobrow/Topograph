@@ -45,6 +45,8 @@ topograph import ~/Downloads/twitter-2026-11-06-*.zip
 topograph import ~/Downloads/facebook-yourname-*.zip
 topograph files ~/Desktop ~/Downloads --dry-run   # see what it would take from your folders
 topograph files ~/Desktop ~/Downloads             # then read them
+topograph import ~/Downloads/takeout-*.zip        # YouTube and Google searches (choose JSON)
+topograph sync bluesky your.handle                # or: sync arena your-username (public data, no login)
 topograph hydrate          # fetch images for liked/saved posts (slow and polite; resumable)
 topograph build            # embeddings + layout + region names
 topograph regions          # print the region tree and names
@@ -102,10 +104,9 @@ On a Mac, install with the `xattr` package (included in the install line above).
 
 ## The Mac app
 
-The native app is in progress. It opens the library you built above read-only and
-draws the same terrain as the viewer, in Metal: elevation, contours and a marker for
-each item. Region names, thumbnails, Strata, item detail and search are still to come,
-so keep using the viewer for those. It needs macOS 14 or later and Xcode.
+The native app opens the library you built above and has every view: Terrain, Strata,
+Echoes, Palette, Drift, Process and Sources, with item and region panels, filters and
+the time scrubber. It needs macOS 14 or later and Xcode.
 
 ```bash
 xcodebuild -downloadComponent MetalToolchain   # once, if Xcode doesn't have it yet
@@ -113,9 +114,17 @@ open mac/Topograph.xcodeproj                   # then press Run
 ```
 
 It reads `~/Library/Application Support/Topograph/`, or the folder in
-`TOPOGRAPH_LIBRARY`. Pipeline commands can keep running while it's open; use
-**Map → Reload Library** (⌘R) to see a new layout. Drag or scroll with two fingers to
-pan, and pinch to zoom. With a mouse, the wheel zooms.
+`TOPOGRAPH_LIBRARY`, and only ever reads it: pipeline commands can keep running while
+it's open, and **Map → Reload Library** (⌘R) shows a new layout. Drag or scroll with two
+fingers to pan, and pinch to zoom. With a mouse, the wheel zooms.
+
+**Sources** adds your history by running the `topograph` commands below for you, only
+when you ask. It finds them in this repo's `.venv`, or at `TOPOGRAPH_CLI`. Folders get a
+dry run first, so you see what would be read.
+
+Search matches words in captions and names; searching by meaning needs CLIP's text encoder
+in Core ML, which isn't ported yet. Naming regions with Claude is off until you turn it on
+with your own API key, and it says what it sends first.
 
 ## What to expect from each export
 

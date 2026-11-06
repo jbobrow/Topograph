@@ -245,6 +245,7 @@ private struct RegionPanel: View {
                     .font(PlexMono.font(.regular, size: 11))
                     .foregroundStyle(theme.secondary.color)
                     .padding(.top, 6)
+                RegionNaming(model: model, library: library, map: map, theme: theme, region: region).padding(.top, 10)
                 if !region.children.isEmpty {
                     PanelHeading(text: "inside", theme: theme)
                     FlowKeys(ids: region.children, map: map, theme: theme) { model.openRegion($0) }

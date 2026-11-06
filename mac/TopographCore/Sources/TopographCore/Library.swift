@@ -61,6 +61,10 @@ public struct LibraryMap: Sendable {
     /// Where each item id sits in `items`.
     public let indexOfID: [String: Int32]
 
+    public func withRegions(_ regions: RegionTree) -> LibraryMap {
+        LibraryMap(items: items, regions: regions, waitingTimes: waitingTimes, waiting: waiting)
+    }
+
     public init(items: [MapItem], regions: RegionTree, waitingTimes: [Int] = [], waiting: Int = 0) {
         var ids: [String: Int32] = [:]
         ids.reserveCapacity(items.count)

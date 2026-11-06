@@ -18,6 +18,11 @@ public struct Region: Sendable, Identifiable {
     public let path: [Int]
     /// Everything inside it, including inside the regions it holds.
     public let count: Int
+
+    func withLabel(_ label: String) -> Region {
+        Region(id: id, label: label, terms: terms, parent: parent, x: x, y: y, r: r, depth: depth,
+               children: children, path: path, count: count)
+    }
 }
 
 /// Regions nest: large ones when zoomed out, the ones inside them as you zoom in.
@@ -90,6 +95,12 @@ public struct RegionTree: Sendable {
         regions = built
         roots = tops.sorted { (built[$0]?.count ?? 0) > (built[$1]?.count ?? 0) }
         self.own = own
+    }
+
+    init(regions: [Int: Region], roots: [Int], base: RegionTree) {
+        self.regions = regions
+        self.roots = roots
+        own = base.own
     }
 
     /// The member nearest the middle, and the spread around it.

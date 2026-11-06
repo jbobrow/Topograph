@@ -77,7 +77,7 @@ final class AppModel {
         Task {
             do {
                 let filter = self.filter
-                let (library, map, search, peak, scene) = try await Task.detached(priority: .userInitiated) {
+                let (library, loaded, search, peak, scene) = try await Task.detached(priority: .userInitiated) {
                     let library = try Library()
                     let map = try library.map()
                     let search = SearchIndex(items: map.items)
@@ -88,6 +88,7 @@ final class AppModel {
                     return (library, map, search, peak, scene)
                 }.value
                 self.library = library
+                let map = loaded.withRegions(loaded.regions.renamed(regionNames))
                 self.map = map
                 embeddingsTask = nil
                 let times = map.items.compactMap(\.time)
@@ -98,7 +99,7 @@ final class AppModel {
                 platforms = tally.keys.sorted { tally[$0]! > tally[$1]! }
                 self.search = search
                 fullPeak = peak
-                self.scene = scene
+                self.scene = TerrainScene(map: map, visible: scene.visible, fullPeak: peak)
                 selection = nil
                 phase = .ready
             } catch {
@@ -110,6 +111,31 @@ final class AppModel {
     }
 
     func fail(_ message: String) { phase = .failed(message) }
+
+    // MARK: Your names for regions
+
+    /// Kept by this app, not in the library, so the library stays read-only. They're matched
+    /// by region number, so a new layout, which renumbers regions, clears them.
+    private var regionNames: [Int: String] {
+        get {
+            let stored = UserDefaults.standard.dictionary(forKey: "regionNames") as? [String: String] ?? [:]
+            return Dictionary(uniqueKeysWithValues: stored.compactMap { key, value in Int(key).map { ($0, value) } })
+        }
+        set {
+            UserDefaults.standard.set(Dictionary(uniqueKeysWithValues: newValue.map { (String($0.key), $0.value) }), forKey: "regionNames")
+        }
+    }
+
+    func rename(region id: Int, to name: String) {
+        regionNames[id] = name
+        guard let map else { return }
+        adopt(map.withRegions(map.regions.renamed([id: name])))
+    }
+
+    private func adopt(_ next: LibraryMap) {
+        map = next
+        applyFilter()
+    }
 
     /// Every item's vector, read the first time something needs one. About 100 MB.
     func embeddings() async -> EmbeddingStore? {
