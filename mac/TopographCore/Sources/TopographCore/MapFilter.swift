@@ -30,6 +30,10 @@ public struct MapFilter: Sendable, Equatable {
     public var groups: ActionGroups = .all
     /// Lowercase words to find in the text or as an @author.
     public var query = ""
+    /// Items ranked by meaning, closest first. When set, this takes the place of `query`
+    /// and the best `nearestLimit` of those the other filters let through show.
+    public var nearest: [Int32]?
+    public static let nearestLimit = 300
     /// Unix seconds. Items with no time are hidden while a range is set.
     public var range: ClosedRange<Int>?
 
@@ -48,6 +52,9 @@ public struct MapFilter: Sendable, Equatable {
     /// The items showing. With a query, `search` finds the words; it's built once per map
     /// because scanning every caption afresh is too slow to do as you type.
     public func visible(in items: [MapItem], search: SearchIndex) -> [Int32] {
+        if let nearest {
+            return Array(nearest.lazy.filter { Int($0) < items.count && matches(items[Int($0)]) }.prefix(Self.nearestLimit))
+        }
         let found = query.isEmpty ? nil : search.matches(query)
         var out: [Int32] = []
         out.reserveCapacity(found?.count ?? items.count)

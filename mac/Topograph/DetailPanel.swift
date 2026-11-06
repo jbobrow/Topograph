@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 import TopographCore
 
-/// The side panel: one item, or one region.
+/// The side panel: one item, one region, or what a search found.
 struct DetailPanel: View {
     let model: AppModel
     let library: Library
@@ -18,6 +18,15 @@ struct DetailPanel: View {
                         ItemPanel(model: model, library: library, map: map, theme: theme, index: index).id(index)
                     case .region(let id):
                         RegionPanel(model: model, library: library, map: map, theme: theme, id: id).id(id)
+                    case .found(let query):
+                        Text(query)
+                            .font(PlexMono.font(.medium, size: 13))
+                            .foregroundStyle(theme.ink.color)
+                            .padding(.trailing, 36)
+                        PanelHeading(text: "closest in meaning", theme: theme)
+                        ItemGrid(items: model.foundItems(count: 90), map: map, library: library, mode: model.imageMode, theme: theme) {
+                            model.openItem($0, pan: true)
+                        }
                     case nil:
                         EmptyView()
                     }
@@ -25,7 +34,7 @@ struct DetailPanel: View {
                 .padding(16)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            Button("×") { model.selection = nil }
+            Button("×") { model.closePanel() }
                 .buttonStyle(SquareKeyStyle(theme: theme))
                 .keyboardShortcut(.cancelAction)
                 .accessibilityLabel("Close")

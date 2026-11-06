@@ -217,7 +217,7 @@ terrain, sizes thumbnails, and orders "most resonant" lists.
    near-duplicates by perceptual hash. Extract a 5-color palette.
 4. **Embed.** One vector per item in a shared image-text space (CLIP family):
    image items embed the image, blended with the caption when one exists; text-only
-   items embed the text. On a Mac this runs on the Neural Engine via Core ML.
+   items embed the text. On a Mac this runs via Core ML, on the CPU or GPU: keeping the weights in 32-bit float, which keeps vectors comparable with the Python ones, rules out the Neural Engine.
    A CLIP ViT-B/32-class model is small enough that an archive of tens of thousands
    of items should embed in minutes, not hours (to be benchmarked in M2).
 5. **Layout.** UMAP reduces vectors to 2D (cosine metric, `n_neighbors≈30`,
@@ -306,7 +306,7 @@ image: drop in a picture to find its neighbors.
 | UI | SwiftUI shell; Metal-rendered canvas for Terrain and large grids | Tens of thousands of thumbnails at 120 fps |
 | Storage | SQLite via GRDB; vectors in `sqlite-vec` | One file, transactional, fast nearest-neighbor search |
 | Media | `~/Library/Application Support/Topograph/Media/` sharded by hash; HEIC display copies, WebP thumbs | Compact, native decode |
-| Embeddings | CLIP image and text encoders converted to Core ML | Neural Engine, no network |
+| Embeddings | CLIP image and text encoders converted to Core ML | CPU or GPU, no network |
 | Vision | Apple Vision: OCR for screenshots and text-heavy images, feature prints for dedupe | Built in |
 | Layout | UMAP port (Swift/Accelerate) or bundled Python helper in the first native builds | Proven algorithm |
 | Hydration | Background `URLSession` queue + `WKWebView` signed in as the user for Instagram | Uses the user's own session, at human pace |
@@ -340,8 +340,8 @@ prototype built.
 | Milestone | Scope |
 |---|---|
 | **M0 — Prototype** (now) | Instagram + X import, hydration, media cache, CLIP embeddings, UMAP + clusters, web viewer with Terrain and Strata |
-| **M1 — Native shell** (done, but search is by words for now) | SwiftUI app opening the prototype's library: Terrain (Metal), Strata, item detail, search |
-| **M2 — Native pipeline** (partly: the app runs the Python tools) | Import, hydration (incl. signed-in web view), Core ML embeddings, in-app layout |
+| **M1 — Native shell** (done) | SwiftUI app opening the prototype's library: Terrain (Metal), Strata, item detail, search |
+| **M2 — Native pipeline** (partly: Core ML CLIP runs in the app for search; everything else still runs the Python tools) | Import, hydration (incl. signed-in web view), Core ML embeddings, in-app layout |
 | **M0.5 — Facebook, your files** (now) | Facebook importer, files importer with folder review, made/kept on the map |
 | **M3 — More sources** (partly: no Photos library; tested on fixtures only) | YouTube + Google Takeout, Photos library, Bluesky + Are.na live sync |
 | **M4 — Depth** (done, in the Mac app) | Process sequences, Tributaries, Echoes, Palette, Drift, AI cluster names, export a region as a moodboard |

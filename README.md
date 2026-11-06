@@ -122,8 +122,21 @@ fingers to pan, and pinch to zoom. With a mouse, the wheel zooms.
 when you ask. It finds them in this repo's `.venv`, or at `TOPOGRAPH_CLI`. Folders get a
 dry run first, so you see what would be read.
 
-Search matches words in captions and names; searching by meaning needs CLIP's text encoder
-in Core ML, which isn't ported yet. Naming regions with Claude is off until you turn it on
+Find matches words in captions and names. The **by meaning** key next to it finds what
+things are about, using CLIP on your Mac. It needs a model of about 600 MB, which is too
+large for the repository, so make it once from the weights the pipeline already uses:
+
+```bash
+python3.13 -m venv /tmp/convert
+/tmp/convert/bin/pip install coremltools open_clip_torch torch
+/tmp/convert/bin/python mac/tools/convert_clip.py
+```
+
+It goes in `~/Library/Application Support/Topograph/models/`. Your search stays on this
+Mac. Items only turn up once they have a vector, so anything hydrate has just changed
+waits until the map is next updated.
+
+Naming regions with Claude is off until you turn it on
 with your own API key, and it says what it sends first.
 
 ## What to expect from each export

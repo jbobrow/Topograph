@@ -11,6 +11,8 @@ enum Section: String, CaseIterable, Sendable {
 enum Selection: Equatable {
     case item(Int32)
     case region(Int)
+    /// What a search by meaning found, best first.
+    case found(String)
 }
 
 /// Loads the library off the main thread and keeps what's showing.
@@ -68,12 +70,15 @@ final class AppModel {
     private var filtering = 0
     private var player: Timer?
     private var embeddingsTask: Task<EmbeddingStore?, Never>?
+    private var encoderTask: Task<CLIPEncoder?, Never>?
 
     init() {
         imageMode = UserDefaults.standard.string(forKey: "imageMode").flatMap(ImageMode.init) ?? .gray
     }
 
     func load() {
+        // Ranks are positions in the map being replaced.
+        filter.nearest = nil
         Task {
             do {
                 let filter = self.filter
@@ -144,6 +149,55 @@ final class AppModel {
         let task = Task.detached(priority: .userInitiated) { try? library.embeddings(map: map) }
         embeddingsTask = task
         return await task.value
+    }
+
+    // MARK: Find
+
+    /// Whether find looks for what things are about, not the words in them.
+    var findsByMeaning = false
+    private var lastMeaningQuery: String?
+    /// The model is about 600 MB, so it's set up separately (mac/tools/convert_clip.py).
+    let canFindByMeaning = CLIPEncoder.isInstalled()
+
+    func find(_ text: String) async {
+        let text = text.trimmingCharacters(in: .whitespaces)
+        guard findsByMeaning, !text.isEmpty, let map, let store = await embeddings() else {
+            filter.nearest = nil
+            filter.query = text.lowercased()
+            if case .found = selection { selection = nil }
+            return
+        }
+        if encoderTask == nil {
+            // Loads faster on the CPU, which is quick enough for one query at a time.
+            encoderTask = Task.detached(priority: .userInitiated) { try? CLIPEncoder(computeUnits: .cpuOnly) }
+        }
+        guard let encoder = await encoderTask?.value else { return }
+        let ranked = await Task.detached(priority: .userInitiated) { () -> [Int32]? in
+            guard let vector = try? encoder.embed(text: text) else { return nil }
+            // More than show, so filters can still leave a full set.
+            return store.nearest(to: vector, items: map.items, count: MapFilter.nearestLimit * 20)
+        }.value
+        // Typing on has started a newer search.
+        guard !Task.isCancelled, let ranked else { return }
+        filter.query = ""
+        filter.nearest = ranked
+        lastMeaningQuery = text
+        selection = .found(text)
+    }
+
+    /// The best of what's showing from a search by meaning, in order.
+    func foundItems(count: Int) -> [Int32] {
+        guard let map, let nearest = filter.nearest else { return [] }
+        return Array(nearest.lazy.filter { self.filter.matches(map.items[Int($0)]) }.prefix(count))
+    }
+
+    /// Closing an item goes back to the search results it came from.
+    func closePanel() {
+        if case .item = selection, let query = lastMeaningQuery, filter.nearest != nil {
+            selection = .found(query)
+        } else {
+            selection = nil
+        }
     }
 
     func setWhere(_ path: [Int]) { whereYouAre = path }

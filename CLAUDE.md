@@ -128,9 +128,15 @@ The plan is in SPEC §6 and §8:
   dedupe, `URLSession` plus a signed-in `WKWebView` for Instagram hydration, and
   FSEvents later to watch folders.
 - **Status of `mac/`:**
-  - M1 is done except search by meaning, which needs Core ML CLIP (text search works).
+  - M1 is done, including search by meaning. `mac/tools/convert_clip.py` makes the Core ML
+    models (float32, so they run on the CPU or GPU, not the Neural Engine), which live in
+    `~/Library/Application Support/Topograph/models/`, not the repo. `CLIPEncoder`,
+    `CLIPTokenizer` and `CLIPImage` match Python: identical tokens on every real caption,
+    and cosine at least 0.9996 on sampled items. The one known gap is ftfy's mojibake repair.
+  - `EmbeddingStore.nearest` doesn't rank by plain cosine, which fails on real data: see
+    its comment before changing it. Judge changes on real searches, not on tests.
   - M2 is partly done: the Sources page runs the Python pipeline. Still to port to Swift:
-    importers, Core ML embeddings, layout and naming, and hydration through a signed-in
+    importers, writing embeddings (`CLIPEncoder.embedItem` computes them), layout and naming, and hydration through a signed-in
     `WKWebView`. Python stays the reference until then. Port the files importer's privacy
     rules with their tests, not from memory.
   - M3: YouTube and Google Takeout importers and Bluesky and Are.na sync exist in Python,
@@ -159,11 +165,13 @@ The Xcode project is `mac/Topograph.xcodeproj`, beside the Python pipeline:
 mac/
   TopographCore/    Swift package with no UI: Library (read-only GRDB), DensityField
                     (d3.contourDensity port), Regions, Strata, Depth (Echoes, Palette,
-                    Tributaries, Process), MapFilter, Moodboard, RegionNamer, and tests
+                    Tributaries, Process), MapFilter, Moodboard, RegionNamer, CLIP (encoder,
+                    tokenizer, image preparation), and tests
   Topograph/        SwiftUI shell, TerrainView (MTKView), TerrainRenderer, Terrain.metal,
                     ThumbnailStore, LabelStore, DetailPanel, StrataView, DepthViews,
                     SourcesView, PipelineRunner (runs the Python tools)
-  tools/            make_icon.swift draws the app icon at every size
+  tools/            make_icon.swift draws the app icon at every size; convert_clip.py makes
+                    the Core ML models
 ```
 
 The project uses a folder-synced group, so a new file in `mac/Topograph/` joins the

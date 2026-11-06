@@ -104,11 +104,14 @@ public struct EmbeddingStore: Sendable {
     public let dimensions: Int
     private let vectors: [Float]
     private let rowOfItem: [Int32: Int]
+    /// The average of many short phrases, which `nearest` takes away from a query.
+    private let everyday: [Float]
 
-    public init(dimensions: Int, vectors: [Float], rowOfItem: [Int32: Int]) {
+    public init(dimensions: Int, vectors: [Float], rowOfItem: [Int32: Int], everyday: [Float] = []) {
         self.dimensions = dimensions
         self.vectors = vectors
         self.rowOfItem = rowOfItem
+        self.everyday = everyday
     }
 
     public func has(_ item: Int32) -> Bool { rowOfItem[item] != nil }
@@ -121,6 +124,44 @@ public struct EmbeddingStore: Sendable {
             vDSP_dotpr(base.baseAddress! + rowA * dimensions, 1, base.baseAddress! + rowB * dimensions, 1, &result, vDSP_Length(dimensions))
         }
         return result
+    }
+
+    /// Items closest in meaning to a text vector, closest first.
+    ///
+    /// Plain cosine similarity gives poor results here, in two ways that showed on the real
+    /// library. Text scores far above pictures against a text query, so no picture ever
+    /// made the top 300. And a few items sit close to almost any query, so the same ones
+    /// led every search. So each item is scored against the query minus the average
+    /// phrase, which cancels the second, and judged in standard deviations among its own
+    /// kind (pictures or text alone), which cancels the first.
+    public func nearest(to query: [Float], items: [MapItem], count: Int) -> [Int32] {
+        guard dimensions > 0, query.count == dimensions else { return [] }
+        let rows = vectors.count / dimensions
+        var target = query
+        if everyday.count == dimensions { vDSP.subtract(query, everyday, result: &target) }
+        var scores = [Float](repeating: 0, count: rows)
+        vDSP_mmul(vectors, 1, target, 1, &scores, 1, vDSP_Length(rows), 1, vDSP_Length(dimensions))
+
+        var itemOfRow = [Int32](repeating: -1, count: rows)
+        for (item, row) in rowOfItem { itemOfRow[row] = item }
+        let hasPicture = itemOfRow.map { $0 >= 0 && items[Int($0)].thumb != nil }
+        for pictures in [true, false] {
+            let rowsOfKind = hasPicture.indices.filter { hasPicture[$0] == pictures }
+            guard rowsOfKind.count > 1 else { continue }
+            let (mean, spread) = Self.meanAndSpread(rowsOfKind.map { scores[$0] })
+            guard spread > 0 else { continue }
+            for row in rowsOfKind { scores[row] = (scores[row] - mean) / spread }
+        }
+        return scores.indices
+            .sorted { scores[$0] != scores[$1] ? scores[$0] > scores[$1] : itemOfRow[$0] < itemOfRow[$1] }
+            .lazy.map { itemOfRow[$0] }.filter { $0 >= 0 }.prefix(count).map { $0 }
+    }
+
+    private static func meanAndSpread(_ values: [Float]) -> (Float, Float) {
+        var mean: Float = 0
+        var spread: Float = 0
+        vDSP_normalize(values, 1, nil, 1, &mean, &spread, vDSP_Length(values.count))
+        return (mean, spread)
     }
 }
 
@@ -145,7 +186,21 @@ extension Library {
                 rows[index] = vectors.count / dimensions
                 blob.withUnsafeBytes { vectors.append(contentsOf: $0.bindMemory(to: Float.self)) }
             }
-            return EmbeddingStore(dimensions: dimensions, vectors: vectors, rowOfItem: rows)
+            // The pipeline keeps a vector for every candidate region name.
+            var everyday = [Float](repeating: 0, count: dimensions)
+            var phrases = 0
+            let phraseCursor = try Row.fetchCursor(db, sql: "select vector from phrase_vec where model = ?", arguments: [model])
+            while let row = try phraseCursor.next() {
+                let blob: Data = row[0]
+                guard blob.count == dimensions * MemoryLayout<Float>.size else { continue }
+                blob.withUnsafeBytes { bytes in
+                    let phrase = bytes.bindMemory(to: Float.self)
+                    for index in 0..<dimensions { everyday[index] += phrase[index] }
+                }
+                phrases += 1
+            }
+            if phrases > 0 { everyday = everyday.map { $0 / Float(phrases) } }
+            return EmbeddingStore(dimensions: dimensions, vectors: vectors, rowOfItem: rows, everyday: phrases > 0 ? everyday : [])
         }
     }
 }

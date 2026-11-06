@@ -36,33 +36,46 @@ struct FilterBar: View {
                 }
             }
             Spacer(minLength: 0)
-            HStack(spacing: 0) {
-                Text("find")
-                    .font(PlexMono.font(.regular, size: 11))
-                    .foregroundStyle(theme.secondary.color)
-                    .padding(.horizontal, 8)
-                    .frame(height: 26)
-                    .overlay(alignment: .trailing) { Rectangle().fill(theme.rule.color).frame(width: 1) }
-                TextField("", text: $query, prompt: Text("words or @author").foregroundStyle(theme.secondary.color))
-                    .textFieldStyle(.plain)
-                    .font(PlexMono.font(.regular, size: 11))
-                    .foregroundStyle(theme.ink.color)
-                    .padding(.horizontal, 8)
-                    .frame(minWidth: 120, maxWidth: 190)
+            HStack(spacing: 4) {
+                HStack(spacing: 0) {
+                    Text("find")
+                        .font(PlexMono.font(.regular, size: 11))
+                        .foregroundStyle(theme.secondary.color)
+                        .padding(.horizontal, 8)
+                        .frame(height: 26)
+                        .overlay(alignment: .trailing) { Rectangle().fill(theme.rule.color).frame(width: 1) }
+                    TextField("", text: $query, prompt: Text(model.findsByMeaning ? "what it's about" : "words or @author").foregroundStyle(theme.secondary.color))
+                        .textFieldStyle(.plain)
+                        .font(PlexMono.font(.regular, size: 11))
+                        .foregroundStyle(theme.ink.color)
+                        .padding(.horizontal, 8)
+                        .frame(minWidth: 120, maxWidth: 190)
+                }
+                .frame(height: 26)
+                .background(theme.surface.color)
+                .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(theme.rule.color, lineWidth: 1))
+                Button("by meaning") { model.findsByMeaning.toggle() }
+                    .buttonStyle(KeyStyle(theme: theme, led: model.findsByMeaning))
+                    .disabled(!model.canFindByMeaning)
+                    .help(model.canFindByMeaning
+                          ? "Find what things are about, using the CLIP model on this Mac"
+                          : "Needs the CLIP model on this Mac. Run mac/tools/convert_clip.py to make it.")
             }
-            .frame(height: 26)
-            .background(theme.surface.color)
-            .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(theme.rule.color, lineWidth: 1))
         }
         .padding(.horizontal, 16)
         .padding(.bottom, 8)
-        .task(id: query) {
+        .task(id: FindRequest(query: query, byMeaning: model.findsByMeaning)) {
             // Wait for a pause in the typing.
-            try? await Task.sleep(for: .milliseconds(150))
+            try? await Task.sleep(for: .milliseconds(model.findsByMeaning ? 300 : 150))
             guard !Task.isCancelled else { return }
-            model.filter.query = query.trimmingCharacters(in: .whitespaces).lowercased()
+            await model.find(query)
         }
     }
+}
+
+private struct FindRequest: Equatable {
+    let query: String
+    let byMeaning: Bool
 }
 
 /// The time scrubber: items per month, a ruler, and a selection to drag.
