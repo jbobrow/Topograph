@@ -12,6 +12,9 @@ final class TerrainController {
     func zoomOut() { view?.zoomFromCenter(by: 1 / 1.8) }
     func fit() { view?.animateToFit() }
 
+    /// Put a spot on the map at the middle of the view, right away, as a drag on the minimap does.
+    func center(x: Double, y: Double) { view?.center(x: x, y: y) }
+
     /// Move to a spot on the map at a given zoom.
     func fly(x: Double, y: Double, k: Double) { view?.fly(x: x, y: y, k: k) }
 
@@ -35,6 +38,12 @@ final class TerrainController {
     }
 }
 
+/// How much of the map is showing, for the minimap.
+struct MapViewport: Equatable {
+    let transform: MapTransform
+    let size: CGSize
+}
+
 /// What's under the pointer, in points within the map.
 struct Hover: Equatable {
     let item: Int32
@@ -48,11 +57,13 @@ struct TerrainView: NSViewRepresentable {
     let controller: TerrainController
     let imageMode: ImageMode
     let selected: Int32?
+    let isActive: Bool
     var onFailure: (String) -> Void
     var onHover: (Hover?) -> Void
     var onPickItem: (Int32) -> Void
     var onPickRegion: (Int) -> Void
     var onWhere: ([Int]) -> Void
+    var onViewport: (MapViewport) -> Void
 
     func makeNSView(context: Context) -> TerrainMTKView {
         let view = TerrainMTKView(frame: .zero, device: MTLCreateSystemDefaultDevice())
@@ -72,11 +83,19 @@ struct TerrainView: NSViewRepresentable {
         view.onPickItem = onPickItem
         view.onPickRegion = onPickRegion
         view.onWhere = onWhere
+        view.onViewport = onViewport
+        view.isActive = isActive
         view.show(scene, root: root, imageMode: imageMode, selected: selected)
     }
 }
 
 final class TerrainMTKView: MTKView, MTKViewDelegate {
+    /// What a press on the map is doing. Space at the press decides which.
+    private enum Drag {
+        case pan(last: CGPoint)
+        case box(start: CGPoint, now: CGPoint?)
+    }
+
     private var renderer: TerrainRenderer?
     private var thumbnails: ThumbnailStore?
     private var labels: LabelStore?
@@ -91,8 +110,11 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
     private var shownScene: UUID?
     private var theme = Theme.light
     private var dark = false
-    private var dragStart: CGPoint?
-    private var dragged = false
+    private var drag: Drag?
+    /// Space is down, so a drag moves the map.
+    private var spaceHeld = false
+    private var keyMonitor: Any?
+    private var resignObserver: NSObjectProtocol?
     private var animation: (from: MapTransform, to: MapTransform, start: CFTimeInterval, duration: CFTimeInterval)?
     private var link: CADisplayLink?
     private var tracking: NSTrackingArea?
@@ -111,6 +133,12 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
     var onPickItem: ((Int32) -> Void)?
     var onPickRegion: ((Int) -> Void)?
     var onWhere: (([Int]) -> Void)?
+    var onViewport: ((MapViewport) -> Void)?
+    /// Whether the map is the view showing. Other views get the keyboard to themselves.
+    var isActive = true {
+        didSet { if !isActive { setSpaceHeld(false) } }
+    }
+    private var lastViewport: MapViewport?
 
     var zoom: Double { transform.k }
 
@@ -163,6 +191,8 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
             overlay.labels = labelPlacements(scene, size: size, scale: scale)
             updateWhere(scene)
         }
+        overlay.zoomBox = zoomBox
+        updateViewport()
         renderer.draw(in: self, transform: transform, theme: theme, overlay: overlay)
     }
 
@@ -265,6 +295,14 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
         DispatchQueue.main.async { notify?(path) }
     }
 
+    private func updateViewport() {
+        let viewport = MapViewport(transform: transform, size: bounds.size)
+        guard viewport != lastViewport else { return }
+        lastViewport = viewport
+        let notify = onViewport
+        DispatchQueue.main.async { notify?(viewport) }
+    }
+
     override func setFrameSize(_ newSize: NSSize) {
         let old = frame.size
         super.setFrameSize(newSize)
@@ -289,7 +327,76 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
         needsDisplay = true
     }
 
-    // MARK: Pan and zoom
+    // MARK: Pan, zoom and the keyboard
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        keyMonitor = nil
+        if let resignObserver { NotificationCenter.default.removeObserver(resignObserver) }
+        resignObserver = nil
+        guard let window else { return setSpaceHeld(false) }
+        // Through a monitor rather than keyDown, so space works whatever has focus,
+        // short of somewhere you're typing.
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
+            guard let self else { return event }
+            return self.handleKey(event)
+        }
+        // A key released in another app never reaches this one.
+        resignObserver = NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.setSpaceHeld(false) }
+        }
+    }
+
+    private func handleKey(_ event: NSEvent) -> NSEvent? {
+        guard event.window === window else { return event }
+        if event.keyCode == 53, event.type == .keyDown, zoomBox != nil {
+            drag = nil
+            needsDisplay = true
+            return nil
+        }
+        guard event.keyCode == 49 else { return event }
+        if event.type == .keyUp {
+            guard spaceHeld else { return event }
+            setSpaceHeld(false)
+            return nil
+        }
+        guard isActive, !(window?.firstResponder is NSText),
+              event.modifierFlags.intersection([.command, .control, .option]).isEmpty else { return event }
+        setSpaceHeld(true)
+        return nil
+    }
+
+    private func setSpaceHeld(_ held: Bool) {
+        guard held != spaceHeld else { return }
+        spaceHeld = held
+        if held { clearHover() }
+        updateCursor()
+    }
+
+    private var cursor: NSCursor {
+        if case .pan = drag { return .closedHand }
+        return spaceHeld ? .openHand : .crosshair
+    }
+
+    private func updateCursor() {
+        window?.invalidateCursorRects(for: self)
+        if pointerIsOverMap { cursor.set() }
+    }
+
+    /// False when the minimap, a key or the side panel is on top of the map there.
+    private var pointerIsOverMap: Bool {
+        guard let window, let content = window.contentView else { return false }
+        let point = window.mouseLocationOutsideOfEventStream
+        return content.hitTest(content.superview?.convert(point, from: nil) ?? point) === self
+    }
+
+    /// The rectangle being drawn, once the pointer has moved enough to mean it.
+    private var zoomBox: CGRect? {
+        guard case .box(let start, let now?) = drag else { return nil }
+        let box = CGRect(x: min(start.x, now.x), y: min(start.y, now.y), width: abs(now.x - start.x), height: abs(now.y - start.y))
+        return box.intersection(bounds)
+    }
 
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -304,7 +411,7 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
     }
 
     override func resetCursorRects() {
-        addCursorRect(bounds, cursor: dragStart != nil ? .closedHand : .crosshair)
+        addCursorRect(bounds, cursor: cursor)
     }
 
     /// In view points, y down, like map coordinates.
@@ -340,6 +447,11 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
     }
 
     override func mouseMoved(with event: NSEvent) {
+        guard pointerIsOverMap else { return clearHover() }
+        if spaceHeld {
+            NSCursor.openHand.set()
+            return
+        }
         let point = location(of: event)
         let onLabel = labelID(at: point) != nil
         let index = onLabel ? nil : itemIndex(at: point)
@@ -355,24 +467,46 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
     }
 
     override func mouseDown(with event: NSEvent) {
+        let point = location(of: event)
         stopAnimating()
-        dragStart = location(of: event)
-        dragged = false
-        window?.invalidateCursorRects(for: self)
+        clearHover()
+        drag = spaceHeld ? .pan(last: point) : .box(start: point, now: nil)
+        updateCursor()
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let start = dragStart else { return }
         let now = location(of: event)
-        if abs(now.x - start.x) + abs(now.y - start.y) > 0 { dragged = true }
-        apply(transform.panned(dx: now.x - start.x, dy: now.y - start.y))
-        dragStart = now
+        switch drag {
+        case .pan(let last):
+            apply(transform.panned(dx: now.x - last.x, dy: now.y - last.y))
+            drag = .pan(last: now)
+        case .box(let start, let moved):
+            // A hand's small wobble on a click isn't a rectangle.
+            guard moved != nil || abs(now.x - start.x) + abs(now.y - start.y) > 3 else { return }
+            drag = .box(start: start, now: now)
+            needsDisplay = true
+            NSCursor.crosshair.set()
+        case nil:
+            break
+        }
     }
 
     override func mouseUp(with event: NSEvent) {
-        dragStart = nil
-        window?.invalidateCursorRects(for: self)
-        guard !dragged else { return }
+        // The last drag event can be some way short of where the button came up.
+        if case .box(let start, let now?) = drag { drag = .box(start: start, now: location(of: event)) }
+        let finished = drag
+        let box = zoomBox
+        drag = nil
+        updateCursor()
+        guard case .box = finished else { return }
+        needsDisplay = true
+        if let box {
+            // Too small to have been meant.
+            guard max(box.width, box.height) >= 12 else { return }
+            fitted = false
+            animate(to: transform.zoomed(toFill: box, viewSize: bounds.size), duration: 0.35)
+            return
+        }
         let point = location(of: event)
         if let id = labelID(at: point) {
             onPickRegion?(id)
@@ -407,6 +541,10 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
     fileprivate func animateToFit() {
         fitted = true
         animate(to: .fit(bounds.size), duration: 0.4)
+    }
+
+    fileprivate func center(x: Double, y: Double) {
+        apply(transform.centered(onX: x, y: y, viewSize: bounds.size))
     }
 
     fileprivate func fly(x: Double, y: Double, k: Double) {

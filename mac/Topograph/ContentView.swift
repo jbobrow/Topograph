@@ -16,12 +16,13 @@ struct ContentView: View {
             ZStack(alignment: .topTrailing) {
                 // The map stays alive under other views so it keeps your place.
                 TerrainView(scene: model.scene, root: model.library?.root, controller: model.controller,
-                            imageMode: model.imageMode, selected: selectedItem,
+                            imageMode: model.imageMode, selected: selectedItem, isActive: model.section == .terrain,
                             onFailure: { model.fail($0) },
                             onHover: { model.hover = $0 },
                             onPickItem: { model.openItem($0) },
                             onPickRegion: { model.openRegion($0) },
-                            onWhere: { model.setWhere($0) })
+                            onWhere: { model.setWhere($0) },
+                            onViewport: { model.viewport = $0 })
                     .opacity(model.section == .terrain ? 1 : 0)
                     .allowsHitTesting(model.section == .terrain)
                 if model.section == .terrain {
@@ -96,7 +97,7 @@ struct TopBar: View {
                 .padding(.trailing, 12)
             ForEach(Section.allCases, id: \.self) { section in
                 Button(section.rawValue) { model.section = section }
-                    .buttonStyle(KeyStyle(theme: theme, on: model.section == section, led: model.section == section))
+                    .buttonStyle(KeyStyle(theme: theme, on: model.section == section))
             }
             Spacer()
             if model.section == .sources, let summary = model.sourcesSummary {
@@ -138,6 +139,7 @@ private struct MapChrome: View {
             VStack(alignment: .leading) {
                 WhereBar(model: model, theme: theme)
                 Spacer()
+                MinimapPanel(model: model, theme: theme)
                 if let scene = model.scene, let map = model.map {
                     Readout(visible: scene.visible.count, total: map.items.count, waiting: map.waiting, theme: theme)
                 }
@@ -168,6 +170,83 @@ private struct MapChrome: View {
                     .allowsHitTesting(false)
             }
         }
+    }
+}
+
+/// The whole map with what's showing marked, while zoomed in. Press or drag to move.
+private struct MinimapPanel: View {
+    let model: AppModel
+    let theme: Theme
+    @State private var picture: CGImage?
+    @State private var grab: CGSize?
+    @Environment(\.displayScale) private var displayScale
+
+    private let side = 168.0
+    private var perMapUnit: Double { side / DensityField.mapSize }
+
+    var body: some View {
+        if let viewport = model.viewport, viewport.transform.isZoomedIn(viewSize: viewport.size), let scene = model.scene {
+            let frame = viewFrame(viewport)
+            let shown = frame.intersection(CGRect(x: 0, y: 0, width: side, height: side))
+            ZStack(alignment: .topLeading) {
+                theme.surface.color
+                if let picture {
+                    Image(decorative: picture, scale: displayScale)
+                        .renderingMode(.template)
+                        .foregroundStyle(theme.ink.color)
+                }
+                // What's showing. Its edge stays visible where it runs past the map's.
+                Rectangle()
+                    .strokeBorder(theme.ink.color, lineWidth: 1.5)
+                    .frame(width: max(shown.width, 6), height: max(shown.height, 6))
+                    .offset(x: shown.minX, y: shown.minY)
+            }
+            .frame(width: side, height: side)
+            .clipShape(RoundedRectangle(cornerRadius: 3))
+            .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(theme.ink.color, lineWidth: 1))
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0)
+                .onChanged { changed($0, frame: frame) }
+                .onEnded { _ in
+                    grab = nil
+                    NSCursor.openHand.set()
+                })
+            .onContinuousHover { phase in
+                if case .active = phase, grab == nil { NSCursor.openHand.set() }
+            }
+            .accessibilityLabel("Minimap")
+            .task(id: scene.id) { await draw(scene) }
+        }
+    }
+
+    /// What's showing, in the minimap's points. Never too small to see or to take hold of.
+    private func viewFrame(_ viewport: MapViewport) -> CGRect {
+        let shown = viewport.transform.visibleRect(viewSize: viewport.size)
+        let box = CGRect(x: shown.minX * perMapUnit, y: shown.minY * perMapUnit, width: shown.width * perMapUnit, height: shown.height * perMapUnit)
+        let width = max(box.width, 6), height = max(box.height, 6)
+        return CGRect(x: box.midX - width / 2, y: box.midY - height / 2, width: width, height: height)
+    }
+
+    /// Taking hold of the marked part moves it from there; anywhere else jumps to that spot.
+    private func changed(_ value: DragGesture.Value, frame: CGRect) {
+        if grab == nil {
+            grab = frame.contains(value.startLocation)
+                ? CGSize(width: value.startLocation.x - frame.midX, height: value.startLocation.y - frame.midY)
+                : .zero
+            NSCursor.closedHand.set()
+        }
+        let x = (value.location.x - (grab?.width ?? 0)) / perMapUnit
+        let y = (value.location.y - (grab?.height ?? 0)) / perMapUnit
+        model.controller.center(x: min(max(x, 0), DensityField.mapSize), y: min(max(y, 0), DensityField.mapSize))
+    }
+
+    private func draw(_ scene: TerrainScene) async {
+        let pixels = Int(side * displayScale)
+        let dot = max(Int(displayScale), 1)
+        let next = await Task.detached(priority: .utility) {
+            Minimap.image(mask: Minimap.mask(field: scene.field, side: pixels, dot: dot), side: pixels)
+        }.value
+        if !Task.isCancelled { picture = next }
     }
 }
 

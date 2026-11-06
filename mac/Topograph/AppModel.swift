@@ -30,6 +30,8 @@ final class AppModel {
     private(set) var map: LibraryMap?
     private(set) var scene: TerrainScene?
     private(set) var whereYouAre: [Int] = []
+    /// What the map is showing, kept here for the minimap alone.
+    var viewport: MapViewport?
     private(set) var axis: MonthAxis?
     /// Items per month, whatever's filtered, for the time scrubber's bars.
     private(set) var monthCounts: [Int] = []

@@ -99,6 +99,8 @@ struct TerrainOverlay {
     var dots = false
     /// The selection's viewfinder: its center and half its width, in points.
     var viewfinder: (center: CGPoint, half: Double)?
+    /// The rectangle being drawn to zoom into, in points.
+    var zoomBox: CGRect?
     var labels: [LabelPlacement] = []
 }
 
@@ -259,9 +261,31 @@ final class TerrainRenderer {
             }
         }
 
+        if let box = overlay.zoomBox {
+            let bars = Self.outline(box, scale: Double(scale))
+            encoder.setRenderPipelineState(barPipeline)
+            encoder.setVertexBytes(&uniforms, length: uniformLength, index: 0)
+            bars.withUnsafeBytes { encoder.setVertexBytes($0.baseAddress!, length: $0.count, index: 1) }
+            encoder.setFragmentBytes(&uniforms, length: uniformLength, index: 0)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: bars.count)
+        }
+
         encoder.endEncoding()
         commands.present(drawable)
         commands.commit()
+    }
+
+    /// Four sides, one point wide, in pixels.
+    private static func outline(_ box: CGRect, scale: Double) -> [Bar] {
+        let x = Float((box.minX * scale).rounded()), y = Float((box.minY * scale).rounded())
+        let width = Float((box.width * scale).rounded()), height = Float((box.height * scale).rounded())
+        let weight = Float(scale)
+        return [
+            Bar(origin: SIMD2(x, y), size: SIMD2(width, weight)),
+            Bar(origin: SIMD2(x, y + height - weight), size: SIMD2(width, weight)),
+            Bar(origin: SIMD2(x, y), size: SIMD2(weight, height)),
+            Bar(origin: SIMD2(x + width - weight, y), size: SIMD2(weight, height)),
+        ]
     }
 
     /// Four corners, two bars each, in pixels.

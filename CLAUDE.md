@@ -104,7 +104,8 @@ These come from the owner. Keep them in any port.
 - **Type:** IBM Plex Mono for the interface and labels, Plex Sans for captions and
   prose.
 - **Controls:** every control is a "key": 26px tall, 3px radius, 1px rule, with a 7px
-  square LED that fills when the key is on.
+  square LED that fills when the key is on. The exception is the view tabs (terrain,
+  strata, and so on): the selected one inverts and they carry no LED.
 - **Shading:** elevation and strata layers use 1-bit dither and pattern fills (Bayer
   dot screens, hatches, rules, checks) instead of color.
 - **Images:** gray by default (color and 1-bit modes exist), shown in full color on
@@ -165,7 +166,7 @@ The Xcode project is `mac/Topograph.xcodeproj`, beside the Python pipeline:
 mac/
   TopographCore/    Swift package with no UI: Library (read-only GRDB), DensityField
                     (d3.contourDensity port), Regions, Strata, Depth (Echoes, Palette,
-                    Tributaries, Process), MapFilter, Moodboard, RegionNamer, CLIP (encoder,
+                    Tributaries, Process), MapFilter, Minimap, Moodboard, RegionNamer, CLIP (encoder,
                     tokenizer, image preparation), and tests
   Topograph/        SwiftUI shell, TerrainView (MTKView), TerrainRenderer, Terrain.metal,
                     ThumbnailStore, LabelStore, DetailPanel, StrataView, DepthViews,

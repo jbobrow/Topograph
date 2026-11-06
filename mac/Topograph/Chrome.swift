@@ -7,7 +7,7 @@ struct FilterBar: View {
     let theme: Theme
     @State private var query = ""
 
-    private static let groups: [(ActionGroups, String)] = [(.made, "made or posted"), (.liked, "liked"), (.kept, "saved")]
+    private static let groups: [(ActionGroups, String)] = [(.creation, "creation"), (.consumption, "consumption"), (.all, "creation + consumption")]
 
     var body: some View {
         HStack(spacing: 14) {
@@ -22,11 +22,8 @@ struct FilterBar: View {
             }
             HStack(spacing: 4) {
                 ForEach(Self.groups, id: \.1) { group, label in
-                    let on = model.filter.groups.contains(group)
-                    Button(label) {
-                        if on { model.filter.groups.remove(group) } else { model.filter.groups.insert(group) }
-                    }
-                    .buttonStyle(KeyStyle(theme: theme, led: on))
+                    Button(label) { model.filter.groups = group }
+                        .buttonStyle(KeyStyle(theme: theme, led: model.filter.groups == group))
                 }
             }
             HStack(spacing: 4) {

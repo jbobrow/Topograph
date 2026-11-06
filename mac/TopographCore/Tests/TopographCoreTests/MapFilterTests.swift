@@ -11,6 +11,22 @@ final class MapFilterTests: XCTestCase {
 
     private var search: SearchIndex { SearchIndex(items: items) }
 
+    func testCreationAndConsumptionSplitWhatYouDid() {
+        func shows(_ item: ActionGroups, in position: ActionGroups) -> Bool {
+            var filter = MapFilter()
+            filter.groups = position
+            return filter.matches(MapItem(x: 0, y: 0, resonance: 1, groups: item, platform: "x"))
+        }
+        XCTAssertTrue(shows(.made, in: .creation))
+        XCTAssertFalse(shows(.made, in: .consumption))
+        XCTAssertTrue(shows(.liked, in: .consumption))
+        XCTAssertTrue(shows(.kept, in: .consumption))
+        XCTAssertFalse(shows(.kept, in: .creation))
+        XCTAssertTrue(shows([.made, .liked], in: .creation))
+        XCTAssertTrue(shows([.made, .liked], in: .consumption))
+        XCTAssertTrue(shows(.liked, in: .all))
+    }
+
     func testSearchListsEachItemOnceAndNeverMatchesAcrossItems() {
         let repeated = [MapItem(x: 0, y: 0, resonance: 1, text: "fog fog fog"), MapItem(x: 0, y: 0, resonance: 1, text: "end"),
                         MapItem(x: 0, y: 0, resonance: 1, text: "start"), MapItem(x: 0, y: 0, resonance: 1, text: "Über fog")]

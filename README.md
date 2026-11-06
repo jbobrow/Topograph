@@ -115,8 +115,11 @@ open mac/Topograph.xcodeproj                   # then press Run
 
 It reads `~/Library/Application Support/Topograph/`, or the folder in
 `TOPOGRAPH_LIBRARY`, and only ever reads it: pipeline commands can keep running while
-it's open, and **Map → Reload Library** (⌘R) shows a new layout. Drag or scroll with two
-fingers to pan, and pinch to zoom. With a mouse, the wheel zooms.
+it's open, and **Map → Reload Library** (⌘R) shows a new layout. Drag to draw a rectangle
+to zoom into, or hold space and drag to move the map (esc cancels a rectangle). Two
+fingers also move it, pinching zooms, and with a mouse the wheel zooms. While you're
+zoomed in, a minimap at the bottom left shows where you are: press or drag on it to go
+somewhere else.
 
 **Sources** adds your history by running the `topograph` commands below for you, only
 when you ask. It finds them in this repo's `.venv`, or at `TOPOGRAPH_CLI`. Folders get a
