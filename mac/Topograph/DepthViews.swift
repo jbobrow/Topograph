@@ -232,6 +232,7 @@ struct DriftScreen: View {
                     HStack(alignment: .top, spacing: 16) {
                         if let thumb = detail?.media.first?.display ?? item.thumb {
                             LibraryPicture(url: library.file(thumb), longEdge: 1200, mode: model.imageMode, theme: theme)
+                                .id(current)
                                 .aspectRatio(CGFloat(item.aspect ?? 1), contentMode: .fit)
                                 .overlay(Rectangle().strokeBorder(theme.rule.color, lineWidth: 1))
                         }

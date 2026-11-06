@@ -103,6 +103,8 @@ final class AppModel {
                 phase = .ready
             } catch {
                 phase = .failed(error.localizedDescription)
+                // With no library yet, the way forward is adding your history.
+                if case LibraryError.notFound = error { section = .sources }
             }
         }
     }

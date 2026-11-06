@@ -140,6 +140,23 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(try Library(root: root).map().items.count, 1)
     }
 
+    /// What the file looks like once every Python tool has exited: no -wal, no -shm.
+    func testOpensAfterTheLastWriterHasClosedAndStillCannotWrite() throws {
+        try place("x:1")
+        try writer.close()
+        // Python's SQLite removes these on close. Apple's, used by this test, keeps them empty.
+        let file = root.appending(path: "topograph.sqlite").path
+        try? FileManager.default.removeItem(atPath: file + "-wal")
+        try? FileManager.default.removeItem(atPath: file + "-shm")
+
+        let library = try Library(root: root)
+        XCTAssertEqual(try library.map().items.count, 1)
+        XCTAssertThrowsError(try library.db.write { try $0.execute(sql: "delete from item") })
+        XCTAssertThrowsError(try library.db.read { try $0.execute(sql: "delete from item") })
+        XCTAssertThrowsError(try library.db.writeWithoutTransaction { try $0.execute(sql: "drop table item") })
+        XCTAssertEqual(try library.map().items.count, 1)
+    }
+
     func testCannotWrite() throws {
         try place("x:1")
         let library = try Library(root: root)

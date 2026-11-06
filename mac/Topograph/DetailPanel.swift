@@ -213,16 +213,18 @@ private struct RegionPanel: View {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.png]
         panel.nameFieldStringValue = "\(region.label.prefix(60)).png"
-        guard panel.runModal() == .OK, let destination = panel.url else { return }
-        exporting = true
         let (map, library, id, title) = (map, library, region.id, region.label)
-        Task {
-            let data = await Task.detached(priority: .userInitiated) { () -> Data? in
-                let files = Moodboard.picks(region: id, map: map).compactMap { map.items[Int($0)].thumb }.map(library.file)
-                return Moodboard.render(title: title, files: files)
-            }.value
-            try? data?.write(to: destination, options: .atomic)
-            exporting = false
+        panel.begin { response in
+            guard response == .OK, let destination = panel.url else { return }
+            exporting = true
+            Task {
+                let data = await Task.detached(priority: .userInitiated) { () -> Data? in
+                    let files = Moodboard.picks(region: id, map: map).compactMap { map.items[Int($0)].thumb }.map(library.file)
+                    return Moodboard.render(title: title, files: files)
+                }.value
+                try? data?.write(to: destination, options: .atomic)
+                exporting = false
+            }
         }
     }
 

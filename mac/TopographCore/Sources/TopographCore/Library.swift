@@ -121,8 +121,8 @@ public enum LibraryError: LocalizedError, Equatable {
 
     public var errorDescription: String? {
         switch self {
-        case .notFound(let path): "No library at \(path). Run `topograph build` first."
-        case .noMap: "This library has no map yet. Run `topograph build` first."
+        case .notFound(let path): "No library at \(path) yet. Add your history in Sources."
+        case .noMap: "This library has no map yet. Add your history in Sources, then update the map."
         }
     }
 }
@@ -135,6 +135,8 @@ public enum LibraryError: LocalizedError, Equatable {
 public struct Library: Sendable {
     public let root: URL
     let db: DatabaseQueue
+    /// Holds the file's WAL side files in place when nothing else is. Never used to read or write.
+    private let sideFiles: DatabaseQueue?
 
     /// Same rule as `config.default_library()`.
     public static var defaultRoot: URL {
@@ -149,11 +151,32 @@ public struct Library: Sendable {
         guard FileManager.default.fileExists(atPath: file.path) else {
             throw LibraryError.notFound(path: root.path)
         }
+        self.root = root
         var config = Configuration()
         config.readonly = true
         config.busyMode = .timeout(5)
-        self.root = root
-        self.db = try DatabaseQueue(path: file.path, configuration: config)
+        if let queue = try Self.openIfSideFilesExist(file, config) {
+            sideFiles = nil
+            db = queue
+        } else {
+            // A read-only connection can't open a WAL file once the last writer has closed
+            // and its -wal and -shm files are gone. An ordinary connection, which is never
+            // asked to write, brings them back and is kept open so they stay. All reading
+            // still goes through the read-only connection, so SQLite itself refuses writes.
+            var ordinary = Configuration()
+            ordinary.busyMode = .timeout(5)
+            sideFiles = try DatabaseQueue(path: file.path, configuration: ordinary)
+            db = try DatabaseQueue(path: file.path, configuration: config)
+        }
+    }
+
+    /// nil when SQLite can't open it read-only because the WAL side files are missing.
+    private static func openIfSideFilesExist(_ file: URL, _ config: Configuration) throws -> DatabaseQueue? {
+        do {
+            return try DatabaseQueue(path: file.path, configuration: config)
+        } catch let error as DatabaseError where error.resultCode == .SQLITE_CANTOPEN {
+            return nil
+        }
     }
 
     /// A path stored in the library, as a file on disk.

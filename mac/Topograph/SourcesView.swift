@@ -142,8 +142,9 @@ struct SourcesScreen: View {
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = true
         panel.allowedContentTypes = [.zip, .folder]
-        guard panel.runModal() == .OK else { return }
-        take(panel.urls)
+        panel.begin { response in
+            if response == .OK { take(panel.urls) }
+        }
     }
 
     private func take(_ urls: [URL]) {

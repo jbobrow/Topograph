@@ -58,7 +58,6 @@ struct ContentView: View {
 
     @ViewBuilder
     private func status(_ theme: Theme) -> some View {
-        // With no library yet, the way forward is the Sources page.
         switch model.phase {
         case .ready:
             EmptyView()
