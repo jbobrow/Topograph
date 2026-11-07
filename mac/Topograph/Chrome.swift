@@ -124,7 +124,7 @@ struct FilterBar: View {
                     .disabled(!model.canFindByMeaning)
                     .help(model.canFindByMeaning
                           ? "Find what things are about, using the CLIP model on this Mac"
-                          : "Needs the CLIP model on this Mac. Run mac/tools/convert_clip.py to make it.")
+                          : "Needs the CLIP model on this Mac.")
             }
         }
         .padding(.horizontal, 16)

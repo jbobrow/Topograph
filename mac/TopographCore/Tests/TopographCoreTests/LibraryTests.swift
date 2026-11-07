@@ -102,15 +102,6 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(try library.sources(showing: .pictures).unplaced, 0)
     }
 
-    func testFindsTheTextModelWhereThePipelineKeepsIt() throws {
-        XCTAssertFalse(MapRecipe.wordsModelIsDownloaded(environment: ["HF_HOME": root.path], home: root))
-        let snapshot = root.appending(path: "hub/models--sentence-transformers--all-MiniLM-L6-v2/snapshots/abc")
-        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
-        XCTAssertFalse(MapRecipe.wordsModelIsDownloaded(environment: ["HF_HOME": root.path], home: root))
-        try Data().write(to: snapshot.appending(path: "model.safetensors"))
-        XCTAssertTrue(MapRecipe.wordsModelIsDownloaded(environment: ["HF_HOME": root.path], home: root))
-    }
-
     func testRepeatedInteractionsCountOnce() throws {
         try place("x:1", types: ["open", "open", "open"])
         XCTAssertEqual(try Library(root: root).map().items.first?.resonance, 0.5)

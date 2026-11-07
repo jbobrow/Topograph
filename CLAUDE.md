@@ -149,23 +149,29 @@ The plan is in SPEC §6 and §8:
     and cosine at least 0.9996 on sampled items. The one known gap is ftfy's mojibake repair.
   - `EmbeddingStore.nearest` doesn't rank by plain cosine, which fails on real data: see
     its comment before changing it. Judge changes on real searches, not on tests.
-  - M2 is partly done: the Sources page runs the Python pipeline. Still to port to Swift:
-    importers, writing embeddings (`CLIPEncoder.embedItem` computes them), the text model, layout and naming, and hydration through a signed-in
-    `WKWebView`. Python stays the reference until then. Port the files importer's privacy
-    rules with their tests, not from memory.
-  - M3: YouTube and Google Takeout importers and Bluesky and Are.na sync exist in Python,
+  - M2 is done, apart from a way to get the models onto another Mac (see below). `TopographCore/Sources/TopographCore/Pipeline/`
+    holds the importers, media ingest, hydration, sync, embedding, the text model, UMAP, HDBSCAN, nesting and naming, and
+    `PipelineRunner` runs them. The Python pipeline stays as the reference and for the web viewer (the app doesn't write
+    `topograph.json`). Keep the two in step until it retires: `mac/tools/compare_libraries.py` compares a library from each,
+    row by row, and `swift run topograph-native` runs the Swift side from a terminal, with `check-regions`, `check-words` and
+    `check-palette` for what Python stored.
+  - A Swift map isn't the same picture as a Python one (different random numbers), but given the same positions, regions and
+    names match. Neighbors for UMAP are exact, not approximate, and the same vectors always draw the same map.
+  - Instagram hydration through a signed-in `WKWebView` (`InstagramSession`) is written but hasn't been tried signed in.
+  - Models: `convert_clip.py` and `convert_minilm.py` still need Python. Nothing yet puts them on a Mac that doesn't have them.
+  - M3: YouTube and Google Takeout importers and Bluesky and Are.na sync exist in both,
     tested on fixtures only. Photos library isn't started.
   - M4 is done except showing a Process sequence as one item on the map, and keeping
     region names across re-layouts (they're matched by region number, so a re-layout
     clears them).
 - **Opening the library:** always through `Library`, whose reads go through a read-only
-  connection. Strict read-only can't open a WAL file with no `-wal` or `-shm`, which is
+  connection, and write only through `LibraryWriter`. Strict read-only can't open a WAL file with no `-wal` or `-shm`, which is
   how the Python tools leave it on exit, so `Library` handles that. `query_only` isn't
   enough: GRDB resets it after each read.
 - **Testing anything that writes:** set `TOPOGRAPH_LIBRARY` to a throwaway folder. The app's
   preferences are shared across libraries, so clear what a test sets (`mapRecipe`).
 - **Maps:** the Sources page offers them, with blended suggested. The choice is an app preference, and
-  building one runs `topograph build --map <name>`. Judge a recipe by eye on the real library
+  building one runs `MapBuilder.build`. Judge a recipe by eye on the real library
   as well as by numbers: its subject-spread numbers got worse while its neighbors looked right.
 - **Approach:**
   - Open the SQLite file read-only. It's in WAL mode and the Python tools may be
@@ -193,12 +199,15 @@ mac/
                     (d3.contourDensity port), Regions, Strata, Depth (Echoes, Palette,
                     Tributaries, Process), PaletteSpace (camera, places), MapFilter, MapRecipe, Minimap,
                     Moodboard, RegionNamer, CLIP (encoder,
-                    tokenizer, image preparation), and tests
+                    tokenizer, image preparation), Pipeline/ (LibraryWriter, importers, MediaIngest,
+                    Hydrator, LiveSync, WordsEncoder, MapBuilder, Layout/), and tests. CWebP is libwebp's
+                    encoder, built in so it's optimized in Debug builds: as a dependency it made imports
+                    eight times slower. topograph-native is the pipeline from a terminal.
   Topograph/        SwiftUI shell, TerrainView (MTKView), PaletteView (MTKView), TerrainRenderer, Terrain.metal,
                     ThumbnailStore, LabelStore, DetailPanel, StrataView, DepthViews,
-                    SourcesView, PipelineRunner (runs the Python tools)
-  tools/            make_icon.swift draws the app icon at every size; convert_clip.py makes
-                    the Core ML models
+                    SourcesView, PipelineRunner (runs the pipeline), InstagramSession
+  tools/            make_icon.swift draws the app icon at every size; convert_clip.py and convert_minilm.py
+                    make the Core ML models; compare_libraries.py checks the port against Python
 ```
 
 The project uses a folder-synced group, so a new file in `mac/Topograph/` joins the

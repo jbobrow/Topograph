@@ -316,6 +316,13 @@ public struct CLIPTokenizer: Sendable {
         }
     }
 
+    /// Python's `html.unescape` on a whole string, for pages fetched when hydrating.
+    func unescaped(_ text: String) -> String {
+        var out = String.UnicodeScalarView()
+        out.append(contentsOf: unescapeHTML(Array(text.unicodeScalars)))
+        return String(out)
+    }
+
     /// Python's `html.unescape`; ftfy's stricter version takes only entities that end in `;`.
     private func unescapeHTML(_ text: [Unicode.Scalar], semicolonsOnly: Bool = false) -> [Unicode.Scalar] {
         guard text.contains("&") else { return text }

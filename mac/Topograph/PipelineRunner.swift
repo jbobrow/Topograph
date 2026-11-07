@@ -1,15 +1,24 @@
 import Foundation
 import TopographCore
 
-/// Runs the Python pipeline for the app. It stays the reference for import, hydration and
-/// mapping until they're ported, and it has the rules tuned on your real files.
-/// Nothing here runs unless you ask for it.
+/// Runs the pipeline for the app, off the main thread, one job at a time. Nothing here runs
+/// unless you ask for it.
 @MainActor
 @Observable
 final class PipelineRunner {
+    enum Work: Equatable, Sendable {
+        case importArchives([URL])
+        case readFiles([String], options: FilesRules.Options, dryRun: Bool)
+        case fixDates
+        case hydrate
+        case retryUnreachable(platform: String)
+        case sync(source: String, account: String)
+        case build(MapRecipe?)
+    }
+
     struct Job: Equatable {
         let title: String
-        let arguments: [String]
+        let work: Work
     }
 
     private(set) var running: Job?
@@ -18,102 +27,95 @@ final class PipelineRunner {
     /// Everything said since the last job began.
     private(set) var log: [String] = []
     private(set) var failure: String?
-    /// A hydrate started somewhere else, like a terminal.
+    /// A hydrate started somewhere else, like the Python tools in a terminal.
     private(set) var hydrateElsewhere = false
     /// Whether that's been looked into yet.
     private(set) var hasCheckedHydrate = false
-    private var process: Process?
-    private var partial = ""
+    private var stop: StopFlag?
 
-    /// The command, in order: `TOPOGRAPH_CLI`, then this repo's virtual environment, found
-    /// by walking up from the app (for development builds), then the usual place.
-    static func findCommand() -> URL? {
-        let manager = FileManager.default
-        if let env = ProcessInfo.processInfo.environment["TOPOGRAPH_CLI"], manager.isExecutableFile(atPath: env) {
-            return URL(fileURLWithPath: env)
+    private final class StopFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stopped = false
+
+        var isStopped: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return stopped
         }
-        var folder = Bundle.main.bundleURL.deletingLastPathComponent()
-        for _ in 0..<8 {
-            let candidate = folder.appending(path: ".venv/bin/topograph")
-            if manager.isExecutableFile(atPath: candidate.path) { return candidate }
-            folder.deleteLastPathComponent()
+
+        func set() {
+            lock.lock()
+            stopped = true
+            lock.unlock()
         }
-        let usual = manager.homeDirectoryForCurrentUser.appending(path: "Developer/Topograph/.venv/bin/topograph")
-        return manager.isExecutableFile(atPath: usual.path) ? usual : nil
     }
 
-    func run(_ job: Job, library: URL, then finished: @escaping @MainActor (Bool) -> Void) {
+    func run(_ job: Job, library: URL, instagram: InstagramSession, then finished: @escaping @MainActor (Bool) -> Void) {
         guard running == nil else { return }
-        guard let command = Self.findCommand() else {
-            failure = "Couldn't find the topograph command. Install it with pip install -e \".[clip]\", or set TOPOGRAPH_CLI."
-            return
-        }
-        let process = Process()
-        process.executableURL = command
-        process.arguments = ["--library", library.path] + job.arguments
-        var environment = ProcessInfo.processInfo.environment
-        environment["PYTHONUNBUFFERED"] = "1"
-        process.environment = environment
-        let output = Pipe()
-        process.standardOutput = output
-        process.standardError = output
-        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            Task { @MainActor in self?.take(text) }
-        }
-        process.terminationHandler = { [weak self] ended in
-            output.fileHandleForReading.readabilityHandler = nil
-            let succeeded = ended.terminationStatus == 0 || ended.terminationReason == .uncaughtSignal
-            let status = ended.terminationStatus
-            Task { @MainActor in
-                guard let self else { return }
-                self.running = nil
-                self.process = nil
-                if !succeeded {
-                    self.failure = self.log.last { !$0.isEmpty } ?? "It stopped with status \(status)."
-                }
-                finished(succeeded)
-            }
-        }
+        let flag = StopFlag()
+        stop = flag
         running = job
         line = job.title
         log = []
-        partial = ""
         failure = nil
-        do {
-            try process.run()
-            self.process = process
-        } catch {
-            running = nil
-            failure = error.localizedDescription
-        }
-    }
-
-    /// Stop gently, the same as Ctrl-C: the Python tools save their place.
-    func pause() {
-        process?.interrupt()
-    }
-
-    /// Live progress rewrites one line with carriage returns.
-    private func take(_ text: String) {
-        partial += text
-        let pieces = partial.split(omittingEmptySubsequences: false) { $0 == "\n" || $0 == "\r" }
-        for piece in pieces.dropLast() {
-            let clean = Self.withoutEscapes(String(piece)).trimmingCharacters(in: .whitespaces)
-            if !clean.isEmpty {
-                line = clean
-                log.append(clean)
+        let page = instagram.isSignedIn ? instagram.pageReader : nil
+        let reporter = PipelineReporter(progress: { [weak self] text in
+            Task { @MainActor in self?.line = text }
+        }, say: { [weak self] text in
+            Task { @MainActor in self?.say(text) }
+        }, isCancelled: { flag.isStopped })
+        let work = job.work
+        // Blocking work with all the cores it can use, so not on the shared task threads.
+        DispatchQueue.global(qos: .utility).async {
+            var problem: String?
+            do {
+                try Self.perform(work, library: library, instagramPage: page, reporter: reporter)
+            } catch is PipelinePaused {
+                reporter.say("Paused. Run it again to pick up where you left off.")
+            } catch {
+                problem = error.localizedDescription
+            }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.running = nil
+                self.stop = nil
+                self.failure = problem
+                finished(problem == nil)
             }
         }
-        partial = String(pieces.last ?? "")
-        let current = Self.withoutEscapes(partial).trimmingCharacters(in: .whitespaces)
-        if !current.isEmpty { line = current }
-        if log.count > 400 { log.removeFirst(log.count - 400) }
     }
 
-    private static func withoutEscapes(_ text: String) -> String {
-        text.replacingOccurrences(of: "\u{1B}\\[[0-9;?]*[A-Za-z]", with: "", options: .regularExpression)
+    private nonisolated static func perform(_ work: Work, library root: URL, instagramPage: (@Sendable (String) -> String?)?, reporter: PipelineReporter) throws {
+        let library = try LibraryWriter(root: root)
+        switch work {
+        case .importArchives(let paths):
+            try Pipeline.importArchives(paths, library: library, reporter: reporter)
+        case .readFiles(let folders, let options, let dryRun):
+            try Pipeline.readFiles(folders, options: options, dryRun: dryRun, library: library, reporter: reporter)
+        case .fixDates:
+            try Pipeline.readFiles([], fixDates: true, library: library, reporter: reporter)
+        case .hydrate:
+            try Pipeline.hydrate(library: library, hydrator: Hydrator(signedInPage: instagramPage), reporter: reporter)
+        case .retryUnreachable(let platform):
+            let count = try library.retryUnreachable(platform: platform)
+            reporter.say("\(count.formatted()) posts to try again.")
+            try Pipeline.hydrate(library: library, hydrator: Hydrator(signedInPage: instagramPage), platforms: [platform], reporter: reporter)
+        case .sync(let source, let account):
+            try Pipeline.sync(source: source, account: account, library: library, reporter: reporter)
+        case .build(let recipe):
+            try MapBuilder.build(recipe: recipe, library: library, reporter: reporter)
+        }
+    }
+
+    /// Stop gently: what's done stays done, and running it again picks up there.
+    func pause() {
+        stop?.set()
+    }
+
+    private func say(_ text: String) {
+        line = text
+        log.append(text)
+        if log.count > 400 { log.removeFirst(log.count - 400) }
     }
 
     /// Whether a hydrate is already going, so the app doesn't start a second one.
@@ -128,7 +130,7 @@ final class PipelineRunner {
             check.waitUntilExit()
             return check.terminationStatus == 0
         }.value
-        hydrateElsewhere = found && running?.arguments.first != "hydrate"
+        hydrateElsewhere = found && running?.work != .hydrate
         hasCheckedHydrate = true
     }
 }

@@ -345,7 +345,7 @@ prototype built.
 |---|---|
 | **M0 — Prototype** (now) | Instagram + X import, hydration, media cache, CLIP embeddings, UMAP + clusters, web viewer with Terrain and Strata |
 | **M1 — Native shell** (done) | SwiftUI app opening the prototype's library: Terrain (Metal), Strata, item detail, search |
-| **M2 — Native pipeline** (partly: Core ML CLIP runs in the app for search; everything else still runs the Python tools) | Import, hydration (incl. signed-in web view), Core ML embeddings, in-app layout |
+| **M2 — Native pipeline** (done, apart from getting the models onto another Mac; the signed-in web view is untried) | Import, hydration (incl. signed-in web view), Core ML embeddings, in-app layout |
 | **M0.5 — Facebook, your files** (now) | Facebook importer, files importer with folder review, made/kept on the map |
 | **M3 — More sources** (partly: no Photos library; tested on fixtures only) | YouTube + Google Takeout, Photos library, Bluesky + Are.na live sync |
 | **M4 — Depth** (done, in the Mac app) | Process sequences, Tributaries, Echoes, Palette, Drift, AI cluster names, export a region as a moodboard |

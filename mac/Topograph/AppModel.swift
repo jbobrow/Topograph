@@ -87,6 +87,7 @@ final class AppModel {
         didSet { if paletteShowsShare != oldValue { applyFilter() } }
     }
     let pipeline = PipelineRunner()
+    let instagram = InstagramSession()
     /// Read fresh from the file every few seconds while the Sources page is showing.
     var sources: LibrarySources?
     var sourcesSummary: String? {

@@ -136,10 +136,13 @@ Palette has three views. **Wheel** moves like the terrain. **Cylinder** stands t
 pictures up, with hue around it, colorfulness out from its axis and light to dark from top
 to bottom: drag to turn it. **Through time** is Strata's chart with bands of color for layers.
 
-**Sources** adds your history by running the `topograph` commands below for you, only
-when you ask. It finds them in this repo's `.venv`, or at `TOPOGRAPH_CLI`. Folders get a
-dry run first, so you see what would be read. It's also where you build maps and switch
-between them.
+**Sources** adds your history, only when you ask, with no terminal and no Python: drop
+in archives or folders, fetch images for liked and saved posts, sync Bluesky and Are.na.
+Folders get a first look before anything is read. It's also where you build maps and
+switch between them. The Python pipeline below does the same work and remains the
+reference; it's also what writes `topograph.json` for the web viewer. Instagram refuses
+many public requests, so Sources offers to sign in to it, in a web view whose login page
+is Instagram's own.
 
 In **Strata**, scrolling zooms in and out around the pointer, and sideways scrolling or holding
 space and dragging moves along time. These change the time selected, the same one the timeline shows, so it also applies to the
@@ -147,16 +150,18 @@ other views. **Selection** fits the canvas to it, with a small Strata of all of 
 and **all time** shows the whole timeline with that part shaded.
 
 Find matches words in captions and names. The **by meaning** key next to it finds what
-things are about, using CLIP on your Mac. It needs a model of about 600 MB, which is too
-large for the repository, so make it once from the weights the pipeline already uses:
+things are about, using CLIP on your Mac. CLIP (about 600 MB) also makes every map, and
+the blended and words maps need a text model (about 90 MB) too. They're too large for
+the repository, so make them once from the weights the pipeline already uses:
 
 ```bash
 python3.13 -m venv /tmp/convert
-/tmp/convert/bin/pip install coremltools open_clip_torch torch
+/tmp/convert/bin/pip install coremltools open_clip_torch torch transformers
 /tmp/convert/bin/python mac/tools/convert_clip.py
+/tmp/convert/bin/python mac/tools/convert_minilm.py
 ```
 
-It goes in `~/Library/Application Support/Topograph/models/`. Your search stays on this
+They go in `~/Library/Application Support/Topograph/models/`. Your search stays on this
 Mac. Items only turn up once they have a vector, so anything hydrate has just changed
 waits until the map is next updated.
 
@@ -170,7 +175,7 @@ with your own API key, and it says what it sends first.
   images: for X it uses the public endpoint behind embedded tweets; for Instagram
   it tries each post's public embed page. Instagram increasingly requires a login,
   so expect some to stay unreachable. They still count in Strata as "not yet
-  mapped". The native app will fetch these through a browser view signed in as you.
+  mapped". The Mac app can fetch these through a web view signed in as you.
 - **X likes** carry no date in the archive. Topograph uses the post's own date as
   an estimate and marks it as approximate.
 

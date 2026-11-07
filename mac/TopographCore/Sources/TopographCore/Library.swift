@@ -388,13 +388,15 @@ public struct LibrarySources: Sendable, Equatable {
         public let fetched: Int
         /// The newest thing you did there.
         public let newest: Int?
+        /// Given up on: tried a few times, or marked gone. A signed-in look might still find them.
+        public var unreachable = 0
     }
 
     public let platforms: [Platform]
     public let fileRoots: [String]
     /// Accounts set up for live sync, by source.
     public let syncAccounts: [String: String]
-    /// Not placed on the map being shown yet: they need `topograph build`.
+    /// Not placed on the map being shown yet: they need the map updated.
     public let unplaced: Int
     /// How many items each built map has.
     public let maps: [MapRecipe: Int]
@@ -417,11 +419,14 @@ extension Library {
                 select item.platform, max(interaction.at) from interaction join item on item.id = interaction.item_id
                 group by item.platform
                 """).reduce(into: [String: Int]()) { $0[$1[0] as String] = $1[1] as Int? }
+            let unreachable = try Row.fetchAll(db, sql: "select platform, count(*) from item where hydrated = -1 group by platform")
+                .reduce(into: [String: Int]()) { $0[$1[0] as String] = $1[1] as Int }
             let platforms = try Row.fetchAll(db, sql: """
                 select platform, count(*), sum(hydrated = 0 and hydrate_attempts < 3), sum(hydrated = 1) from item
                 where not (\(Self.goneSQL)) group by platform
                 """).map {
-                LibrarySources.Platform(platform: $0[0], items: $0[1], waiting: $0[2] ?? 0, fetched: $0[3] ?? 0, newest: newest[$0[0] as String])
+                LibrarySources.Platform(platform: $0[0], items: $0[1], waiting: $0[2] ?? 0, fetched: $0[3] ?? 0, newest: newest[$0[0] as String],
+                                        unreachable: unreachable[$0[0] as String] ?? 0)
             }
             let meta = try Row.fetchAll(db, sql: "select key, value from meta").reduce(into: [String: String]()) { $0[$1[0] as String] = $1[1] as String? }
             let roots = meta["files_roots"].flatMap { try? JSONDecoder().decode([String].self, from: Data($0.utf8)) } ?? []

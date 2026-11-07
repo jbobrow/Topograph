@@ -60,9 +60,22 @@ public enum CLIPImage {
     }
 }
 
-/// Pillow's resampling for 8-bit pictures with its bicubic filter, fixed-point rounding
-/// included, so a Swift vector and a Python vector start from the same numbers.
+/// Pillow's resampling for 8-bit pictures, fixed-point rounding included, so a Swift vector
+/// and a Python vector start from the same numbers.
 enum Resampler {
+    enum Filter {
+        case bicubic, lanczos
+
+        var support: Double { self == .bicubic ? 2 : 3 }
+
+        func weight(_ distance: Double) -> Double {
+            switch self {
+            case .bicubic: Resampler.bicubic(distance)
+            case .lanczos: Resampler.lanczos(distance)
+            }
+        }
+    }
+
     private static let precisionBits = 32 - 8 - 2
 
     private struct Kernel {
@@ -80,10 +93,18 @@ enum Resampler {
         return 0
     }
 
-    private static func kernel(from inSize: Int, to outSize: Int) -> Kernel {
+    private static func sinc(_ x: Double) -> Double {
+        x == 0 ? 1 : sin(x * .pi) / (x * .pi)
+    }
+
+    private static func lanczos(_ x: Double) -> Double {
+        abs(x) < 3 ? sinc(x) * sinc(x / 3) : 0
+    }
+
+    private static func kernel(from inSize: Int, to outSize: Int, filter: Filter) -> Kernel {
         let scale = Double(inSize) / Double(outSize)
         let filterScale = max(scale, 1)
-        let support = 2 * filterScale
+        let support = filter.support * filterScale
         let stride = Int(support.rounded(.up)) * 2 + 1
         var kernel = Kernel(stride: stride)
         kernel.starts.reserveCapacity(outSize)
@@ -96,7 +117,7 @@ enum Resampler {
             let count = min(Int(center + support + 0.5), inSize) - low
             var total = 0.0
             for index in 0..<count {
-                weights[index] = bicubic((Double(index + low) - center + 0.5) / filterScale)
+                weights[index] = filter.weight((Double(index + low) - center + 0.5) / filterScale)
                 total += weights[index]
             }
             for index in 0..<count {
@@ -115,10 +136,10 @@ enum Resampler {
         UInt8(clamping: value >> Int32(precisionBits))
     }
 
-    static func resize(_ rgb: [UInt8], width: Int, height: Int, toWidth: Int, toHeight: Int) -> [UInt8] {
+    static func resize(_ rgb: [UInt8], width: Int, height: Int, toWidth: Int, toHeight: Int, filter: Filter = .bicubic) -> [UInt8] {
         if width == toWidth, height == toHeight { return rgb }
-        let across = kernel(from: width, to: toWidth)
-        let down = kernel(from: height, to: toHeight)
+        let across = kernel(from: width, to: toWidth, filter: filter)
+        let down = kernel(from: height, to: toHeight, filter: filter)
         let half = Int32(1) << Int32(precisionBits - 1)
 
         // Across first, only for the rows that the second pass reads.

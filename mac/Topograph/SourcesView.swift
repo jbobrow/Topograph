@@ -14,7 +14,9 @@ struct SourcesScreen: View {
     @State private var connecting: String?
     @State private var account = ""
     @AppStorage("requestedSources") private var requested = ""
-    @State private var wordsModelReady = MapRecipe.wordsModelIsDownloaded()
+    @State private var wordsModelReady = WordsEncoder.isInstalled()
+    @State private var folderOptions = FilesRules.Options()
+    @State private var signingIn = false
 
     var body: some View {
         ScrollView {
@@ -31,7 +33,8 @@ struct SourcesScreen: View {
             while !Task.isCancelled {
                 await model.refreshSources()
                 await model.pipeline.checkHydrateElsewhere()
-                wordsModelReady = MapRecipe.wordsModelIsDownloaded()
+                wordsModelReady = WordsEncoder.isInstalled()
+                await model.instagram.refresh()
                 try? await Task.sleep(for: .seconds(4))
             }
         }
@@ -103,18 +106,24 @@ struct SourcesScreen: View {
                 }
                 .frame(maxHeight: 160)
                 HStack(spacing: 4) {
+                    folderOption("PDFs", \.includePDF, folders)
+                    folderOption("inside code projects", \.includeCode, folders)
+                    folderOption("cloud-only files", \.includeCloudOnly, folders)
+                }
+                HStack(spacing: 4) {
                     Button("read these folders") {
                         folderCheck = nil
-                        start(title: "reading your files", ["files"] + folders.map(\.path))
+                        start(title: "reading your files", .readFiles(folders.map(\.path), options: folderOptions, dryRun: false))
                     }
                     .buttonStyle(KeyStyle(theme: theme, on: true))
+                    Button("leave a folder out…") { leaveOut(of: folders) }.buttonStyle(KeyStyle(theme: theme))
                     Button("not now") { folderCheck = nil }.buttonStyle(KeyStyle(theme: theme))
                 }
             }
             if let sources = model.sources, sources.unplaced > 0, model.pipeline.running == nil, folderCheck == nil {
                 HStack(spacing: 8) {
                     Button("update the map") {
-                        start(title: "updating the map", ["build"] + (sources.shownMap.map { ["--map", $0.rawValue] } ?? []))
+                        start(title: "updating the map", .build(sources.shownMap))
                     }
                         .buttonStyle(KeyStyle(theme: theme))
                     Text("\(sources.unplaced.formatted()) items aren’t on it yet")
@@ -140,17 +149,43 @@ struct SourcesScreen: View {
         let exports = urls.filter { DroppedSource.classify($0) == .export }
         let folders = urls.filter { DroppedSource.classify($0) == .folder }
         if !exports.isEmpty {
-            start(title: "importing \(exports.count == 1 ? exports[0].lastPathComponent : "\(exports.count) exports")",
-                  ["import"] + exports.map(\.path))
+            start(title: "importing \(exports.count == 1 ? exports[0].lastPathComponent : "\(exports.count) exports")", .importArchives(exports))
         } else if !folders.isEmpty {
-            // Your own folders get a dry run first, so you see what would be taken.
-            model.pipeline.run(.init(title: "looking through your folders", arguments: ["files"] + folders.map(\.path) + ["--dry-run"]),
-                               library: model.libraryRoot) { _ in folderCheck = folders }
+            folderOptions = FilesRules.Options()
+            firstLook(at: folders)
         }
     }
 
-    private func start(title: String, _ arguments: [String]) {
-        model.pipeline.run(.init(title: title, arguments: arguments), library: model.libraryRoot) { _ in
+    /// Your own folders get a dry run first, so you see what would be taken.
+    private func firstLook(at folders: [URL]) {
+        model.pipeline.run(.init(title: "looking through your folders", work: .readFiles(folders.map(\.path), options: folderOptions, dryRun: true)),
+                           library: model.libraryRoot, instagram: model.instagram) { _ in folderCheck = folders }
+    }
+
+    private func folderOption(_ title: String, _ option: WritableKeyPath<FilesRules.Options, Bool>, _ folders: [URL]) -> some View {
+        Button(title) {
+            folderOptions[keyPath: option].toggle()
+            firstLook(at: folders)
+        }
+        .buttonStyle(KeyStyle(theme: theme, led: folderOptions[keyPath: option]))
+    }
+
+    private func leaveOut(of folders: [URL]) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.directoryURL = folders.first
+        panel.prompt = "Leave Out"
+        panel.begin { response in
+            guard response == .OK else { return }
+            folderOptions.exclude += panel.urls.map(\.path)
+            firstLook(at: folders)
+        }
+    }
+
+    private func start(title: String, _ work: PipelineRunner.Work) {
+        model.pipeline.run(.init(title: title, work: work), library: model.libraryRoot, instagram: model.instagram) { _ in
             Task { await model.refreshSources() }
             model.load()
         }
@@ -193,7 +228,7 @@ struct SourcesScreen: View {
                 .foregroundStyle(theme.secondary.color)
                 .fixedSize(horizontal: false, vertical: true)
             if !built, recipe.readsWords, !wordsModelReady {
-                Text(MapRecipe.wordsDownloadNote)
+                Text("Needs the text model on this Mac.")
                     .font(PlexMono.font(.regular, size: 10))
                     .foregroundStyle(theme.secondary.color)
                     .fixedSize(horizontal: false, vertical: true)
@@ -208,7 +243,7 @@ struct SourcesScreen: View {
         let number = PlexMono.font(.semibold, size: 13)
         let note = PlexMono.font(.regular, size: 11)
         let busy = model.pipeline.running != nil
-        if model.pipeline.running?.arguments.contains(recipe.rawValue) == true {
+        if model.pipeline.running?.work == .build(recipe) {
             LoadingNote(text: "building", theme: theme)
         } else if model.openingMap == recipe {
             LoadingNote(text: "opening", theme: theme)
@@ -232,8 +267,8 @@ struct SourcesScreen: View {
     }
 
     private func build(_ recipe: MapRecipe) {
-        model.pipeline.run(.init(title: "building the \(recipe.title) map", arguments: ["build", "--map", recipe.rawValue]),
-                           library: model.libraryRoot) { succeeded in
+        model.pipeline.run(.init(title: "building the \(recipe.title) map", work: .build(recipe)),
+                           library: model.libraryRoot, instagram: model.instagram) { succeeded in
             Task { await model.refreshSources() }
             if succeeded { model.showMap(recipe) }
         }
@@ -306,6 +341,8 @@ struct SourcesScreen: View {
                     Text(note).font(PlexMono.font(.regular, size: 10)).foregroundStyle(theme.secondary.color)
                 }
                 if row.canHydrate, let progress = hydrateProgress(found) { hydrateRow(progress, key: row.key) }
+                if row.key == "instagram", added { instagramSession(found) }
+                if row.key == "files", added { filesActions }
                 if !added, row.isSync { notAddedActions(row) }
                 if let guide = row.guide { guideActions(row, guide: guide, added: added) }
             }
@@ -368,6 +405,52 @@ struct SourcesScreen: View {
         return row.subtitle
     }
 
+    /// Your folders again, for what's new since, and corrections to what's already here.
+    private var filesActions: some View {
+        HStack(spacing: 4) {
+            Button("read new files") {
+                start(title: "reading your files", .readFiles([], options: .init(), dryRun: false))
+            }
+            .buttonStyle(KeyStyle(theme: theme))
+            Button("correct dates") {
+                start(title: "correcting dates", .fixDates)
+            }
+            .buttonStyle(KeyStyle(theme: theme))
+        }
+        .disabled(model.pipeline.running != nil)
+    }
+
+    /// Public pages refuse many posts. Signed in, a web view reads them as you, at the same pace.
+    @ViewBuilder
+    private func instagramSession(_ found: [LibrarySources.Platform]) -> some View {
+        let unreachable = found.reduce(0) { $0 + $1.unreachable }
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 4) {
+                if model.instagram.isSignedIn {
+                    Text("signed in").font(PlexMono.font(.regular, size: 10)).foregroundStyle(theme.secondary.color)
+                    if unreachable > 0 {
+                        Button("try \(unreachable.formatted()) again") {
+                            start(title: "trying unreachable posts again", .retryUnreachable(platform: "instagram"))
+                        }
+                        .buttonStyle(KeyStyle(theme: theme))
+                        .disabled(model.pipeline.running != nil)
+                    }
+                    Button("sign out") { Task { await model.instagram.signOut() } }.buttonStyle(KeyStyle(theme: theme))
+                } else {
+                    Button("sign in to fetch more") { signingIn = true }.buttonStyle(KeyStyle(theme: theme))
+                }
+            }
+            if !model.instagram.isSignedIn {
+                Text("for posts the public pages refuse · your password goes only to instagram")
+                    .font(PlexMono.font(.regular, size: 10)).foregroundStyle(theme.secondary.color)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .sheet(isPresented: $signingIn) {
+            InstagramSignIn(session: model.instagram, theme: theme) { signingIn = false }
+        }
+    }
+
     private func hydrateProgress(_ found: [LibrarySources.Platform]) -> (done: Int, total: Int)? {
         let waiting = found.reduce(0) { $0 + $1.waiting }, done = found.reduce(0) { $0 + $1.fetched }
         return waiting > 0 ? (done, done + waiting) : nil
@@ -375,7 +458,7 @@ struct SourcesScreen: View {
 
     @ViewBuilder
     private func hydrateRow(_ progress: (done: Int, total: Int), key: String) -> some View {
-        let mine = model.pipeline.running?.arguments.first == "hydrate"
+        let mine = model.pipeline.running?.work == .hydrate
         let elsewhere = model.pipeline.hydrateElsewhere
         let checked = model.pipeline.hasCheckedHydrate
         VStack(alignment: .leading, spacing: 5) {
@@ -394,7 +477,7 @@ struct SourcesScreen: View {
             if mine {
                 Button("❚❚ pause") { model.pipeline.pause() }.buttonStyle(KeyStyle(theme: theme))
             } else if !elsewhere, checked {
-                Button("▶ fetch") { start(title: "fetching images", ["hydrate"]) }
+                Button("▶ fetch") { start(title: "fetching images", .hydrate) }
                     .buttonStyle(KeyStyle(theme: theme))
                     .disabled(model.pipeline.running != nil)
             }
@@ -419,7 +502,7 @@ struct SourcesScreen: View {
                         guard !name.isEmpty else { return }
                         connecting = nil
                         account = ""
-                        start(title: "reading \(row.title)", ["sync", row.platforms[0], name])
+                        start(title: "reading \(row.title)", .sync(source: row.platforms[0], account: name))
                     }
                     .buttonStyle(KeyStyle(theme: theme))
                 }
