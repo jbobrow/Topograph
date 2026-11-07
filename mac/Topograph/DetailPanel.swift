@@ -28,7 +28,7 @@ struct DetailPanel: View {
                             .foregroundStyle(theme.ink.color)
                             .padding(.trailing, 36)
                         PanelHeading(text: "closest in meaning", theme: theme)
-                        ItemGrid(items: model.foundItems(count: 90), map: map, library: library, mode: model.imageMode, theme: theme) {
+                        ItemGrid(items: model.foundItems(count: 90), map: map, library: library, mode: .color, theme: theme) {
                             model.openItem($0, pan: true)
                         }
                     case nil:
@@ -89,7 +89,7 @@ private struct ItemPanel: View {
             if let media = detail?.media, !media.isEmpty {
                 let picture = media[min(hero, media.count - 1)]
                 if let path = picture.display ?? picture.thumb {
-                    LibraryPicture(url: library.file(path), longEdge: 1520, mode: model.imageMode, theme: theme)
+                    LibraryPicture(url: library.file(path), longEdge: 1520, mode: .color, theme: theme)
                         .aspectRatio(CGFloat(hero == 0 ? (item.aspect ?? 1) : 1), contentMode: .fit)
                         .overlay(Rectangle().strokeBorder(theme.rule.color, lineWidth: 1))
                         .padding(.trailing, 32)
@@ -100,7 +100,7 @@ private struct ItemPanel: View {
                             ForEach(media.indices, id: \.self) { i in
                                 if let path = media[i].thumb {
                                     Button { hero = i } label: {
-                                        LibraryPicture(url: library.file(path), longEdge: 208, mode: model.imageMode, theme: theme)
+                                        LibraryPicture(url: library.file(path), longEdge: 208, mode: .color, theme: theme)
                                             .frame(width: 52, height: 52)
                                             .overlay(Rectangle().strokeBorder(theme.rule.color, lineWidth: 1))
                                     }
@@ -111,7 +111,7 @@ private struct ItemPanel: View {
                     }
                     .padding(.top, 4)
                 }
-                if model.imageMode == .color, !picture.palette.isEmpty {
+                if !picture.palette.isEmpty {
                     GeometryReader { geometry in
                         HStack(spacing: 0) {
                             ForEach(picture.palette, id: \.hex) { color in
@@ -165,14 +165,14 @@ private struct ItemPanel: View {
                 LoadingNote(text: "looking through what you kept", theme: theme)
             } else if !tributaries.isEmpty {
                 PanelHeading(text: "tributaries: kept in the months before", theme: theme)
-                ItemGrid(items: tributaries, map: map, library: library, mode: model.imageMode, theme: theme) {
+                ItemGrid(items: tributaries, map: map, library: library, mode: .color, theme: theme) {
                     model.openItem($0, pan: true)
                 }
             }
             let neighbors = (detail?.neighbors ?? []).compactMap { map.indexOfID[$0] }
             if !neighbors.isEmpty {
                 PanelHeading(text: "nearest in taste", theme: theme)
-                ItemGrid(items: neighbors, map: map, library: library, mode: model.imageMode, theme: theme) {
+                ItemGrid(items: neighbors, map: map, library: library, mode: .color, theme: theme) {
                     model.openItem($0, pan: true)
                 }
             }
@@ -260,7 +260,7 @@ private struct ColorBandPanel: View {
                     }
                 }
                 PanelHeading(text: "most resonant", theme: theme)
-                ItemGrid(items: Array(items.prefix(Self.shown)), map: map, library: library, mode: model.imageMode, theme: theme) {
+                ItemGrid(items: Array(items.prefix(Self.shown)), map: map, library: library, mode: .color, theme: theme) {
                     model.openItem($0)
                 }
             } else {
@@ -345,7 +345,7 @@ private struct RegionPanel: View {
                     .disabled(exporting)
                     .padding(.top, 14)
                 PanelHeading(text: "most resonant", theme: theme)
-                ItemGrid(items: mostResonant, map: map, library: library, mode: model.imageMode, theme: theme) {
+                ItemGrid(items: mostResonant, map: map, library: library, mode: .color, theme: theme) {
                     model.openItem($0, pan: true)
                 }
             }
