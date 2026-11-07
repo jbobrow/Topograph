@@ -463,10 +463,11 @@ struct SourcesScreen: View {
         let checked = model.pipeline.hasCheckedHydrate
         VStack(alignment: .leading, spacing: 5) {
             HStack {
-                Text(mine || elsewhere ? "hydrate · fetching images for kept posts" : "hydrate · images still to fetch")
+                let left = (progress.total - progress.done).formatted()
+                Text(mine || elsewhere ? "hydrate · fetching · \(left) posts to go" : "hydrate · \(left) posts still to fetch")
                 if !checked { LoadingNote(text: "checking", theme: theme) }
                 Spacer()
-                Text("\(progress.done.formatted()) / \(progress.total.formatted())")
+                Text("\(progress.done.formatted()) / \(progress.total.formatted()) done")
             }
             .font(PlexMono.font(.regular, size: 10))
             .foregroundStyle(theme.secondary.color)

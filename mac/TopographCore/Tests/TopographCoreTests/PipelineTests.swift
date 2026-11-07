@@ -460,6 +460,54 @@ final class HydratorTests: XCTestCase {
         XCTAssertEqual(try library.db.read { try Int.fetchOne($0, sql: "select sum(hydrate_attempts) from item") }, 0)
     }
 
+    func testTriesPostsItHasNotTriedBeforeOnesThatFailed() throws {
+        let library = try library()
+        // The newest post has failed, as thousands can when a run restarts from the top.
+        try library.db.write { try $0.execute(sql: "update item set hydrate_attempts = 1 where id = 'x:1000000000014'") }
+        let asked = LockedList()
+        let gone = WebFetcher { url, _, _ in
+            asked.add(url)
+            return Data(#"{"__typename":"TweetTombstone"}"#.utf8)
+        }
+        _ = try Hydrator(fetcher: gone, delay: 0).hydrate(library: library, reporter: silent)
+        XCTAssertEqual(asked.values.count, 15)
+        XCTAssertTrue(asked.values[0].contains("id=1000000000013"), "the newest untried post goes first")
+        XCTAssertTrue(asked.values[14].contains("id=1000000000014"), "the failed one waits until the end")
+    }
+
+    func testSaysWhatBecameOfEveryPost() throws {
+        let library = try library()
+        try library.db.write { try $0.execute(sql: "update item set hydrate_attempts = 2 where id = 'x:1000000000014'") }
+        let said = LockedList()
+        let reporter = PipelineReporter(progress: { _ in }, say: { said.add($0) })
+        let gone = WebFetcher { _, _, _ in Data(#"{"__typename":"TweetTombstone"}"#.utf8) }
+        let stats = try Hydrator(fetcher: gone, delay: 0).hydrate(library: library, reporter: reporter)
+        XCTAssertEqual(stats.unreachable, 1)
+        XCTAssertEqual(stats.toRetry, 14)
+        XCTAssertTrue(said.values.contains { $0.contains("0 fetched, 14 to retry, 1 unreachable") }, "\(said.values)")
+    }
+
+    func testTryingUnreachablePostsAgainTakesOnlyThose() throws {
+        let library = try library()
+        try library.db.write { db in
+            try db.execute(sql: "update item set hydrated = -1, hydrate_attempts = 3 where id in ('x:1000000000000', 'x:1000000000001')")
+        }
+        let asked = LockedList()
+        let answers = WebFetcher { url, _, _ in
+            asked.add(url)
+            return url.contains("id=1000000000001") ? Data(#"{"text":"still here"}"#.utf8) : Data(#"{"__typename":"TweetTombstone"}"#.utf8)
+        }
+        let stats = try Hydrator(fetcher: answers, delay: 0).hydrate(library: library, retryingUnreachable: true, reporter: silent)
+        XCTAssertEqual(asked.values.count, 2, "the 13 posts waiting their turn aren't touched")
+        XCTAssertEqual(stats.hydrated, 1)
+        XCTAssertEqual(stats.unreachable, 1)
+        try library.db.read { db in
+            XCTAssertEqual(try Int.fetchOne(db, sql: "select hydrated from item where id = 'x:1000000000001'"), 1)
+            XCTAssertEqual(try Int.fetchOne(db, sql: "select hydrated from item where id = 'x:1000000000000'"), -1, "stays given up on")
+            XCTAssertEqual(try Int.fetchOne(db, sql: "select count(*) from item where hydrated = 0 and hydrate_attempts = 0"), 13)
+        }
+    }
+
     func testWaitsAtAHumanPaceAndGivesUpOnAPostAfterAFewAttempts() throws {
         let library = try library()
         let waited = LockedCount()
@@ -494,6 +542,22 @@ final class HydratorTests: XCTestCase {
 
     func testYouTubeOnlyAsksForThePicture() {
         XCTAssertEqual(YouTubeImporter.thumbnailURL("abc123"), "https://i.ytimg.com/vi/abc123/hqdefault.jpg")
+    }
+}
+
+private final class LockedList: @unchecked Sendable {
+    private let lock = NSLock()
+    private var list: [String] = []
+    var values: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return list
+    }
+
+    func add(_ value: String) {
+        lock.lock()
+        list.append(value)
+        lock.unlock()
     }
 }
 

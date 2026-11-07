@@ -97,9 +97,8 @@ final class PipelineRunner {
         case .hydrate:
             try Pipeline.hydrate(library: library, hydrator: Hydrator(signedInPage: instagramPage), reporter: reporter)
         case .retryUnreachable(let platform):
-            let count = try library.retryUnreachable(platform: platform)
-            reporter.say("\(count.formatted()) posts to try again.")
-            try Pipeline.hydrate(library: library, hydrator: Hydrator(signedInPage: instagramPage), platforms: [platform], reporter: reporter)
+            // Posts the public pages refused may open once you've signed in.
+            try Pipeline.hydrate(library: library, hydrator: Hydrator(signedInPage: instagramPage), platforms: [platform], retryingUnreachable: true, reporter: reporter)
         case .sync(let source, let account):
             try Pipeline.sync(source: source, account: account, library: library, reporter: reporter)
         case .build(let recipe):

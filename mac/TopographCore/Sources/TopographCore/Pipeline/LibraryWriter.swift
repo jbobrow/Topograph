@@ -176,15 +176,6 @@ public final class LibraryWriter: @unchecked Sendable {
 }
 
 extension LibraryWriter {
-    /// Give up on giving up: posts the public pages refused may open once you've signed in.
-    @discardableResult
-    public func retryUnreachable(platform: String) throws -> Int {
-        try db.write { db in
-            try db.execute(sql: "update item set hydrated = 0, hydrate_attempts = 0 where platform = ? and hydrated = -1", arguments: [platform])
-            return db.changesCount
-        }
-    }
-
     /// Files with a preview already, so an interrupted import picks up where it stopped.
     public func finishedFiles() throws -> Set<String> {
         try db.read { db in

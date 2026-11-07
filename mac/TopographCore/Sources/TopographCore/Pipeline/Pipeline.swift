@@ -131,12 +131,12 @@ public enum Pipeline {
     }
 
     /// Fetch images for liked and saved posts. Stop it any time; running it again resumes.
-    public static func hydrate(library: LibraryWriter, hydrator: Hydrator = Hydrator(), platforms: Set<String>? = nil, limit: Int? = nil, reporter: PipelineReporter) throws {
+    public static func hydrate(library: LibraryWriter, hydrator: Hydrator = Hydrator(), platforms: Set<String>? = nil, limit: Int? = nil, retryingUnreachable: Bool = false, reporter: PipelineReporter) throws {
         reporter.say("Fetching images for liked and saved posts. Pause any time; it picks up where it left off.")
         let waiting = ProgressLine("Downloading waiting images", unit: "images", reporter: reporter)
         let arrived = try hydrator.downloadPendingMedia(library: library, delay: hydrator.delay / 3, reporter: reporter, line: waiting)
         if waiting.done > 0 { waiting.close("\(arrived.formatted()) images") }
-        _ = try hydrator.hydrate(library: library, platforms: platforms, limit: limit, reporter: reporter)
+        _ = try hydrator.hydrate(library: library, platforms: platforms, limit: limit, retryingUnreachable: retryingUnreachable, reporter: reporter)
     }
 
     /// Read your public activity from Bluesky or Are.na.

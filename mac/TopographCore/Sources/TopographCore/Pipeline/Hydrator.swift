@@ -229,19 +229,25 @@ public struct Hydrator: Sendable {
     public struct Stats: Sendable {
         public var hydrated = 0
         public var unreachable = 0
+        /// Not found this time, but with attempts left.
+        public var toRetry = 0
         public var skipped = 0
         public var media = 0
         public var stoppedOnFailures = false
     }
 
-    /// Newest first. Resumable: stop it any time and what it fetched stays.
-    public func hydrate(library: LibraryWriter, platforms: Set<String>? = nil, limit: Int? = nil, reporter: PipelineReporter) throws -> Stats {
+    /// Posts not tried yet come first, newest first, then the ones that have failed: most of those
+    /// are gone, and thousands of them could otherwise stand in front of posts that are still there.
+    /// Resumable: stop it any time and what it fetched stays. `retryingUnreachable` takes only the
+    /// posts already given up on instead, which stay given up on unless they're found.
+    public func hydrate(library: LibraryWriter, platforms: Set<String>? = nil, limit: Int? = nil, retryingUnreachable: Bool = false, reporter: PipelineReporter) throws -> Stats {
         var stats = Stats()
+        let chosen = retryingUnreachable ? "hydrated = -1" : "hydrated = 0 and hydrate_attempts < \(Self.maxAttempts)"
         var rows = try library.db.read { db in
             try Row.fetchAll(db, sql: """
-                select id, platform, url, hydrate_attempts from item where hydrated = 0 and hydrate_attempts < ?
-                order by (select max(at) from interaction where item_id = item.id) desc
-                """, arguments: [Self.maxAttempts])
+                select id, platform, url, hydrate_attempts from item where \(chosen)
+                order by hydrate_attempts, (select max(at) from interaction where item_id = item.id) desc
+                """)
         }
         if let platforms { rows = rows.filter { platforms.contains($0["platform"] as String) } }
         if let limit { rows = Array(rows.prefix(limit)) }
@@ -249,7 +255,7 @@ public struct Hydrator: Sendable {
         var failures = 0
         for row in rows {
             let id = row["id"] as String, platform = row["platform"] as String
-            line.advance(note: "\(stats.hydrated.formatted()) fetched, \(stats.unreachable.formatted()) unreachable")
+            line.advance(note: "\(stats.hydrated.formatted()) fetched, \(stats.toRetry.formatted()) to retry, \(stats.unreachable.formatted()) unreachable")
             if !["x", "instagram", "youtube"].contains(platform) {
                 stats.skipped += 1
                 continue
@@ -281,6 +287,7 @@ public struct Hydrator: Sendable {
                 stats.hydrated += 1
             } else {
                 if failed { failures += 1 }
+                var gaveUp = false
                 // A network that's down says nothing about the post, so it doesn't count against it.
                 if !networkDown {
                     let attempts = (row["hydrate_attempts"] as Int) + 1
@@ -288,8 +295,9 @@ public struct Hydrator: Sendable {
                         try db.execute(sql: "update item set hydrate_attempts = ?, hydrated = case when ? >= ? then -1 else 0 end where id = ?",
                                        arguments: [attempts, attempts, Self.maxAttempts, id])
                     }
-                    if attempts >= Self.maxAttempts { stats.unreachable += 1 }
+                    gaveUp = attempts >= Self.maxAttempts
                 }
+                if gaveUp { stats.unreachable += 1 } else { stats.toRetry += 1 }
             }
             if failures >= Self.maxFailures {
                 stats.stoppedOnFailures = true
@@ -298,7 +306,7 @@ public struct Hydrator: Sendable {
             }
             try reporter.pause(delay, wait: wait)
         }
-        line.close("\(stats.hydrated.formatted()) fetched, \(stats.unreachable.formatted()) unreachable, \(stats.media.formatted()) images")
+        line.close("\(stats.hydrated.formatted()) fetched, \(stats.toRetry.formatted()) to retry, \(stats.unreachable.formatted()) unreachable, \(stats.media.formatted()) images")
         return stats
     }
 }

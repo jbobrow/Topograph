@@ -118,7 +118,7 @@ def cmd_hydrate(args, lib):
         with Progress("Fetching liked and saved posts", unit="posts") as prog:
             s = hydrate(lib, limit=args.limit, delay=args.delay,
                         platforms=[args.platform] if args.platform else None, progress=prog)
-            prog.close(f"{s['hydrated']:,} fetched, {s['unreachable']:,} unreachable, "
+            prog.close(f"{s['hydrated']:,} fetched, {s['to_retry']:,} to retry, {s['unreachable']:,} unreachable, "
                        f"{s['media'] + pre:,} images")
     except KeyboardInterrupt:
         lib.conn.commit()

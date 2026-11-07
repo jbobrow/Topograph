@@ -151,6 +151,27 @@ def test_hydrate_never_holds_the_library_while_fetching(tmp_path, monkeypatch):
     lib.close()
 
 
+def test_hydrate_tries_posts_it_has_not_tried_before_ones_that_failed(tmp_path, monkeypatch):
+    from topograph import hydrate as hydrate_mod
+    lib = Library(tmp_path / "lib")
+    lib.conn.executemany("insert into item(id, platform, hydrate_attempts) values (?, 'x', ?)",
+                         [("x:failed-newest", 1), ("x:new", 0), ("x:last-chance", 2), ("x:older", 0)])
+    lib.conn.executemany("insert into interaction(item_id, type, at) values (?, 'like', ?)",
+                         [("x:failed-newest", 400), ("x:new", 300), ("x:last-chance", 200), ("x:older", 100)])
+    lib.conn.commit()
+    asked = []
+
+    def gone(item):
+        asked.append(item["id"])
+        return None
+
+    monkeypatch.setitem(hydrate_mod.HYDRATORS, "x", gone)
+    stats = hydrate_mod.hydrate(lib, delay=0, log=lambda _: None)
+    assert asked == ["x:new", "x:older", "x:failed-newest", "x:last-chance"]
+    assert (stats["to_retry"], stats["unreachable"]) == (3, 1)
+    lib.close()
+
+
 def test_a_tool_waits_for_another_one_to_finish_writing(tmp_path):
     lib = Library(tmp_path / "lib")
     assert lib.conn.execute("pragma busy_timeout").fetchone()[0] == 120_000

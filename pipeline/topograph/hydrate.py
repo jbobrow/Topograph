@@ -235,9 +235,11 @@ HYDRATORS = {"x": hydrate_x, "instagram": hydrate_instagram, "youtube": hydrate_
 
 def hydrate(lib, limit: int | None = None, delay: float = 1.5, platforms=None, log=print,
             progress=None) -> dict:
-    stats = {"hydrated": 0, "unreachable": 0, "skipped": 0, "media": 0}
+    stats = {"hydrated": 0, "to_retry": 0, "unreachable": 0, "skipped": 0, "media": 0}
+    # Posts not tried yet come first, newest first, then the ones that have failed: most of those
+    # are gone, and thousands of them could otherwise stand in front of posts that are still there.
     q = ("select * from item where hydrated=0 and hydrate_attempts<? "
-         "order by (select max(at) from interaction where item_id=item.id) desc")
+         "order by hydrate_attempts, (select max(at) from interaction where item_id=item.id) desc")
     rows = lib.conn.execute(q, (MAX_ATTEMPTS,)).fetchall()
     if platforms:
         rows = [r for r in rows if r["platform"] in platforms]
@@ -249,7 +251,8 @@ def hydrate(lib, limit: int | None = None, delay: float = 1.5, platforms=None, l
         log = progress.write
     for i, item in enumerate(rows, 1):
         if progress:
-            progress.advance(note=f"{stats['hydrated']:,} fetched, {stats['unreachable']:,} unreachable")
+            progress.advance(note=f"{stats['hydrated']:,} fetched, {stats['to_retry']:,} to retry, "
+                                  f"{stats['unreachable']:,} unreachable")
         fn = HYDRATORS.get(item["platform"])
         if not fn:
             stats["skipped"] += 1
@@ -286,12 +289,12 @@ def hydrate(lib, limit: int | None = None, delay: float = 1.5, platforms=None, l
             lib.conn.execute(
                 "update item set hydrate_attempts=?, hydrated=case when ? >= ? then -1 else 0 end where id=?",
                 (attempts, attempts, MAX_ATTEMPTS, item["id"]))
-            if attempts >= MAX_ATTEMPTS:
-                stats["unreachable"] += 1
+            stats["unreachable" if attempts >= MAX_ATTEMPTS else "to_retry"] += 1
         lib.conn.commit()
         if i % 10 == 0:
             if not progress:
-                log(f"  {i}/{len(rows)}  hydrated {stats['hydrated']}, unreachable {stats['unreachable']}")
+                log(f"  {i}/{len(rows)}  hydrated {stats['hydrated']}, to retry {stats['to_retry']}, "
+                    f"unreachable {stats['unreachable']}")
         if consecutive_failures >= 10:
             log("  10 network failures in a row; stopping. Check your connection and run again.")
             break
