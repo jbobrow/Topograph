@@ -429,7 +429,17 @@ final class AppModel {
         // Closing it goes back to the band it was picked from.
         if case .colorBand(let band) = selection { bandToReturnTo = band }
         selection = .item(index)
-        if pan, section == .terrain, let item = map?.items[Int(index)] { controller.fly(toItem: item) }
+        guard pan, let item = map?.items[Int(index)] else { return }
+        switch section {
+        case .terrain: controller.fly(toItem: item)
+        case .palette: palette.fly(toItem: index)
+        case .strata:
+            // Fitted to a selection, the item may be outside it, so the selection goes to the item.
+            if strataShowsSelection, filter.range != nil, let time = item.time, let axis {
+                selectStrata(strataSelection.centered(at: axis.fraction(of: time), limit: .whole), animated: true)
+            }
+        default: break
+        }
     }
 
     func openRegion(_ id: Int) {

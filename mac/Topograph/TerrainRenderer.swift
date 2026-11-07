@@ -102,12 +102,56 @@ struct LabelPlacement {
     let alpha: Double
 }
 
+/// The open item's picture, lifted off the map or the wheel and drifting above its place, so
+/// you can see where it is however far out you are. A rule ties it to that place.
+enum FloatingPicture {
+    /// Slow enough to read as drifting, and to go easy on the machine while a panel stays open.
+    static let period = 2.8
+    /// How close to the edges of what's clear of the side panel an open item is kept.
+    static let margin = 96.0
+
+    /// Where it goes this moment, in points. `long` is what it would be drawn at otherwise.
+    static func layout(place: CGPoint, aspect: Double, long: Double, bounds: CGSize) -> (center: CGPoint, size: CGSize, stem: CGRect) {
+        let long = max(long * 1.2, 84)
+        let size = aspect >= 1 ? CGSize(width: long, height: long / aspect) : CGSize(width: long * aspect, height: long)
+        let still = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let drift = still ? 0 : sin(CACurrentMediaTime() * 2 * .pi / period) * 3
+        // Above its place, or below when there's no room above.
+        let lift = size.height / 2 + 26 + drift
+        let above = place.y - lift - size.height / 2 >= 8
+        let y = above ? place.y - lift : place.y + lift
+        // Clear of the side panel and the window's edge, while the rule stays on its place.
+        let right = bounds.width - DetailPanel.width - size.width / 2 - 8
+        let x = min(max(place.x, size.width / 2 + 8), max(right, size.width / 2 + 8))
+        let near = above ? y + size.height / 2 : y - size.height / 2
+        let top = min(near, place.y), bottom = max(near, place.y)
+        return (CGPoint(x: x, y: y), size, CGRect(x: place.x - 0.5, y: top, width: 1, height: max(bottom - top, 0)))
+    }
+
+    /// How far to move so an item opening the side panel isn't left under it or off the edge.
+    static func correction(for place: CGPoint, bounds: CGSize) -> CGSize {
+        let right = bounds.width - DetailPanel.width - margin
+        let dx = place.x > right ? right - place.x : place.x < margin ? margin - place.x : 0
+        let bottom = bounds.height - margin
+        let dy = place.y > bottom ? bottom - place.y : place.y < margin ? margin - place.y : 0
+        return CGSize(width: dx, height: dy)
+    }
+
+    static func stemBar(_ stem: CGRect, scale: Float) -> Bar {
+        Bar(origin: SIMD2(Float((stem.minX * Double(scale)).rounded()), Float(stem.minY) * scale),
+            size: SIMD2(Float(stem.width) * scale, Float(stem.height) * scale))
+    }
+}
+
 /// Everything on top of the terrain.
 struct TerrainOverlay {
     var thumbs: [ThumbPlacement] = []
     var dots = false
     /// The selection's viewfinder: its center and half its width, in points.
     var viewfinder: (center: CGPoint, half: Double)?
+    /// The selection's picture, floating over its place, and the rule that ties them, in points.
+    var floating: ThumbPlacement?
+    var stem: CGRect?
     /// The rectangle being drawn to zoom into, in points.
     var zoomBox: CGRect?
     var labels: [LabelPlacement] = []
@@ -268,6 +312,32 @@ final class TerrainRenderer {
                 encoder.setFragmentTexture(label.texture, index: 0)
                 encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
             }
+        }
+
+        if let stem = overlay.stem {
+            let bars = [FloatingPicture.stemBar(stem, scale: scale)]
+            encoder.setRenderPipelineState(barPipeline)
+            encoder.setVertexBytes(&uniforms, length: uniformLength, index: 0)
+            bars.withUnsafeBytes { encoder.setVertexBytes($0.baseAddress!, length: $0.count, index: 1) }
+            encoder.setFragmentBytes(&uniforms, length: uniformLength, index: 0)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: bars.count)
+        }
+
+        if let thumb = overlay.floating {
+            encoder.setRenderPipelineState(thumbPipeline)
+            encoder.setVertexBytes(&uniforms, length: uniformLength, index: 0)
+            encoder.setFragmentBytes(&uniforms, length: uniformLength, index: 0)
+            var data = ThumbDraw(center: SIMD2(Float(thumb.center.x), Float(thumb.center.y)) * scale,
+                                 half: SIMD2(Float(thumb.size.width), Float(thumb.size.height)) * scale / 2,
+                                 frame: Float(thumb.frame) * scale,
+                                 mine: thumb.mine ? 1 : 0,
+                                 mode: thumb.mode == .color ? 0 : 1,
+                                 hasImage: thumb.texture == nil ? 0 : 1,
+                                 nearest: thumb.nearest ? 1 : 0)
+            encoder.setVertexBytes(&data, length: MemoryLayout<ThumbDraw>.stride, index: 1)
+            encoder.setFragmentBytes(&data, length: MemoryLayout<ThumbDraw>.stride, index: 1)
+            encoder.setFragmentTexture(thumb.texture, index: 0)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
 
         if let box = overlay.zoomBox {

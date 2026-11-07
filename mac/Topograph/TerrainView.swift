@@ -40,7 +40,7 @@ final class TerrainController {
     /// To an item, at least close enough to see it as a picture.
     func fly(toItem item: MapItem) {
         guard let view else { return }
-        fly(x: Double(item.x), y: Double(item.y), k: max(view.zoom, 4))
+        view.fly(x: Double(item.x), y: Double(item.y), k: max(view.zoom, 4), besidePanel: true)
     }
 }
 
@@ -125,6 +125,7 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
     private var resignObserver: NSObjectProtocol?
     private var animation: (from: MapTransform, to: MapTransform, start: CFTimeInterval, duration: CFTimeInterval)?
     private var link: CADisplayLink?
+    private var floatLink: CADisplayLink?
     private var tracking: NSTrackingArea?
 
     private var planner = LabelPlanner()
@@ -148,6 +149,7 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
         didSet {
             guard isActive != oldValue else { return }
             if !isActive { setSpaceHeld(false) }
+            updateFloating()
             window?.invalidateCursorRects(for: self)
         }
     }
@@ -172,18 +174,64 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
     func show(_ scene: TerrainScene?, root: URL?, imageMode: ImageMode, selected: Int32?) {
         if self.imageMode != imageMode || self.selected != selected { needsDisplay = true }
         self.imageMode = imageMode
+        let newlySelected = selected != self.selected ? selected : nil
         self.selected = selected
+        updateFloating()
         if root != self.root, let root, let renderer {
             self.root = root
             let store = ThumbnailStore(device: renderer.device, queue: renderer.queue, root: root)
             store.onReady = { [weak self] in self?.needsDisplay = true }
             thumbnails = store
         }
-        guard scene?.id != shownScene else { return }
+        guard scene?.id != shownScene else { return keep(newlySelected) }
         shownScene = scene?.id
         self.scene = scene
         renderer?.setScene(scene)
         needsDisplay = true
+        keep(newlySelected)
+    }
+
+    private func keep(_ index: Int32?) {
+        guard let index, let scene, isActive, scene.visible.contains(index) else { return }
+        keepInView(index, scene: scene)
+    }
+
+    // MARK: The selection
+
+    /// The picture floats for as long as it's selected and can be seen.
+    private func updateFloating() {
+        let wanted = selected != nil && isActive && window != nil && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if wanted, floatLink == nil {
+            let link = displayLink(target: self, selector: #selector(stepFloating))
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: 15, maximum: 30, preferred: 30)
+            link.add(to: .main, forMode: .common)
+            floatLink = link
+        } else if !wanted {
+            floatLink?.invalidate()
+            floatLink = nil
+        }
+    }
+
+    @objc private func stepFloating() {
+        if window?.occlusionState.contains(.visible) == true { needsDisplay = true }
+    }
+
+    /// Opening the side panel covers the right of the map, so an item there moves out from under it.
+    private func keepInView(_ index: Int32, scene: TerrainScene) {
+        guard animation == nil else { return }
+        let move = FloatingPicture.correction(for: screen(scene.map.items[Int(index)]), bounds: bounds.size)
+        if move != .zero { animate(to: transform.panned(dx: move.width, dy: move.height), duration: 0.3) }
+    }
+
+    private func placeFloating(_ index: Int32, scene: TerrainScene, scale: Double, into overlay: inout TerrainOverlay) {
+        let item = scene.map.items[Int(index)]
+        guard let path = item.thumb, let thumbnails else { return }
+        let long = TerrainStyle.thumbnailSize(k: transform.k) * TerrainStyle.thumbnailScale(resonance: item.resonance)
+        let placed = FloatingPicture.layout(place: screen(item), aspect: Double(item.aspect ?? 1), long: long, bounds: bounds.size)
+        let texture = thumbnails.texture(item: index, path: path, pixels: max(placed.size.width, placed.size.height) * scale, dither: false)
+        overlay.floating = ThumbPlacement(center: placed.center, size: placed.size, frame: 2, mine: true,
+                                          texture: texture, mode: .color, nearest: false)
+        overlay.stem = placed.stem
     }
 
     // MARK: Drawing
@@ -197,12 +245,13 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
             overlay.dots = transform.k >= TerrainStyle.thumbnailZoom
             thumbnails?.beginFrame()
             if overlay.dots { overlay.thumbs = thumbnailPlacements(scene, scale: scale) }
-            thumbnails?.endFrame()
             if let selected, scene.visible.contains(selected) {
+                // With a picture lifted off, this marks the place it came from.
                 let item = scene.map.items[Int(selected)]
-                let half = overlay.dots ? TerrainStyle.thumbnailSize(k: transform.k) * 0.5 + 8 : 10
-                overlay.viewfinder = (screen(item), half)
+                overlay.viewfinder = (screen(item), item.thumb == nil && overlay.dots ? TerrainStyle.thumbnailSize(k: transform.k) * 0.5 + 8 : 10)
+                placeFloating(selected, scene: scene, scale: scale, into: &overlay)
             }
+            thumbnails?.endFrame()
             overlay.labels = labelPlacements(scene, size: size, scale: scale)
             updateWhere(scene)
         }
@@ -255,8 +304,9 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
                                       texture: texture, mode: mode,
                                       nearest: dither && long * scale >= Double(texture?.width ?? 0)))
         }
-        for index in chosen.reversed() where index != hovered { place(index, lifted: false) }
-        if let hovered, chosen.contains(hovered) { place(hovered, lifted: true) }
+        // The selected picture is lifted off the map, so it isn't here as well.
+        for index in chosen.reversed() where index != hovered && index != selected { place(index, lifted: false) }
+        if let hovered, hovered != selected, chosen.contains(hovered) { place(hovered, lifted: true) }
         return out
     }
 
@@ -353,6 +403,7 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
         keyMonitor = nil
         if let resignObserver { NotificationCenter.default.removeObserver(resignObserver) }
         resignObserver = nil
+        updateFloating()
         guard let window else { return setSpaceHeld(false) }
         // Through a monitor rather than keyDown, so space works whatever has focus,
         // short of somewhere you're typing.
@@ -583,10 +634,12 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
         apply(transform.centered(onX: x, y: y, viewSize: bounds.size))
     }
 
-    fileprivate func fly(x: Double, y: Double, k: Double) {
+    /// `besidePanel` puts it in the middle of what the side panel leaves showing.
+    fileprivate func fly(x: Double, y: Double, k: Double, besidePanel: Bool = false) {
         fitted = false
         let zoom = min(max(k, MapTransform.zoomRange.lowerBound), MapTransform.zoomRange.upperBound)
-        animate(to: MapTransform(k: zoom, x: bounds.width / 2 - x * zoom, y: bounds.height / 2 - y * zoom), duration: 0.6)
+        let width = bounds.width - (besidePanel ? DetailPanel.width : 0)
+        animate(to: MapTransform(k: zoom, x: width / 2 - x * zoom, y: bounds.height / 2 - y * zoom), duration: 0.6)
     }
 
     // MARK: Animation

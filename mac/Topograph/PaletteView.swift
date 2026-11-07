@@ -12,6 +12,8 @@ final class PaletteController {
     func zoomOut() { view?.zoomFromCenter(by: 1 / 1.8) }
     func fit() { view?.fit() }
     func center(x: Double, y: Double) { view?.center(x: x, y: y) }
+    /// To an item, in the middle of what the side panel leaves showing.
+    func fly(toItem index: Int32) { view?.fly(toItem: index) }
     func setCylinder(_ on: Bool) { view?.setCylinder(on) }
     var pointerIsOnMinimap: Bool {
         get { view?.pointerIsOnMinimap ?? false }
@@ -93,6 +95,7 @@ final class PaletteMTKView: MTKView, MTKViewDelegate {
     private var camera = PaletteCamera()
     private var animation: (from: PaletteCamera, to: PaletteCamera, start: CFTimeInterval, duration: CFTimeInterval)?
     private var link: CADisplayLink?
+    private var floatLink: CADisplayLink?
     private var lastPublished: (camera: PaletteCamera, size: CGSize)?
 
     private var drag: Drag?
@@ -143,8 +146,11 @@ final class PaletteMTKView: MTKView, MTKViewDelegate {
 
     func show(space: PaletteSpace?, scene: TerrainScene?, root: URL?, selected: Int32?, imageMode: ImageMode) {
         if selected != self.selected || imageMode != self.imageMode { needsDisplay = true }
+        let newlySelected = selected != self.selected ? selected : nil
         self.selected = selected
         self.imageMode = imageMode
+        updateFloating()
+        defer { if let newlySelected { keepInView(newlySelected) } }
         // The places are worked out after the view first appears.
         let spaceArrived = self.space == nil && space != nil
         self.space = space
@@ -159,6 +165,65 @@ final class PaletteMTKView: MTKView, MTKViewDelegate {
         showing = scene.flatMap { scene in space?.showing(scene.visible) } ?? []
         dotsAreCurrent = false
         needsDisplay = true
+    }
+
+    // MARK: The selection
+
+    /// The picture floats for as long as it's selected and can be seen.
+    private func updateFloating() {
+        let wanted = selected != nil && window != nil && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if wanted, floatLink == nil {
+            let link = displayLink(target: self, selector: #selector(stepFloating))
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: 15, maximum: 30, preferred: 30)
+            link.add(to: .main, forMode: .common)
+            floatLink = link
+        } else if !wanted {
+            floatLink?.invalidate()
+            floatLink = nil
+        }
+    }
+
+    @objc private func stepFloating() {
+        if window?.occlusionState.contains(.visible) == true { needsDisplay = true }
+    }
+
+    private func screenPlace(of index: Int32, in space: PaletteSpace) -> CGPoint? {
+        guard let place = space.place(ofItem: index) else { return nil }
+        let p = space.position(of: space.places[Int(place)], solid: camera.solid)
+        return camera.project(x: p.x, y: p.y, z: p.z, size: bounds.size).point
+    }
+
+    /// Opening the side panel covers the right of the wheel, so an item there moves out from under it.
+    private func keepInView(_ index: Int32) {
+        guard animation == nil, let space, let at = screenPlace(of: index, in: space) else { return }
+        let move = FloatingPicture.correction(for: at, bounds: bounds.size)
+        if move != .zero { animate(to: camera.panned(dx: move.width, dy: move.height), duration: 0.3) }
+    }
+
+    fileprivate func fly(toItem index: Int32) {
+        guard let space, let at = screenPlace(of: index, in: space) else { return }
+        clearHover()
+        let dx = (bounds.width - DetailPanel.width) / 2 - at.x, dy = bounds.height / 2 - at.y
+        animate(to: camera.panned(dx: dx, dy: dy), duration: 0.6)
+    }
+
+    /// The selected picture, lifted above its place, with the rule that ties them.
+    private func drawFloating(_ index: Int32, at place: CGPoint, _ encoder: MTLRenderCommandEncoder, uniforms: inout Uniforms, scale: Float) {
+        guard let item = scene?.map.items[Int(index)], let path = item.thumb, let thumbnails, let thumbPipeline, let barPipeline else { return }
+        let long = thumbnailLength * TerrainStyle.thumbnailScale(resonance: item.resonance)
+        let placed = FloatingPicture.layout(place: place, aspect: Double(item.aspect ?? 1), long: long, bounds: bounds.size)
+        draw(bars: [FloatingPicture.stemBar(placed.stem, scale: scale)], encoder, barPipeline, &uniforms)
+        let texture = thumbnails.texture(item: index, path: path, pixels: max(placed.size.width, placed.size.height) * Double(scale), dither: false)
+        var data = ThumbDraw(center: SIMD2(Float(placed.center.x), Float(placed.center.y)) * scale,
+                             half: SIMD2(Float(placed.size.width), Float(placed.size.height)) * scale / 2,
+                             frame: 2 * scale, mine: 1, mode: 0, hasImage: texture == nil ? 0 : 1, nearest: 0)
+        encoder.setRenderPipelineState(thumbPipeline)
+        encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
+        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
+        encoder.setVertexBytes(&data, length: MemoryLayout<ThumbDraw>.stride, index: 1)
+        encoder.setFragmentBytes(&data, length: MemoryLayout<ThumbDraw>.stride, index: 1)
+        encoder.setFragmentTexture(texture, index: 0)
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
     }
 
     private func updateDots() {
@@ -212,14 +277,17 @@ final class PaletteMTKView: MTKView, MTKViewDelegate {
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: instances.count)
         }
 
+        thumbnails?.beginFrame()
         drawThumbnails(encoder, space: space, uniforms: &uniforms, scale: scale)
 
-        if let selected, let place = space.place(ofItem: selected), let barPipeline {
-            let p = space.position(of: space.places[Int(place)], solid: camera.solid)
-            let at = camera.project(x: p.x, y: p.y, z: p.z, size: bounds.size)
-            let reach = camera.zoom >= Self.thumbnailZoom ? thumbnailLength * 0.5 + 8 : 10
-            draw(bars: TerrainRenderer.viewfinder(center: at.point, half: reach, scale: Double(scale)), encoder, barPipeline, &uniforms)
+        if let selected, let at = screenPlace(of: selected, in: space), let barPipeline {
+            // With a picture lifted off, this marks the place it came from.
+            let lifted = scene?.map.items[Int(selected)].thumb != nil
+            let reach = camera.zoom >= Self.thumbnailZoom && !lifted ? thumbnailLength * 0.5 + 8 : 10
+            draw(bars: TerrainRenderer.viewfinder(center: at, half: reach, scale: Double(scale)), encoder, barPipeline, &uniforms)
+            drawFloating(selected, at: at, encoder, uniforms: &uniforms, scale: scale)
         }
+        thumbnails?.endFrame()
         if let box = zoomBox, let barPipeline {
             draw(bars: TerrainRenderer.outline(box, scale: Double(scale)), encoder, barPipeline, &uniforms)
         }
@@ -259,8 +327,9 @@ final class PaletteMTKView: MTKView, MTKViewDelegate {
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
         let dither = imageMode == .dither
-        thumbnails.beginFrame()
         for dot in dots where chosen.contains(dot.place) {
+            // The selected picture is lifted off the wheel, so it isn't here as well.
+            guard space.places[Int(dot.place)].index != selected else { continue }
             let item = map.items[Int(space.places[Int(dot.place)].index)]
             guard let path = item.thumb else { continue }
             let long = thumbnailLength * TerrainStyle.thumbnailScale(resonance: item.resonance) * Double(dot.scale)
@@ -275,7 +344,6 @@ final class PaletteMTKView: MTKView, MTKViewDelegate {
             encoder.setFragmentTexture(texture, index: 0)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
-        thumbnails.endFrame()
     }
 
     /// Rings at the top, middle and bottom, the axis, and the two sides. On the flat wheel
@@ -368,6 +436,8 @@ final class PaletteMTKView: MTKView, MTKViewDelegate {
             next.yaw = 0
         }
         animate(to: next, duration: 0.7)
+        // Turning instead of zooming, so the cursor the canvas was left with no longer applies.
+        updateCursor()
     }
 
     private func apply(_ next: PaletteCamera) {
@@ -418,6 +488,7 @@ final class PaletteMTKView: MTKView, MTKViewDelegate {
         keyMonitor = nil
         if let resignObserver { NotificationCenter.default.removeObserver(resignObserver) }
         resignObserver = nil
+        updateFloating()
         guard let window else {
             stopAnimating()
             return setSpaceHeld(false)

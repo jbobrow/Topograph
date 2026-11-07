@@ -121,6 +121,8 @@ These come from the owner. Keep them in any port.
   dot screens, hatches, rules, checks) instead of color.
 - **Images:** gray by default (color and 1-bit modes exist), shown in full color on
   hover. Palette keeps its own setting, which starts on color, since color is its subject.
+  The side panel is always in color: that's where you go to look at something properly. On the
+  map and the wheel, the open item's picture floats in color above its place (`FloatingPicture`).
 - **Region names on the map:**
   - They are boxed mono labels with a crosshair at the anchor, and top-level names
     are inverted.
