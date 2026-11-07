@@ -1,158 +1,106 @@
 # Topograph
 
-A private, on-device atlas of your online taste.
+A private, on-device atlas of your taste.
 
-Topograph reads the data exports from the platforms you use, keeps a local copy
-of what you posted, liked and saved, and maps it as terrain: things you keep coming
-back to rise into mountain ranges, passing interests stay foothills, and a time
-scrubber shows the landscape changing over the years.
+![Terrain: regions of a library drawn as dithered elevation, with their names](docs/images/terrain.webp)
 
-This repository holds the **prototype**: a Python pipeline plus a web viewer that
-runs on `localhost`. It proves the importers, the model and the views on real
-archives before the native macOS app is built. See [docs/SPEC.md](docs/SPEC.md)
-for the full product spec and roadmap.
+Topograph reads the data exports from the platforms you use, along with the screenshots,
+downloads and working files on your Mac. It keeps a local copy of what you posted, liked and
+saved, and maps it as terrain: things you keep coming back to rise into mountain ranges,
+passing interests stay foothills, and a timeline shows the landscape changing over the years.
 
-## 1. Request your exports
+There are no accounts and no telemetry, and your library stays on your Mac.
 
-They can take a day or two to arrive.
+The screenshots here are from a real library of about 54,000 items.
 
-| Platform | Where | Choose |
-|---|---|---|
-| Instagram | Accounts Center → Your information and permissions → Download your information | **JSON**, All time, High media quality |
-| X | Settings → Your account → Download an archive of your data | (one format) |
-| Facebook | Accounts Center → Your information and permissions → Download your information | **JSON**, All time, High media quality |
+## Status
 
-YouTube and Google (Takeout) are next on the roadmap.
+Topograph is early, and so far it has one user. There are two ways to run it:
 
-## 2. Install
+- **The Mac app** (`mac/`) has every view and runs the whole pipeline itself. It's where the
+  work is happening.
+- **The Python pipeline and web viewer** (`pipeline/`, `viewer/`) came first. They remain the
+  reference for the native pipeline, and they can run without the Mac app.
 
-Requires Python 3.10+. On a Mac with Apple silicon, CLIP runs on the GPU via Metal.
+Instagram, X and your own files have run on a real library. Facebook, YouTube, Google, Bluesky
+and Are.na have only been tested on small sample data so far.
 
-```sh
-git clone https://github.com/jbobrow/Topograph.git
-cd Topograph
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[clip,words,heif]"
-```
+[docs/SPEC.md](docs/SPEC.md) has the full product spec and roadmap.
 
-`ffmpeg` (e.g. `brew install ffmpeg`) is optional; with it, videos get a poster frame.
+## The views
 
-## 3. Build your map
+### Terrain
 
-```sh
-topograph import ~/Downloads/instagram-yourname-2026-11-06-*.zip   # all parts at once
-topograph import ~/Downloads/twitter-2026-11-06-*.zip
-topograph import ~/Downloads/facebook-yourname-*.zip
-topograph files ~/Desktop ~/Downloads --dry-run   # see what it would take from your folders
-topograph files ~/Desktop ~/Downloads             # then read them
-topograph import ~/Downloads/takeout-*.zip        # YouTube and Google searches (choose JSON)
-topograph sync bluesky your.handle                # or: sync arena your-username (public data, no login)
-topograph hydrate          # fetch images for liked/saved posts (slow and polite; resumable)
-topograph build            # embeddings + layout + region names (a new library gets the blended map)
-topograph build --map words  # build another map: blended, words or pictures
-topograph regions          # print the region tree and names
-topograph serve            # opens http://127.0.0.1:8732
-```
+Everything you've engaged with, placed by visual and semantic similarity. Elevation is how much
+it resonated, so a save outweighs a like. Zoom in and peaks resolve into images. Regions nest:
+zoomed out you see the broad ones, and as you zoom in their names give way to the regions inside
+them, with a bar at the top left showing where you are.
 
-`topograph stats` summarizes the library at any time. Re-importing a newer export
-only adds what's new.
+Things you made or posted are squares on the map, with solid frames on thumbnails. Things you
+kept are circles. Click a picture to float it in color above its place and open its details: your
+history with it, its region and its nearest neighbors in taste. For something you made, the panel
+also lists **tributaries**, the things you kept in the months before it that sit closest to it.
 
-Your own photos are dated by when they were taken, not when they reached your Mac. If you
-imported files before this was so, `topograph files --fix-dates` corrects them and adds nothing.
+![A zoomed-in Terrain showing only posts the owner made, with one post open in the side panel](docs/images/item.webp)
 
-A map is one way of arranging your items, and a library can keep several. **Blended**, the
-suggested one, reads pictures and words and draws your files in beside posts about the same
-thing. **Words** reads pictures and words without moving your files. **Pictures** is mostly how
-things look. Blended and words download a text model once (about 90 MB, from Hugging Face), and
-nothing of yours is sent. Your other commands act on the map built last.
+Click a region's name to see what's in it and when it was on your mind, or to export it as a
+moodboard. Images are gray by default, with **color** and **1-bit** modes, and they show in full
+color on hover.
 
-The library lives in `~/Library/Application Support/Topograph/` on a Mac (override
-with `--library PATH` or `TOPOGRAPH_LIBRARY`). It's one SQLite file plus a `media/`
-folder of optimized copies. Nothing is uploaded anywhere.
+### Strata
 
-## Your files
+Each region as a layer through time, drawn as a stream of dithered patterns. It answers "what was
+I into in 2019?"
 
-`topograph files` reads folders on your Mac in place (it stores previews, not copies)
-and keeps only what macOS says is yours: screenshots, downloads (with the address they
-came from), files you've opened, and working files like PSD, Sketch, Procreate, STL and
-video. It skips icons, assets inside code projects, saved web pages, files that are only
-in the cloud, PDFs, and anything in folders named like medical, ID, tax or banking.
+![Strata: regions stacked as patterned layers from 2007 to 2026](docs/images/strata.webp)
 
-Always start with `--dry-run`. It ends with a list of folders full of images that show
-no sign of being yours; leave out the ones that aren't your work with
-`--exclude ~/path/to/folder` (remembered for next time), or put a `.topographignore`
-file in a folder above it. It works like .gitignore: one path or pattern per line,
-relative to that folder, and `!` keeps one back:
+### Palette
 
-```
-# a mirrored class site: leave out everyone's page but mine
-863.14/people/*/
-!863.14/people/jonathan_bobrow/
-```
+Your taste with the subject matter stripped away. **Wheel** arranges everything by color and moves
+like the terrain. **Cylinder** stands the same pictures up, with hue around it, colorfulness out
+from its axis and light to dark from top to bottom. **Through time** is Strata's chart with bands
+of color for layers.
 
-Run `topograph files` again later with no folders to pick up what's new.
+![Palette: every item as a dot of color on a wheel](docs/images/palette.webp)
 
-On a Mac, install with the `xattr` package (included in the install line above).
+### Process
 
-## The viewer
+Near-duplicates of your own work, grouped into pieces and played in order, so you can watch one
+change from version to version.
 
-- **Terrain**: everything you've engaged with, placed by visual and semantic
-  similarity. Elevation is how much it resonated (a save outweighs a like). Zoom in
-  and peaks resolve into images. Regions nest: zoomed out you see the broad ones,
-  and as you zoom in their names give way to the regions inside them (the bar at
-  the top left shows where you are). Click a region name to see its contents and when
-  it was on your mind; click an image for its details, your history with it and its
-  nearest neighbors in taste.
-- **Strata**: each region as a layer through time (one level of the region tree,
-  about a dozen layers).
-- Things you made or posted are squares on the map (and solid frames on thumbnails);
-  things you kept are circles. Your own files have a **show in finder** key.
-- **color / gray / 1-bit** switches how images are drawn. 1-bit dithers them to
-  match the terrain.
-- **Time scrubber**: drag across the bar to watch the terrain for a period, or press
-  play to slide through the years.
+![Process: a drawing of a die, version 20 of 22, with a scrubber and playback controls](docs/images/process.webp)
 
-## The Mac app
+### Echoes and Drift
 
-The native app opens the library you built above and has every view: Terrain, Strata,
-Echoes, Palette, Drift, Process and Sources, with item and region panels, filters and
-the time scrubber. It needs macOS 14 or later and Xcode. The timeline's bars follow
-your filters, and with an item open, Strata marks where and when it sits.
+**Echoes** finds themes that came back after a gap, shown as then and now with the months of
+near-silence between them. **Drift** starts anywhere and shows an item with its nearest neighbors:
+pick one and keep walking, with your trail along the side.
+
+### Sources
+
+Where your history comes in, with no terminal: drop in archives or folders, fetch images for liked
+and saved posts, and sync Bluesky and Are.na. Nothing is added until you ask, and folders get a
+first look before anything is read. It's also where you build maps and switch between them.
+
+![Sources: a drop area, the map recipes and the status of each platform](docs/images/sources.webp)
+
+## Run the Mac app
+
+It needs macOS 14 or later and Xcode.
 
 ```bash
+git clone https://github.com/jbobrow/Topograph.git
+cd Topograph
 xcodebuild -downloadComponent MetalToolchain   # once, if Xcode doesn't have it yet
 open mac/Topograph.xcodeproj                   # then press Run
 ```
 
-It reads `~/Library/Application Support/Topograph/`, or the folder in
-`TOPOGRAPH_LIBRARY`, and only ever reads it: pipeline commands can keep running while
-it's open, and **Map → Reload Library** (⌘R) shows a new layout. Drag to draw a rectangle
-to zoom into, or hold space and drag to move the map (esc cancels a rectangle). Two
-fingers also move it, pinching zooms, and with a mouse the wheel zooms. While you're
-zoomed in, a minimap at the bottom left shows where you are: press or drag on it to go
-somewhere else. Hold ⌘, or rest on a key for a second, to see its shortcut. Space also pauses the timeline while it's playing.
+### The models
 
-Palette has three views. **Wheel** moves like the terrain. **Cylinder** stands the same
-pictures up, with hue around it, colorfulness out from its axis and light to dark from top
-to bottom: drag to turn it. **Through time** is Strata's chart with bands of color for layers.
-
-**Sources** adds your history, only when you ask, with no terminal and no Python: drop
-in archives or folders, fetch images for liked and saved posts, sync Bluesky and Are.na.
-Folders get a first look before anything is read. It's also where you build maps and
-switch between them. The Python pipeline below does the same work and remains the
-reference; it's also what writes `topograph.json` for the web viewer. Instagram refuses
-many public requests, so Sources offers to sign in to it, in a web view whose login page
-is Instagram's own.
-
-In **Strata**, scrolling zooms in and out around the pointer, and sideways scrolling or holding
-space and dragging moves along time. These change the time selected, the same one the timeline shows, so it also applies to the
-other views. **Selection** fits the canvas to it, with a small Strata of all of time as a minimap,
-and **all time** shows the whole timeline with that part shaded.
-
-Find matches words in captions and names. The **by meaning** key next to it finds what
-things are about, using CLIP on your Mac. CLIP (about 600 MB) also makes every map, and
-the blended and words maps need a text model (about 90 MB) too. They're too large for
-the repository, so make them once from the weights the pipeline already uses:
+The app needs CLIP (about 600 MB) to make any map or to search by meaning, and a text model (about
+90 MB) for the blended and pictures + words maps. They're too large for the repository and aren't
+bundled yet, so make them once from the same weights the pipeline uses. This is the one step that
+still needs Python:
 
 ```bash
 python3.13 -m venv /tmp/convert
@@ -161,47 +109,164 @@ python3.13 -m venv /tmp/convert
 /tmp/convert/bin/python mac/tools/convert_minilm.py
 ```
 
-They go in `~/Library/Application Support/Topograph/models/`. Your search stays on this
-Mac. Items only turn up once they have a vector, so anything hydrate has just changed
-waits until the map is next updated.
+They go in `~/Library/Application Support/Topograph/models/`.
 
-Naming regions with Claude is off until you turn it on
-with your own API key, and it says what it sends first.
+### Build your map
 
-## What to expect from each export
+1. Request your exports (below). They can take a day or two to arrive.
+2. Open **Sources** and drop them in, along with any folders you want to read.
+3. Fetch images for liked and saved posts. This is slow and polite, and you can stop and resume.
+4. Build a map.
+
+A map is one way of arranging your items, and a library can keep several:
+
+- **Blended**, the suggested one, reads pictures and words and draws your files in beside posts
+  about the same thing.
+- **Pictures + words** reads the same things and groups by subject, so your files tend to gather in
+  regions of their own.
+- **Pictures** is mostly how things look, with captions counted a little.
+
+### Finding your way around
+
+- Drag to draw a rectangle to zoom into, and press esc to cancel it. Hold space and drag to move the
+  map.
+- Two fingers also move it and pinching zooms. With a mouse, the wheel zooms.
+- While you're zoomed in, a minimap at the bottom left shows where you are. Press or drag on it to
+  go somewhere else.
+- Drag across the timeline to see a period, or press play to slide through the years. Space pauses
+  it. The time you select applies to every view that has the timeline.
+- In Strata, scrolling zooms around the pointer, and sideways scrolling or holding space and
+  dragging moves along time. **Selection** fits the canvas to the time selected, and **all time**
+  shows the whole timeline with that part shaded.
+- **Find** matches words in captions and names. The **by meaning** key next to it finds what things
+  are about, using CLIP on your Mac. Items only turn up once they have a vector, so anything just
+  fetched waits until the map is next updated.
+- Hold ⌘, or rest on a key for a second, to see its shortcut.
+- **Map → Reload Library** (⌘R) shows a new layout. Pipeline commands can keep running while the
+  app is open.
+
+## Request your exports
+
+| Platform | Where | Choose |
+|---|---|---|
+| Instagram | Accounts Center → Your information and permissions → Download your information | **JSON**, All time, High media quality |
+| X | Settings → Your account → Download an archive of your data | (one format) |
+| Facebook | Accounts Center → Your information and permissions → Download your information | **JSON**, All time, High media quality |
+| YouTube and Google | [Google Takeout](https://takeout.google.com): deselect everything, then select YouTube and YouTube Music and My Activity | **JSON** rather than HTML, for both |
+
+Bluesky and Are.na need no export. They read public data, with no login.
+
+### What to expect from each
 
 - **Your own posts** come with their images and captions, so they map immediately.
-- **Liked and saved posts** arrive as links only. `topograph hydrate` fetches their
-  images: for X it uses the public endpoint behind embedded tweets; for Instagram
-  it tries each post's public embed page. Instagram increasingly requires a login,
-  so expect some to stay unreachable. They still count in Strata as "not yet
-  mapped". The Mac app can fetch these through a web view signed in as you.
-- **X likes** carry no date in the archive. Topograph uses the post's own date as
-  an estimate and marks it as approximate.
+- **Liked and saved posts** arrive as links only, so their images have to be fetched. For X that
+  uses the public endpoint behind embedded tweets. For Instagram it tries each post's public embed
+  page. Instagram refuses many of those, so Sources offers to sign in, in a web view whose login
+  page is Instagram's own. Some posts will stay unreachable, and they still count in Strata as "not
+  yet mapped".
+- **X likes** carry no date in the archive. Topograph uses the post's own date as an estimate and
+  marks it as approximate.
+- **Google searches** show curiosity more than taste, so they start hidden on the terrain.
+
+## Your files
+
+Topograph reads folders on your Mac in place, stores previews rather than copies, and keeps only
+what macOS says is yours: screenshots, downloads (with the address they came from), files you've
+opened, and working files like PSD, Sketch, Procreate, STL and video. It skips icons, assets inside
+code projects, saved web pages, files that are only in the cloud, PDFs, and anything in folders
+named like medical, ID, tax or banking.
+
+Your own photos are dated by when they were taken, not when they reached your Mac.
+
+Always take the first look before reading a folder. It ends with a list of folders full of images
+that show no sign of being yours. Leave out the ones that aren't your work, or put a
+`.topographignore` file in a folder above them. It works like .gitignore: one path or pattern per
+line, relative to that folder, and `!` keeps one back:
+
+```
+# a mirrored class site: leave out everyone's page but mine
+863.14/people/*/
+!863.14/people/jonathan_bobrow/
+```
+
+## Privacy
+
+- Nothing leaves your Mac except requests to fetch content you already engaged with, at a human
+  pace, plus one-time downloads of model weights.
+- There's no telemetry and no account.
+- Instagram DMs are never read.
+- Naming regions with Claude is off until you turn it on with your own API key, and it says what
+  it sends first.
+
+The library lives in `~/Library/Application Support/Topograph/` (override with the
+`TOPOGRAPH_LIBRARY` environment variable). It's one SQLite file plus a `media/` folder of optimized
+copies.
+
+## The Python pipeline and web viewer
+
+This does the same work from a terminal and writes `topograph.json` for a web viewer on
+`localhost`, which has Terrain and Strata. It requires Python 3.10+, and on Apple silicon CLIP runs
+on the GPU via Metal. `ffmpeg` is optional (`brew install ffmpeg`); with it, videos get a poster
+frame.
+
+```sh
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[clip,words,heif]"
+```
+
+```sh
+topograph import ~/Downloads/instagram-yourname-2026-11-06-*.zip   # all parts at once
+topograph import ~/Downloads/twitter-2026-11-06-*.zip
+topograph import ~/Downloads/facebook-yourname-*.zip
+topograph import ~/Downloads/takeout-*.zip        # YouTube and Google searches
+topograph files ~/Desktop ~/Downloads --dry-run   # see what it would take from your folders
+topograph files ~/Desktop ~/Downloads             # then read them
+topograph sync bluesky your.handle                # or: sync arena your-username
+topograph hydrate          # fetch images for liked/saved posts (slow and polite; resumable)
+topograph build            # embeddings + layout + region names (a new library gets the blended map)
+topograph build --map words  # build another map: blended, words or pictures
+topograph regions          # print the region tree and names
+topograph serve            # opens http://127.0.0.1:8732
+```
+
+- `topograph stats` summarizes the library at any time. Re-importing a newer export only adds
+  what's new.
+- `--map words` is the map the app calls pictures + words. Blended and words download the text
+  model once (about 90 MB, from Hugging Face), and nothing of yours is sent. Other commands act on
+  the map built last.
+- `--library PATH` picks another library.
+- `topograph files` with no folders picks up what's new. `--exclude ~/path/to/folder` leaves one out
+  and is remembered for next time. `--fix-dates` corrects the dates of files imported earlier and
+  adds nothing.
 
 ## Development
 
 ```sh
 pip install -e ".[dev]"
-pytest
+python -m pytest -q tests                     # the lite embedder, so no model download
+swift test --package-path mac/TopographCore   # the Mac app's core
 ```
 
-Tests build small exports in both Instagram record formats (including its
-mis-encoded emoji) and an X archive with split files, then run the whole pipeline
-with the `lite` embedder (no model download).
+The Python tests build small exports in both Instagram record formats (including its mis-encoded
+emoji) and an X archive with split files, then run the whole pipeline.
 
 ```
+mac/
+  TopographCore/  Swift package with no UI: the library, map data and native pipeline
+  Topograph/      SwiftUI shell and Metal canvas
+  tools/          the app icon, model conversion, and comparing a library against Python's
 pipeline/topograph/
-  importers/   x.py, instagram.py, facebook.py: export parsers
-               files.py: your own folders, read in place
-  db.py        library schema (shared with the future native app)
-  media.py     display copies, thumbnails, palettes, perceptual hashes
-  hydrate.py   fetch media for links
-  embed.py     CLIP (or lite) embeddings
-  layout.py    UMAP map, HDBSCAN regions
-  regions.py   nesting regions and naming them
-  concepts.txt vocabulary for region names (edit freely)
-  export.py    viewer data + local server
-viewer/        static web viewer (d3 and IBM Plex fonts, bundled; Plex is under the SIL OFL)
-docs/SPEC.md   product spec
+  importers/      platform export parsers, plus your own folders read in place
+  db.py           library schema
+  media.py        display copies, thumbnails, palettes, perceptual hashes
+  sync.py         Bluesky and Are.na
+  hydrate.py      fetch media for links
+  embed.py        CLIP (or lite) embeddings, and the text model
+  maps.py         the recipe for each map
+  layout.py       UMAP map, HDBSCAN regions
+  regions.py      nesting regions and naming them
+  concepts.txt    vocabulary for region names (edit freely)
+  export.py       viewer data + local server
+viewer/           static web viewer (d3 and IBM Plex fonts, bundled; Plex is under the SIL OFL)
+docs/SPEC.md      product spec
 ```
