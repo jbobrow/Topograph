@@ -147,6 +147,7 @@ struct Thumb {
     float mode;     // 0 color, 1 gray or 1-bit (both follow the theme's ramp)
     float has_image;
     float nearest;
+    float depth;    // Metal's depth, for 3D; 0 on the flat map
 };
 
 struct ThumbVarying {
@@ -159,7 +160,7 @@ vertex ThumbVarying thumbVertex(uint vid [[vertex_id]], constant Uniforms &u [[b
     float2 corner = float2(vid & 1, (vid >> 1) & 1) * 2 - 1;
     float2 local = corner * (t.half_size + t.frame);
     float2 clip = (t.center + local) / u.drawable * 2 - 1;
-    return { float4(clip.x, -clip.y, 0, 1), local };
+    return { float4(clip.x, -clip.y, t.depth, 1), local };
 }
 
 fragment float4 thumbFragment(ThumbVarying in [[stage_in]], constant Uniforms &u [[buffer(0)]],
@@ -293,4 +294,124 @@ vertex PaletteLineVarying paletteLineVertex(uint vid [[vertex_id]], uint iid [[i
 
 fragment float4 paletteLineFragment(PaletteLineVarying in [[stage_in]], constant Uniforms &u [[buffer(0)]]) {
     return float4(u.ink.rgb * in.alpha, in.alpha);
+}
+
+// The terrain in 3D: the elevation field stood up as a mesh, one vertex per cell, over a
+// level ground plane that runs out to the horizon. Its shading is the flat map's, the same
+// dither in whole screen points and the same contour lines, with light from the northwest
+// adding to the dither on slopes that face away. Fog thins it all out with distance.
+
+// Keep in step with `ReliefUniforms` in TerrainRenderer.swift.
+struct Relief {
+    float4x4 viewProjection;
+    float4 eye;
+    float4 sun;          // toward the light
+    float height;        // map units at elevation 1, as far as the relief has risen
+    float exponent;
+    float fogNear;       // map units from the eye
+    float fogFar;
+    float focal;         // points per map unit at a depth of one map unit
+    float thumbnailZoom; // seen this close, a marker is a plain dot, as the flat map does
+    float dotRadius;
+    float gridStep;      // map units between the ground's rules
+    uint side;           // mesh vertices per row
+    float extent;        // half the ground plane's width
+    float2 center;       // the ground plane's middle, on the map
+};
+
+struct ReliefVarying {
+    float4 position [[position]];
+    float2 map;
+    float3 world;
+};
+
+static float3 surface(texture2d<float, access::read> field, constant Uniforms &u, constant Relief &r, float2 map) {
+    Elevation e = sampleField(field, (map + u.origin) / u.cell - 0.5);
+    return float3(map.x, r.height * pow(max(e.value, 0.0), r.exponent), map.y);
+}
+
+vertex ReliefVarying reliefVertex(uint vid [[vertex_id]], constant Uniforms &u [[buffer(0)]],
+                                  constant Relief &r [[buffer(1)]], texture2d<float, access::read> field [[texture(0)]]) {
+    float2 map = (float2(vid % r.side, vid / r.side) + 0.5) * u.cell - u.origin;
+    float3 world = surface(field, u, r, map);
+    return { r.viewProjection * float4(world, 1), map, world };
+}
+
+vertex ReliefVarying groundVertex(uint vid [[vertex_id]], constant Relief &r [[buffer(1)]]) {
+    float2 corner = float2(vid & 1, (vid >> 1) & 1) * 2 - 1;
+    float2 map = r.center + corner * r.extent;
+    // Just under the mesh, whose edges come down to zero.
+    float3 world = float3(map.x, -0.4, map.y);
+    return { r.viewProjection * float4(world, 1), map, world };
+}
+
+fragment float4 reliefFragment(ReliefVarying in [[stage_in]],
+                               constant Uniforms &u [[buffer(0)]],
+                               constant float *thresholds [[buffer(1)]],
+                               constant float *dither [[buffer(2)]],
+                               constant float *bayer [[buffer(3)]],
+                               constant uint &levels [[buffer(4)]],
+                               constant Relief &r [[buffer(5)]],
+                               texture2d<float, access::read> field [[texture(0)]]) {
+    float2 point = in.position.xy / u.scale;
+    float3 color = u.ground.rgb;
+    float distance = length(in.world - r.eye.xyz);
+    float clear = 1 - saturate((distance - r.fogNear) / max(r.fogFar - r.fogNear, 1.0));
+
+    // The ground's rules, fading out before they'd crowd into moiré.
+    float2 across = fwidth(in.map);
+    float2 off = abs(fract(in.map / r.gridStep + 0.5) - 0.5) * r.gridStep / max(across, 1e-5);
+    float rule = saturate(0.75 - min(off.x, off.y)) * saturate(1.5 - max(across.x, across.y) * 8 / r.gridStep);
+    color = mix(color, u.hair.rgb, rule * clear);
+
+    Elevation e = sampleField(field, (in.map + u.origin) / u.cell - 0.5);
+    float value = max(e.value, 0.0);
+
+    // The slope of the height, for the light: h = height * value^exponent.
+    float rate = value > 1e-3 ? r.height * r.exponent * pow(value, r.exponent - 1) : 0;
+    float2 grad = clamp(rate * e.slope / u.cell, -8.0, 8.0);
+    float3 normal = normalize(float3(-grad.x, 1, -grad.y));
+    float shade = (r.sun.y - saturate(dot(normal, r.sun.xyz))) * 0.8;
+
+    int band = -1;
+    for (uint i = 0; i < levels; i++) {
+        if (value >= thresholds[i]) band = i;
+    }
+    float density = (band >= 0 ? dither[band] : 0.0) + (value > 0.004 ? shade : 0.0);
+    // Capped, as the flat map's is, so pictures and names stay readable on the shadowed side.
+    density = clamp(density, 0.0, 0.6) * clear;
+    uint2 dot = uint2(point) % 8;
+    if (bayer[dot.y * 8 + dot.x] < density * 64) color = u.ink.rgb;
+
+    // Contour lines a constant width on screen, however steeply they're seen.
+    float step = max(fwidth(value), 1e-7);
+    for (uint i = 0; i < levels; i++) {
+        bool index = i % 4 == 3;
+        float half_width = (index ? 1.1 : 0.5) * u.scale / 2;
+        float coverage = saturate(half_width + 0.5 - abs(value - thresholds[i]) / step);
+        color = mix(color, u.ink.rgb, coverage * (index ? 0.9 : 0.45) * clear);
+    }
+    return float4(color, 1);
+}
+
+// Markers standing on the relief: drawn a little toward the eye so the ground doesn't swallow
+// them, sized by how near they are, and plain dots near enough for pictures, as on the flat map.
+vertex MarkerVarying reliefMarkerVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
+                                        constant Uniforms &u [[buffer(0)]],
+                                        constant Marker *markers [[buffer(1)]],
+                                        constant Relief &r [[buffer(2)]],
+                                        texture2d<float, access::read> field [[texture(0)]]) {
+    Marker m = markers[iid];
+    float3 world = surface(field, u, r, m.position);
+    world += normalize(r.eye.xyz - world) * 1.5;
+    float4 clip = r.viewProjection * float4(world, 1);
+    if (clip.w <= 0) return { float4(2, 2, 2, 1), float2(0), 0, 0 };
+    float k = r.focal / clip.w;
+    // Smaller than on the flat map, and shrinking faster with distance: seen at a slant and far
+    // off, many more items share each point of the screen, and at full size they'd ink it solid.
+    float radius = (k >= r.thumbnailZoom ? r.dotRadius * 0.7 : m.base * sqrt(k) * min(1.0, sqrt(k / r.thumbnailZoom)) * 0.8) * u.scale;
+    float reach = radius + 1.0 * u.scale + 1.0;
+    float2 corner = float2(vid & 1, (vid >> 1) & 1) * 2 - 1;
+    clip.xy += corner * reach / u.drawable * 2 * clip.w;
+    return { clip, corner * reach, radius, m.mine };
 }

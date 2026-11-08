@@ -59,7 +59,7 @@ private struct DotDraw {
 }
 
 /// One guide line; keep in step with `PaletteLine` in Terrain.metal.
-private struct LineDraw {
+struct LineDraw {
     var from: SIMD2<Float>
     var to: SIMD2<Float>
     var width: Float

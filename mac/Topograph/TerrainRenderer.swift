@@ -69,6 +69,8 @@ struct ThumbDraw {
     var mode: Float
     var hasImage: Float
     var nearest: Float
+    /// Metal's depth, for a picture standing in 3D.
+    var depth: Float = 0
 }
 
 struct Bar {
@@ -92,6 +94,8 @@ struct ThumbPlacement {
     let mode: ImageMode
     /// Drawn larger than its pixels, in 1-bit: keep the dots square.
     let nearest: Bool
+    /// Metal's depth where it stands, in 3D, so the ground in front of it hides it.
+    var depth: Float = 0
 }
 
 /// One region name to draw this frame.
@@ -100,6 +104,8 @@ struct LabelPlacement {
     let size: CGSize
     let texture: MTLTexture
     let alpha: Double
+    /// The region it names.
+    var region: Int? = nil
 }
 
 /// The open item's picture, lifted off the map or the wheel and drifting above its place, so
@@ -155,6 +161,34 @@ struct TerrainOverlay {
     /// The rectangle being drawn to zoom into, in points.
     var zoomBox: CGRect?
     var labels: [LabelPlacement] = []
+    /// In 3D, the rules from each name down to the ground it names, in points.
+    var stems: [(from: CGPoint, to: CGPoint, alpha: Double)] = []
+}
+
+/// Keep in step with `Relief` in Terrain.metal.
+private struct ReliefUniforms {
+    var viewProjection: simd_float4x4
+    var eye: SIMD4<Float>
+    var sun: SIMD4<Float>
+    var height: Float
+    var exponent: Float
+    var fogNear: Float
+    var fogFar: Float
+    var focal: Float
+    var thumbnailZoom: Float
+    var dotRadius: Float
+    var gridStep: Float
+    var side: UInt32
+    var extent: Float
+    var center: SIMD2<Float>
+}
+
+/// The terrain seen in 3D this frame.
+struct ReliefFrame {
+    let camera: OrbitCamera
+    let projection: Projection
+    /// How far the relief has risen out of the flat map, 0 to 1.
+    let rise: Float
 }
 
 /// Draws the terrain with one full-view pass, an instanced pass of markers, and then
@@ -168,7 +202,19 @@ final class TerrainRenderer {
     private let thumbPipeline: MTLRenderPipelineState
     private let barPipeline: MTLRenderPipelineState
     private let labelPipeline: MTLRenderPipelineState
+    private let reliefPipeline: MTLRenderPipelineState
+    private let groundPipeline: MTLRenderPipelineState
+    private let reliefMarkerPipeline: MTLRenderPipelineState
+    private let linePipeline: MTLRenderPipelineState
+    /// Depth for the relief: tested and written by the ground, only tested by what stands on
+    /// it, and ignored by everything on top.
+    private let solid: MTLDepthStencilState
+    private let standing: MTLDepthStencilState
+    private let flat: MTLDepthStencilState
     private var field: MTLTexture?
+    /// The relief's triangles, two to a cell of the field.
+    private var mesh: MTLBuffer?
+    private var meshCount = 0
     private var markers: MTLBuffer?
     private var markerCount = 0
 
@@ -184,6 +230,7 @@ final class TerrainRenderer {
             let descriptor = MTLRenderPipelineDescriptor()
             descriptor.vertexFunction = library.makeFunction(name: vertex)
             descriptor.fragmentFunction = library.makeFunction(name: fragment)
+            descriptor.depthAttachmentPixelFormat = view.depthStencilPixelFormat
             let color = descriptor.colorAttachments[0]!
             color.pixelFormat = view.colorPixelFormat
             if blended {
@@ -200,6 +247,21 @@ final class TerrainRenderer {
         thumbPipeline = try pipeline("thumbVertex", "thumbFragment", blended: false)
         barPipeline = try pipeline("barVertex", "barFragment", blended: false)
         labelPipeline = try pipeline("labelVertex", "labelFragment", blended: true)
+        reliefPipeline = try pipeline("reliefVertex", "reliefFragment", blended: false)
+        groundPipeline = try pipeline("groundVertex", "reliefFragment", blended: false)
+        reliefMarkerPipeline = try pipeline("reliefMarkerVertex", "markerFragment", blended: true)
+        linePipeline = try pipeline("paletteLineVertex", "paletteLineFragment", blended: true)
+
+        func depth(_ compare: MTLCompareFunction, write: Bool) throws -> MTLDepthStencilState {
+            let descriptor = MTLDepthStencilDescriptor()
+            descriptor.depthCompareFunction = compare
+            descriptor.isDepthWriteEnabled = write
+            guard let state = device.makeDepthStencilState(descriptor: descriptor) else { throw RendererError.unavailable }
+            return state
+        }
+        solid = try depth(.less, write: true)
+        standing = try depth(.lessEqual, write: false)
+        flat = try depth(.always, write: false)
     }
 
     func setScene(_ scene: TerrainScene?) {
@@ -215,6 +277,7 @@ final class TerrainRenderer {
                 pixelFormat: .r32Float, width: scene.field.width, height: scene.field.height, mipmapped: false)
             descriptor.usage = .shaderRead
             field = device.makeTexture(descriptor: descriptor)
+            makeMesh(width: scene.field.width, height: scene.field.height)
         }
         scene.field.elevation.withUnsafeBytes { bytes in
             field?.replace(region: MTLRegionMake2D(0, 0, scene.field.width, scene.field.height),
@@ -232,7 +295,20 @@ final class TerrainRenderer {
         markerCount = instances.count
     }
 
-    func draw(in view: MTKView, transform: MapTransform, theme: Theme, overlay: TerrainOverlay) {
+    private func makeMesh(width: Int, height: Int) {
+        var indices: [UInt32] = []
+        indices.reserveCapacity((width - 1) * (height - 1) * 6)
+        for j in 0..<(height - 1) {
+            for i in 0..<(width - 1) {
+                let a = UInt32(j * width + i), b = a + 1, c = a + UInt32(width), d = c + 1
+                indices += [a, c, b, b, c, d]
+            }
+        }
+        mesh = device.makeBuffer(bytes: indices, length: indices.count * MemoryLayout<UInt32>.stride)
+        meshCount = indices.count
+    }
+
+    func draw(in view: MTKView, transform: MapTransform, theme: Theme, overlay: TerrainOverlay, relief: ReliefFrame? = nil) {
         guard let pass = view.currentRenderPassDescriptor, let drawable = view.currentDrawable,
               let commands = queue.makeCommandBuffer() else { return }
         let ground = theme.ground.simd
@@ -248,10 +324,13 @@ final class TerrainRenderer {
                                 translate: SIMD2(Float(transform.x), Float(transform.y)),
                                 scale: scale, k: Float(transform.k),
                                 origin: Float(DensityField.origin), cell: Float(DensityField.cellSize),
-                                dotRadius: overlay.dots ? TerrainStyle.dotRadius : 0)
+                                // In 3D, markers are sized by their depth, and go without outlines, which crowd at a distance.
+                                dotRadius: overlay.dots || relief != nil ? TerrainStyle.dotRadius : 0)
         let uniformLength = MemoryLayout<Uniforms>.stride
 
-        if let field {
+        if let relief {
+            drawRelief(relief, encoder: encoder, uniforms: &uniforms)
+        } else if let field {
             var levels = UInt32(TerrainStyle.levels)
             encoder.setRenderPipelineState(terrainPipeline)
             encoder.setFragmentBytes(&uniforms, length: uniformLength, index: 0)
@@ -263,7 +342,7 @@ final class TerrainRenderer {
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         }
 
-        if let markers, markerCount > 0 {
+        if relief == nil, let markers, markerCount > 0 {
             encoder.setRenderPipelineState(markerPipeline)
             encoder.setVertexBytes(&uniforms, length: uniformLength, index: 0)
             encoder.setVertexBuffer(markers, offset: 0, index: 1)
@@ -272,6 +351,7 @@ final class TerrainRenderer {
         }
 
         if !overlay.thumbs.isEmpty {
+            if relief != nil { encoder.setDepthStencilState(standing) }
             encoder.setRenderPipelineState(thumbPipeline)
             encoder.setVertexBytes(&uniforms, length: uniformLength, index: 0)
             encoder.setFragmentBytes(&uniforms, length: uniformLength, index: 0)
@@ -282,12 +362,27 @@ final class TerrainRenderer {
                                      mine: thumb.mine ? 1 : 0,
                                      mode: thumb.mode == .color ? 0 : 1,
                                      hasImage: thumb.texture == nil ? 0 : 1,
-                                     nearest: thumb.nearest ? 1 : 0)
+                                     nearest: thumb.nearest ? 1 : 0,
+                                     depth: thumb.depth)
                 encoder.setVertexBytes(&data, length: MemoryLayout<ThumbDraw>.stride, index: 1)
                 encoder.setFragmentBytes(&data, length: MemoryLayout<ThumbDraw>.stride, index: 1)
                 encoder.setFragmentTexture(thumb.texture, index: 0)
                 encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
             }
+        }
+        // Everything from here floats above the ground, the names like clouds.
+        encoder.setDepthStencilState(flat)
+
+        if !overlay.stems.isEmpty {
+            let lines = overlay.stems.map {
+                LineDraw(from: SIMD2(Float($0.from.x), Float($0.from.y)) * scale, to: SIMD2(Float($0.to.x), Float($0.to.y)) * scale,
+                         width: scale, alpha: 0.55 * Float($0.alpha))
+            }
+            encoder.setRenderPipelineState(linePipeline)
+            encoder.setVertexBytes(&uniforms, length: uniformLength, index: 0)
+            lines.withUnsafeBytes { encoder.setVertexBytes($0.baseAddress!, length: $0.count, index: 1) }
+            encoder.setFragmentBytes(&uniforms, length: uniformLength, index: 0)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: lines.count)
         }
 
         if let finder = overlay.viewfinder {
@@ -352,6 +447,50 @@ final class TerrainRenderer {
         encoder.endEncoding()
         commands.present(drawable)
         commands.commit()
+    }
+
+    /// The ground plane, the relief over it, and the markers standing on it.
+    private func drawRelief(_ relief: ReliefFrame, encoder: MTLRenderCommandEncoder, uniforms: inout Uniforms) {
+        guard let field, let mesh else { return }
+        let camera = relief.camera, projection = relief.projection
+        let sun = simd_normalize(SIMD3<Float>(-0.55, 0.75, -0.45))
+        let extent = Float(projection.far * 0.9)
+        var r = ReliefUniforms(viewProjection: projection.viewProjection,
+                               eye: SIMD4(projection.eye, 1), sun: SIMD4(sun, 0),
+                               height: Relief.height * relief.rise, exponent: Relief.exponent,
+                               fogNear: Float(camera.distance * 1.2), fogFar: Float(camera.distance * 3 + 400),
+                               focal: Float(projection.focal), thumbnailZoom: Float(TerrainStyle.thumbnailZoom),
+                               dotRadius: TerrainStyle.dotRadius, gridStep: 100, side: UInt32(field.width),
+                               extent: extent, center: SIMD2(Float(camera.x), Float(camera.y)))
+        let length = MemoryLayout<ReliefUniforms>.stride
+        let uniformLength = MemoryLayout<Uniforms>.stride
+        var levels = UInt32(TerrainStyle.levels)
+
+        encoder.setDepthStencilState(solid)
+        encoder.setVertexBytes(&uniforms, length: uniformLength, index: 0)
+        encoder.setVertexBytes(&r, length: length, index: 1)
+        encoder.setVertexTexture(field, index: 0)
+        encoder.setFragmentBytes(&uniforms, length: uniformLength, index: 0)
+        setBytes(TerrainStyle.thresholds, encoder, index: 1)
+        setBytes(TerrainStyle.ditherDensity, encoder, index: 2)
+        setBytes(TerrainStyle.bayer, encoder, index: 3)
+        encoder.setFragmentBytes(&levels, length: MemoryLayout<UInt32>.stride, index: 4)
+        encoder.setFragmentBytes(&r, length: length, index: 5)
+        encoder.setFragmentTexture(field, index: 0)
+
+        encoder.setRenderPipelineState(groundPipeline)
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        encoder.setRenderPipelineState(reliefPipeline)
+        encoder.drawIndexedPrimitives(type: .triangle, indexCount: meshCount, indexType: .uint32, indexBuffer: mesh, indexBufferOffset: 0)
+
+        if let markers, markerCount > 0 {
+            encoder.setDepthStencilState(standing)
+            encoder.setRenderPipelineState(reliefMarkerPipeline)
+            encoder.setVertexBuffer(markers, offset: 0, index: 1)
+            encoder.setVertexBytes(&r, length: length, index: 2)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: markerCount)
+        }
+        encoder.setDepthStencilState(flat)
     }
 
     /// Four sides, one point wide, in pixels.

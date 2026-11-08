@@ -55,6 +55,10 @@ final class AppModel {
     private(set) var mapImageMode: ImageMode {
         didSet { UserDefaults.standard.set(mapImageMode.rawValue, forKey: "imageMode") }
     }
+    /// The terrain stood up in 3D, to fly over. Off unless you've turned it on.
+    var showsRelief = UserDefaults.standard.bool(forKey: "terrainRelief") {
+        didSet { UserDefaults.standard.set(showsRelief, forKey: "terrainRelief") }
+    }
     /// Palette keeps its own, in color unless you've changed it, since color is its subject.
     private var paletteImageMode: ImageMode {
         didSet { UserDefaults.standard.set(paletteImageMode.rawValue, forKey: "paletteImageMode") }
