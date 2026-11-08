@@ -145,7 +145,7 @@ public struct Hydrator: Sendable {
                 tags[page[key].lowercased()] = unescape(String(page[value]))
             }
         }
-        guard let image = tags["image"], !image.isEmpty else { return nil }
+        guard let image = tags["image"], !image.isEmpty, !isInstagramsOwn(image) else { return nil }
         var text: String?, author: String?
         if let about = [tags["description"], tags["title"]].compactMap({ $0?.isEmpty == false ? $0 : nil }).first {
             if let groups = PipelineText.firstGroups(description, about) {
@@ -156,6 +156,33 @@ public struct Hydrator: Sendable {
             }
         }
         return Found(text: text, author: author, createdAt: nil, media: [.init(url: image, video: tags["type"] == "video")])
+    }
+
+    /// Instagram's own pictures, its logo among them, come from rsrc.php. A post page that offers
+    /// one is the sign-in page Instagram shows in place of a post it won't give out.
+    static func isInstagramsOwn(_ image: String) -> Bool { image.contains("/rsrc.php/") }
+
+    /// Posts saved with Instagram's logo for a picture, before its sign-in page was recognized,
+    /// go back to waiting: they were never really fetched. Returns how many.
+    @discardableResult
+    public static func forgetSignInPages(library: LibraryWriter) throws -> Int {
+        try library.db.write { db in
+            let ids = try String.fetchAll(db, sql: """
+                select distinct media.item_id from media join item on item.id = media.item_id
+                where item.platform = 'instagram' and media.original_url like '%/rsrc.php/%'
+                """)
+            for id in ids {
+                for table in ["media", "embedding", "layout"] {
+                    try db.execute(sql: "delete from \(table) where item_id = ?", arguments: [id])
+                }
+                // "Instagram" was the page's title, not the post's caption.
+                try db.execute(sql: """
+                    update item set hydrated = 0, hydrate_attempts = 0, text = nullif(text, 'Instagram'),
+                    kind = case when coalesce(nullif(text, 'Instagram'), '') = '' then 'link' else 'text' end where id = ?
+                    """, arguments: [id])
+            }
+            return ids.count
+        }
     }
 
     private func hydrateInstagram(url: String?) throws -> Found? {
@@ -242,6 +269,10 @@ public struct Hydrator: Sendable {
     /// posts already given up on instead, which stay given up on unless they're found.
     public func hydrate(library: LibraryWriter, platforms: Set<String>? = nil, limit: Int? = nil, retryingUnreachable: Bool = false, reporter: PipelineReporter) throws -> Stats {
         var stats = Stats()
+        let forgotten = try Self.forgetSignInPages(library: library)
+        if forgotten > 0 {
+            reporter.say("\(forgotten.formatted()) Instagram posts had Instagram’s logo for a picture, so they’ll be fetched again.")
+        }
         let chosen = retryingUnreachable ? "hydrated = -1" : "hydrated = 0 and hydrate_attempts < \(Self.maxAttempts)"
         var rows = try library.db.read { db in
             try Row.fetchAll(db, sql: """

@@ -151,10 +151,34 @@ def parse_instagram_embed(page: str) -> dict | None:
             "media": [{"url": html.unescape(m.group(1)), "video": False}]}
 
 
+def is_instagrams_own(image: str) -> bool:
+    """Instagram's own pictures, its logo among them, come from rsrc.php. A post page that offers
+    one is the sign-in page Instagram shows in place of a post it won't give out."""
+    return "/rsrc.php/" in image
+
+
+def forget_sign_in_pages(lib) -> int:
+    """Posts saved with Instagram's logo for a picture, before its sign-in page was recognized,
+    go back to waiting: they were never really fetched. Returns how many."""
+    c = lib.conn
+    ids = [r[0] for r in c.execute(
+        "select distinct media.item_id from media join item on item.id = media.item_id "
+        "where item.platform = 'instagram' and media.original_url like '%/rsrc.php/%'")]
+    for item_id in ids:
+        for table in ("media", "embedding", "layout"):
+            c.execute(f"delete from {table} where item_id=?", (item_id,))
+        # "Instagram" was the page's title, not the post's caption.
+        c.execute("update item set hydrated=0, hydrate_attempts=0, text=nullif(text, 'Instagram'), "
+                  "kind=case when coalesce(nullif(text, 'Instagram'), '') = '' then 'link' else 'text' end "
+                  "where id=?", (item_id,))
+    c.commit()
+    return len(ids)
+
+
 def parse_instagram_og(page: str) -> dict | None:
     og = parse_og(page)
     img = og.get("image")
-    if not img:
+    if not img or is_instagrams_own(img):
         return None
     text, author = None, None
     desc = og.get("description") or og.get("title")
@@ -236,6 +260,9 @@ HYDRATORS = {"x": hydrate_x, "instagram": hydrate_instagram, "youtube": hydrate_
 def hydrate(lib, limit: int | None = None, delay: float = 1.5, platforms=None, log=print,
             progress=None) -> dict:
     stats = {"hydrated": 0, "to_retry": 0, "unreachable": 0, "skipped": 0, "media": 0}
+    forgotten = forget_sign_in_pages(lib)
+    if forgotten:
+        log(f"{forgotten:,} Instagram posts had Instagram's logo for a picture, so they'll be fetched again.")
     # Posts not tried yet come first, newest first, then the ones that have failed: most of those
     # are gone, and thousands of them could otherwise stand in front of posts that are still there.
     q = ("select * from item where hydrated=0 and hydrate_attempts<? "

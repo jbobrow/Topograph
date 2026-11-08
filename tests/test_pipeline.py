@@ -117,6 +117,9 @@ def test_instagram_page_parsers():
     assert out["media"][0]["url"] == "https://cdn/b.jpg" and out["author"] == "architect_c"
     assert "Concrete stairs" in out["text"]
     assert parse_instagram_og("<html>login</html>") is None
+    sign_in = ('<meta property="og:title" content="Instagram" />'
+               '<meta property="og:image" content="https://static.cdninstagram.com/rsrc.php/v4/yD/r/R0fBIMurK8v.png" />')
+    assert parse_instagram_og(sign_in) is None, "Instagram's sign-in page isn't the post"
 
 
 # --- end to end ---------------------------------------------------------------------

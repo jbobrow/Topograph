@@ -437,6 +437,40 @@ final class HydratorTests: XCTestCase {
         XCTAssertEqual(page.author, "architect_c")
         XCTAssertTrue(page.text?.contains("Concrete stairs") == true)
         XCTAssertNil(Hydrator.parseInstagramOpenGraph("<html>login</html>"))
+        let signIn = #"<meta property="og:title" content="Instagram" /><meta property="og:image" content="https://static.cdninstagram.com/rsrc.php/v4/yD/r/R0fBIMurK8v.png" />"#
+        XCTAssertNil(Hydrator.parseInstagramOpenGraph(signIn), "Instagram's sign-in page isn't the post")
+    }
+
+    func testPostsSavedWithInstagramsLogoGoBackToWaiting() throws {
+        let library = try LibraryWriter(root: try neutralFolder())
+        for code in ["walled", "real"] {
+            try library.upsert(ImportRecord(id: "ig:\(code)", platform: "instagram", kind: "link", url: "https://www.instagram.com/p/\(code)/",
+                                            interactions: [ImportInteraction(type: "like", at: 1)]))
+        }
+        // How a post the sign-in page stood in for was stored, and a post that was really fetched.
+        try library.db.write { db in
+            for (id, text, image) in [("ig:walled", "Instagram", "https://static.cdninstagram.com/rsrc.php/v4/yD/r/R0fBIMurK8v.png"),
+                                      ("ig:real", "Concrete stairs", "https://scontent.cdninstagram.com/b.jpg")] {
+                try db.execute(sql: "update item set hydrated = 1, kind = 'image', text = ? where id = ?", arguments: [text, id])
+                try db.execute(sql: "insert into media(item_id, ord, original_url, status) values (?, 0, ?, 'ok')", arguments: [id, image])
+                try db.execute(sql: "insert into embedding(item_id, model, vector) values (?, 'clip-vit-b-32', x'00')", arguments: [id])
+                try db.execute(sql: "insert into layout(item_id, model, x, y, cluster) values (?, 'clip-vit-b-32', 1, 1, 0)", arguments: [id])
+            }
+        }
+        XCTAssertEqual(try Hydrator.forgetSignInPages(library: library), 1)
+        try library.db.read { db in
+            let walled = try XCTUnwrap(Row.fetchOne(db, sql: "select hydrated, hydrate_attempts, kind, text from item where id = 'ig:walled'"))
+            XCTAssertEqual(walled[0] as Int, 0)
+            XCTAssertEqual(walled[1] as Int, 0)
+            XCTAssertEqual(walled[2] as String, "link")
+            XCTAssertNil(walled[3] as String?)
+            for table in ["media", "embedding", "layout"] {
+                XCTAssertEqual(try Int.fetchOne(db, sql: "select count(*) from \(table) where item_id = 'ig:walled'"), 0, table)
+                XCTAssertEqual(try Int.fetchOne(db, sql: "select count(*) from \(table) where item_id = 'ig:real'"), 1, table)
+            }
+            XCTAssertEqual(try String.fetchOne(db, sql: "select text from item where id = 'ig:real'"), "Concrete stairs")
+        }
+        XCTAssertEqual(try Hydrator.forgetSignInPages(library: library), 0)
     }
 
     private func library() throws -> LibraryWriter {

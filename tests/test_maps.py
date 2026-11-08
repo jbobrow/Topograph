@@ -172,6 +172,31 @@ def test_hydrate_tries_posts_it_has_not_tried_before_ones_that_failed(tmp_path, 
     lib.close()
 
 
+def test_posts_saved_with_instagrams_logo_go_back_to_waiting(tmp_path):
+    from topograph import hydrate as hydrate_mod
+    lib = Library(tmp_path / "lib")
+    c = lib.conn
+    # How a post the sign-in page stood in for was stored, and a post that was really fetched.
+    for item_id, text, image in (
+            ("ig:walled", "Instagram", "https://static.cdninstagram.com/rsrc.php/v4/yD/r/R0fBIMurK8v.png"),
+            ("ig:real", "Concrete stairs", "https://scontent.cdninstagram.com/b.jpg")):
+        c.execute("insert into item(id, platform, kind, text, hydrated) values (?, 'instagram', 'image', ?, 1)",
+                  (item_id, text))
+        c.execute("insert into media(item_id, ord, original_url, status) values (?, 0, ?, 'ok')", (item_id, image))
+        c.execute("insert into embedding(item_id, model, vector) values (?, 'clip-vit-b-32', x'00')", (item_id,))
+        c.execute("insert into layout(item_id, model, x, y, cluster) values (?, 'clip-vit-b-32', 1, 1, 0)", (item_id,))
+    c.commit()
+    assert hydrate_mod.forget_sign_in_pages(lib) == 1
+    walled = c.execute("select hydrated, hydrate_attempts, kind, text from item where id='ig:walled'").fetchone()
+    assert tuple(walled) == (0, 0, "link", None)
+    for table in ("media", "embedding", "layout"):
+        counts = dict(c.execute(f"select item_id, count(*) from {table} group by item_id").fetchall())
+        assert counts == {"ig:real": 1}, table
+    assert c.execute("select text from item where id='ig:real'").fetchone()[0] == "Concrete stairs"
+    assert hydrate_mod.forget_sign_in_pages(lib) == 0
+    lib.close()
+
+
 def test_a_tool_waits_for_another_one_to_finish_writing(tmp_path):
     lib = Library(tmp_path / "lib")
     assert lib.conn.execute("pragma busy_timeout").fetchone()[0] == 120_000
