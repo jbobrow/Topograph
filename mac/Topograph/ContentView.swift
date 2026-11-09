@@ -157,10 +157,11 @@ private struct MapChrome: View {
 
             VStack(alignment: .trailing, spacing: 4) {
                 Spacer()
-                Button("3d") { model.showsRelief.toggle() }
-                    .buttonStyle(KeyStyle(theme: theme, led: model.showsRelief))
-                    .accessibilityLabel("Terrain in 3D")
-                    .help("Stand the terrain up in 3D. Drag to turn it, space and drag to move.")
+                // It names the view it switches to.
+                Button(model.showsRelief ? "2D" : "3D") { model.showsRelief.toggle() }
+                    .accessibilityLabel(model.showsRelief ? "Lay the terrain flat" : "Terrain in 3D")
+                    .help(model.showsRelief ? "Lay the terrain flat again."
+                          : "Stand the terrain up in 3D. Drag to turn it, space and drag to move.")
                     .hotkey("⌘D", placement: .beside, model: model, theme: theme)
                     .padding(.bottom, 4)
                 // Their shortcuts are in the Map menu. Stacked this closely, labels go to the side.
