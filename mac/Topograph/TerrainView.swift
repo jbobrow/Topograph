@@ -74,6 +74,7 @@ struct TerrainView: NSViewRepresentable {
     var onHover: (Hover?) -> Void
     var onPickItem: (Int32) -> Void
     var onPickRegion: (Int) -> Void
+    var onPickCloud: (SIMD2<Double>) -> Void
     var onWhere: ([Int]) -> Void
     var onViewport: (MapViewport) -> Void
 
@@ -94,6 +95,7 @@ struct TerrainView: NSViewRepresentable {
         view.onHover = onHover
         view.onPickItem = onPickItem
         view.onPickRegion = onPickRegion
+        view.onPickCloud = onPickCloud
         view.onWhere = onWhere
         view.onViewport = onViewport
         view.isActive = isActive
@@ -163,6 +165,8 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
     var onHover: ((Hover?) -> Void)?
     var onPickItem: ((Int32) -> Void)?
     var onPickRegion: ((Int) -> Void)?
+    /// A spot on the map under a cloud.
+    var onPickCloud: ((SIMD2<Double>) -> Void)?
     var onWhere: (([Int]) -> Void)?
     var onViewport: ((MapViewport) -> Void)?
     /// Whether the map is the view showing. Other views get the keyboard to themselves.
@@ -572,6 +576,17 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
         return scene.spatial.nearest(x: (point.x - transform.x) / k, y: (point.y - transform.y) / k, radius: radius)
     }
 
+    /// Where the pointer meets a cloud, as a spot on the map, when one is there. In 3D that's
+    /// up at the clouds' height, where they're drawn, not down at their shadows.
+    private func cloudSpot(at point: CGPoint) -> SIMD2<Double>? {
+        guard let weather = scene?.weather else { return nil }
+        let spot = camera.map {
+            $0.projection(viewSize: bounds.size).ground(at: point, height: Double(TerrainRenderer.cloudAltitude(rise: Float(rise))))
+        } ?? SIMD2((point.x - transform.x) / transform.k, (point.y - transform.y) / transform.k)
+        guard let spot, Clouds.isCloudy(weather, at: spot.x, spot.y) else { return nil }
+        return spot
+    }
+
     private func labelID(at point: CGPoint) -> Int? {
         placed.first { $0.box.contains(point) }?.id
     }
@@ -597,7 +612,7 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
         let point = location(of: event)
         let onLabel = labelID(at: point) != nil
         let index = onLabel ? nil : itemIndex(at: point)
-        if onLabel || index != nil { NSCursor.pointingHand.set() } else { NSCursor.crosshair.set() }
+        if onLabel || index != nil || cloudSpot(at: point) != nil { NSCursor.pointingHand.set() } else { NSCursor.crosshair.set() }
         guard let index else { return clearHover() }
         if index != hovered { needsDisplay = true }
         hovered = index
@@ -671,6 +686,8 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
             onPickRegion?(id)
         } else if let index = itemIndex(at: point) {
             onPickItem?(index)
+        } else if let spot = cloudSpot(at: point) {
+            onPickCloud?(spot)
         }
     }
 

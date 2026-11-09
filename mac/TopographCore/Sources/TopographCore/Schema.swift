@@ -71,6 +71,17 @@ public enum LibrarySchema {
       primary key (model, id)
     );
 
+    -- Searches float over a map rather than shaping it: curiosity, not taste.
+    create table if not exists cloud (
+      item_id  text not null references item(id) on delete cascade,
+      model    text not null,     -- the map it's over, named as in layout
+      x        real not null,
+      y        real not null,
+      region   integer not null,  -- the region under it
+      near     text,              -- the land nearest it in meaning (JSON list of item ids)
+      primary key (item_id, model)
+    );
+
     create table if not exists phrase_vec (
       model  text not null,
       phrase text not null,

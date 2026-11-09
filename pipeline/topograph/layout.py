@@ -62,6 +62,35 @@ def neighbors(vecs: np.ndarray, k: int = 8) -> np.ndarray:
     return idx[:, 1:]
 
 
+def place_clouds(sky: np.ndarray, land: np.ndarray, has_picture: np.ndarray, xy: np.ndarray, k: int = 8):
+    """Where each search floats: over the pictures nearest it in meaning, averaged with the
+    closest counting most, so a search between two subjects hangs between them.
+
+    Scored as search by meaning scores (`EmbeddingStore.nearest` in the Mac app), for the same
+    reasons: by plain similarity every search sat over the land made of words, whatever it was
+    about. So each search is taken minus the average search, the land under it is pictures
+    alone (the blended map still keeps words and pictures apart), and scores are in standard
+    deviations. CLIP vectors, unit length. Returns positions and the nearest land, closest first.
+    """
+    under = np.flatnonzero(has_picture) if has_picture.any() else np.arange(len(land))
+    candidates, places = land[under], xy[under]
+    k = min(k, len(under))
+    targets = sky - sky.mean(0)
+    out = np.zeros((len(sky), 2))
+    near = np.zeros((len(sky), k), dtype=int)
+    for start in range(0, len(sky), 512):
+        scores = targets[start:start + 512] @ candidates.T
+        scores = (scores - scores.mean(1, keepdims=True)) / np.maximum(scores.std(1, keepdims=True), 1e-9)
+        top = np.argpartition(-scores, k - 1, axis=1)[:, :k]
+        top_scores = np.take_along_axis(scores, top, 1)
+        order = np.argsort(-top_scores, axis=1)
+        top, top_scores = np.take_along_axis(top, order, 1), np.take_along_axis(top_scores, order, 1)
+        weights = np.exp((top_scores - top_scores[:, :1]) / 0.3)
+        out[start:start + 512] = (weights[..., None] * places[top]).sum(1) / weights.sum(1, keepdims=True)
+        near[start:start + 512] = under[top]
+    return out, near
+
+
 def load_concepts() -> list[str]:
     text = resources.files("topograph").joinpath("concepts.txt").read_text()
     return [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
@@ -108,10 +137,19 @@ def phrase_embedder(lib, backend, model: str):
 
 def compute_layout(lib, model: str, backend=None, log=print, map_name: str = "pictures",
                    words_model: str | None = None) -> int:
-    """Lay out and name one map (see maps.py). Other maps in the library are left alone."""
+    """Lay out and name one map (see maps.py). Other maps in the library are left alone.
+    Searches stay out of the land and float over it as clouds (`place_clouds`)."""
     ids, vecs = load_vectors(lib, model)
     if not ids:
         log("Nothing embedded yet; run `topograph embed` first.")
+        return 0
+    from .db import SEARCH_ONLY_SQL
+    searches = {r[0] for r in lib.conn.execute(SEARCH_ONLY_SQL)}
+    is_sky = np.array([i in searches for i in ids])
+    sky_ids, sky_vecs = [i for i, s in zip(ids, is_sky) if s], vecs[is_sky]
+    ids, vecs = [i for i, s in zip(ids, is_sky) if not s], vecs[~is_sky]
+    if not ids:
+        log("Nothing to map yet: only searches, which float over the map.")
         return 0
     from .maps import layout_model, map_vectors
     from .progress import step
@@ -152,10 +190,20 @@ def compute_layout(lib, model: str, backend=None, log=print, map_name: str = "pi
         c.execute("insert into cluster(model, id, label, terms, parent, depth, x, y, r) "
                   "values (?,?,?,?,?,?,?,?,?)",
                   (stored, int(rid), r.label, json.dumps(r.terms), r.parent, r.depth, x, y, rad))
+    c.execute("delete from cloud where model=?", (stored,))
+    if sky_ids:
+        with step(f"Setting {len(sky_ids):,} searches over the land"):
+            places, near = place_clouds(sky_vecs, vecs, np.array([i in visual for i in ids]), xy)
+        c.executemany(
+            "insert into cloud(item_id, model, x, y, region, near) values (?,?,?,?,?,?)",
+            [(iid, stored, float(places[k, 0]), float(places[k, 1]), int(labels[near[k, 0]]),
+              json.dumps([ids[j] for j in near[k]])) for k, iid in enumerate(sky_ids)])
     lib.set_meta("map", map_name)
     c.commit()
     top = sorted(roots, key=lambda k: -len(regions[k].members))
     log(f"  {len(regions)} regions in {max(r.depth for r in regions.values()) + 1 if regions else 0} "
         f"levels; largest: " + ", ".join(regions[k].label for k in top[:8]))
+    if sky_ids:
+        log(f"  {len(sky_ids):,} searches float over it as clouds.")
     log("  See them all with `topograph regions`.")
     return len(ids)

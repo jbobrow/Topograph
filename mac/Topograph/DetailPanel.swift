@@ -22,6 +22,8 @@ struct DetailPanel: View {
                         RegionPanel(model: model, library: library, map: map, theme: theme, id: id).id(id)
                     case .colorBand(let band):
                         ColorBandPanel(model: model, library: library, map: map, theme: theme, band: band).id(band)
+                    case .cloud(let x, let y):
+                        CloudPanel(model: model, library: library, map: map, theme: theme, x: x, y: y).id(SIMD2(x, y))
                     case .found(let query):
                         Text(query)
                             .font(PlexMono.font(.medium, size: 13))
@@ -360,6 +362,277 @@ private struct RegionPanel: View {
                 }.value
             }
         }
+    }
+}
+
+/// A cloud: the searches of one season that float in one patch of weather. First their themes,
+/// for the gist, then every one, newest first. Each is a key that looks for what it was about
+/// in the library.
+private struct CloudPanel: View {
+    let model: AppModel
+    let library: Library
+    let map: LibraryMap
+    let theme: Theme
+    let x: Double
+    let y: Double
+    /// nil while it's worked out; a cloud with no searches is clear sky.
+    @State private var cloud: Clouds.Cloud?
+    @State private var looked = false
+    @State private var themes: [CloudTheme] = []
+    @State private var others = 0
+    @State private var open: String?
+    /// The text model's vectors for searches seen so far, kept as the weather moves.
+    @State private var vectors: [String: [Float]] = [:]
+
+    private static let shown = 400
+
+    /// The same search on the same day, once, with how many times.
+    private struct Line: Identifiable {
+        let id: Int
+        let text: String
+        let times: Int
+    }
+
+    private var days: [(day: String, lines: [Line])] {
+        var days: [(day: String, lines: [Line])] = []
+        var seen: [String: Int] = [:]
+        var id = 0
+        for search in cloud?.searches.prefix(Self.shown) ?? [] {
+            let day = Format.date(search.time)
+            if days.last?.day != day {
+                days.append((day, []))
+                seen = [:]
+            }
+            let text = search.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = text.lowercased()
+            if let at = seen[key] {
+                let line = days[days.count - 1].lines[at]
+                days[days.count - 1].lines[at] = Line(id: line.id, text: line.text, times: line.times + 1)
+            } else {
+                seen[key] = days[days.count - 1].lines.count
+                days[days.count - 1].lines.append(Line(id: id, text: text, times: 1))
+                id += 1
+            }
+        }
+        return days
+    }
+
+    /// The region most of its searches float over.
+    private var region: String? {
+        var counts: [Int: Int] = [:]
+        for search in cloud?.searches ?? [] where search.region >= 0 { counts[search.region, default: 0] += 1 }
+        return counts.max { $0.value < $1.value }.flatMap { map.regions.regions[$0.key]?.label.lowercased() }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(region.map { "cloud over \($0)" } ?? "cloud")
+                .font(PlexMono.font(.semibold, size: 16))
+                .foregroundStyle(theme.ink.color)
+                .padding(.trailing, 36)
+                .fixedSize(horizontal: false, vertical: true)
+            if let cloud, !cloud.searches.isEmpty {
+                Text("\(cloud.searches.count.formatted()) searches   \(Format.date(cloud.season.lowerBound)) – \(Format.date(cloud.season.upperBound))")
+                    .font(PlexMono.font(.regular, size: 11))
+                    .foregroundStyle(theme.secondary.color)
+                    .padding(.top, 6)
+                PanelHeading(text: "by week", theme: theme)
+                WeekBars(times: cloud.searches.map(\.time), season: cloud.season, theme: theme)
+                if !themes.isEmpty {
+                    PanelHeading(text: "themes", theme: theme)
+                    ForEach(themes, id: \.name) { item in
+                        ThemeRow(item: item, total: cloud.searches.count, isOpen: open == item.name, theme: theme,
+                                 toggle: { open = open == item.name ? nil : item.name },
+                                 find: { model.findSearch($0) })
+                    }
+                    if others > 0 {
+                        Text("and \(others.formatted()) searches on their own")
+                            .font(PlexMono.font(.regular, size: 11))
+                            .foregroundStyle(theme.secondary.color)
+                            .padding(.top, 8)
+                    }
+                }
+                PanelHeading(text: "every search", theme: theme)
+                ForEach(days, id: \.day) { day in
+                    Text(day.day)
+                        .font(PlexMono.font(.regular, size: 10))
+                        .foregroundStyle(theme.secondary.color)
+                        .padding(.top, 10)
+                        .padding(.bottom, 2)
+                    ForEach(day.lines) { line in
+                        SearchLine(text: line.text, times: line.times, theme: theme) { model.findSearch(line.text) }
+                    }
+                }
+                if cloud.searches.count > Self.shown {
+                    Text("and \((cloud.searches.count - Self.shown).formatted()) older")
+                        .font(PlexMono.font(.regular, size: 11))
+                        .foregroundStyle(theme.secondary.color)
+                        .padding(.top, 12)
+                }
+            } else if looked {
+                Text("clear sky here now. it comes back with the weather, as you move through time.")
+                    .font(PlexMono.font(.regular, size: 11))
+                    .foregroundStyle(theme.secondary.color)
+                    .padding(.top, 8)
+                    .padding(.trailing, 36)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                LoadingNote(text: "gathering the searches", theme: theme).padding(.top, 12)
+            }
+        }
+        // Follows the weather here as time moves.
+        .task(id: model.scene?.id) {
+            guard let scene = model.scene else { return }
+            let (map, x, y) = (map, x, y)
+            let found = await Task.detached(priority: .userInitiated) { () -> Clouds.Cloud? in
+                guard let weather = scene.weather, let end = scene.weatherEnd else { return nil }
+                return map.clouds.cloud(at: x, y, weather: weather, endingAt: end)
+            }.value
+            guard !Task.isCancelled else { return }
+            cloud = found
+            looked = true
+            guard let searches = found?.searches, !searches.isEmpty else { return themes = [] }
+            let (library, known) = (library, vectors)
+            let missing = searches.map(\.id).filter { known[$0] == nil }
+            let (gist, fetched) = await Task.detached(priority: .userInitiated) { () -> ((themes: [CloudTheme], rest: [Clouds.Search]), [String: [Float]]) in
+                let fetched = missing.isEmpty ? [:] : (try? library.textVectors(of: missing)) ?? [:]
+                return (CloudThemes.find(searches, vectors: known.merging(fetched) { a, _ in a }), fetched)
+            }.value
+            vectors.merge(fetched) { a, _ in a }
+            guard !Task.isCancelled else { return }
+            themes = gist.themes
+            others = gist.rest.count
+        }
+    }
+}
+
+/// One theme of a cloud: its name, its share of the cloud, and its most typical searches, or
+/// all of them once it's open.
+private struct ThemeRow: View {
+    let item: CloudTheme
+    let total: Int
+    let isOpen: Bool
+    let theme: Theme
+    let toggle: () -> Void
+    let find: (String) -> Void
+
+    private static let examples = 3
+
+    /// Each different search once, most typical first.
+    private var lines: [(text: String, times: Int)] {
+        var order: [String] = []
+        var counts: [String: (text: String, times: Int)] = [:]
+        for search in item.searches {
+            let text = search.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = text.lowercased()
+            if counts[key] == nil { order.append(key) }
+            counts[key] = (counts[key]?.text ?? text, (counts[key]?.times ?? 0) + 1)
+        }
+        return order.map { counts[$0]! }
+    }
+
+    var body: some View {
+        let lines = lines
+        VStack(alignment: .leading, spacing: 0) {
+            Button(action: toggle) {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(isOpen ? "▾" : "▸").font(PlexMono.font(.regular, size: 10)).foregroundStyle(theme.secondary.color)
+                        Text(item.name)
+                            .font(PlexMono.font(.medium, size: 12))
+                            .foregroundStyle(theme.ink.color)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Text(item.searches.count.formatted())
+                            .font(PlexMono.font(.regular, size: 10))
+                            .foregroundStyle(theme.secondary.color)
+                    }
+                    GeometryReader { geometry in
+                        Rectangle().fill(theme.ink.color)
+                            .frame(width: max(2, geometry.size.width * Double(item.searches.count) / Double(max(total, 1))))
+                    }
+                    .frame(height: 3)
+                    .padding(.leading, 16)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(isOpen ? "Show only the most typical" : "Show every search in this theme")
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(lines.prefix(isOpen ? lines.count : Self.examples).enumerated()), id: \.offset) { _, line in
+                    SearchLine(text: line.text, times: line.times, theme: theme) { find(line.text) }
+                }
+                if !isOpen, lines.count > Self.examples {
+                    Button("\((lines.count - Self.examples).formatted()) more", action: toggle)
+                        .buttonStyle(.plain)
+                        .font(PlexMono.font(.regular, size: 10))
+                        .foregroundStyle(theme.secondary.color)
+                        .padding(.horizontal, 6)
+                        .padding(.top, 2)
+                }
+            }
+            .padding(.leading, 10)
+            .padding(.top, 4)
+        }
+        .padding(.top, 10)
+    }
+}
+
+/// One search in a cloud: press it to find what it was about.
+private struct SearchLine: View {
+    let text: String
+    let times: Int
+    let theme: Theme
+    let find: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: find) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(text.isEmpty ? "(empty)" : text)
+                    .font(PlexSans.font(size: 13))
+                    .foregroundStyle(hovering ? theme.ground.color : theme.ink.color)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if times > 1 {
+                    Text("×\(times)")
+                        .font(PlexMono.font(.regular, size: 10))
+                        .foregroundStyle(hovering ? theme.ground.color : theme.secondary.color)
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(hovering ? theme.ink.color : .clear, in: Rectangle())
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help("Find what this was about in your library")
+    }
+}
+
+/// How many searches a cloud gathered each week of its season.
+private struct WeekBars: View {
+    let times: [Int]
+    let season: ClosedRange<Int>
+    let theme: Theme
+
+    var body: some View {
+        Canvas { context, size in
+            let week = 7 * 86_400
+            let count = max(1, (season.upperBound - season.lowerBound + week - 1) / week)
+            var bins = [Int](repeating: 0, count: count)
+            for time in times where season.contains(time) {
+                bins[min((time - season.lowerBound) / week, count - 1)] += 1
+            }
+            let high = Double(bins.max() ?? 1), step = size.width / Double(count)
+            for (i, n) in bins.enumerated() where n > 0 {
+                let height = size.height * Double(n) / max(high, 1)
+                context.fill(Path(CGRect(x: Double(i) * step, y: size.height - height, width: max(1, step - 2), height: height)),
+                             with: .color(theme.ink.color))
+            }
+        }
+        .frame(height: 32)
+        .accessibilityLabel("Searches per week")
     }
 }
 

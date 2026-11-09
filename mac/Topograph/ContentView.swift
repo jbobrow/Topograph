@@ -26,6 +26,7 @@ struct ContentView: View {
                             onHover: { model.hover = $0 },
                             onPickItem: { model.openItem($0) },
                             onPickRegion: { model.openRegion($0) },
+                            onPickCloud: { model.openCloud(at: $0) },
                             onWhere: { model.setWhere($0) },
                             onViewport: { model.viewport = $0 })
                     .opacity(model.section == .terrain ? 1 : 0)

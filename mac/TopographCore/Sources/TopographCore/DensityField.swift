@@ -52,11 +52,29 @@ public struct DensityField: Sendable {
             }
         }
 
-        // This runs for every step of the timeline as it plays, so it has to be quick.
-        // Three blurs across then three down, each copying from one buffer to the other,
-        // which leaves the result back in `values`.
+        Self.blur(&values, side: n, bandwidth: Self.bandwidth)
+
+        let unit = Float(Self.cellSize * Self.cellSize)
+        let highest = vDSP.maximum(values) / unit
+        let scale = Float(fullPeak ?? 0) > 0 ? Float(fullPeak!) : highest
+        width = n
+        height = n
+        peak = Double(highest)
+        elevation = scale > 0 ? values.map { $0 / unit / scale } : values
+    }
+
+    /// Cells across the grid, which is square.
+    public static var side: Int { Int(mapSize + origin * 2) >> 2 }
+
+    /// `bandwidth` map units of blur over a grid of `side` × `side` cells, in place.
+    ///
+    /// This runs for every step of the timeline as it plays, so it has to be quick.
+    /// Three blurs across then three down, each copying from one buffer to the other,
+    /// which leaves the result back in `values`.
+    static func blur(_ values: inout [Float], side n: Int, bandwidth: Double) {
         var scratch = values
-        let blur = Blur(radius: Self.radius / Self.cellSize, count: n)
+        let radius = (sqrt(4 * bandwidth * bandwidth + 1) - 1) / 2
+        let blur = Blur(radius: radius / cellSize, count: n)
         values.withUnsafeMutableBufferPointer { first in
             scratch.withUnsafeMutableBufferPointer { second in
                 nonisolated(unsafe) let a = first.baseAddress!
@@ -76,14 +94,6 @@ public struct DensityField: Sendable {
                 }
             }
         }
-
-        let unit = Float(Self.cellSize * Self.cellSize)
-        let highest = vDSP.maximum(values) / unit
-        let scale = Float(fullPeak ?? 0) > 0 ? Float(fullPeak!) : highest
-        width = n
-        height = n
-        peak = Double(highest)
-        elevation = scale > 0 ? values.map { $0 / unit / scale } : values
     }
 
     /// A box blur with a fractional radius (`d3.blur2`): whole cells inside the

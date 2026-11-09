@@ -17,6 +17,8 @@ enum Selection: Equatable {
     case found(String)
     /// The pictures in one band of color.
     case colorBand(Int)
+    /// The cloud over a spot on the map, whatever its weather is for the time shown.
+    case cloud(x: Double, y: Double)
 }
 
 /// The palette's three ways of looking: two across color, and one through time.
@@ -77,6 +79,15 @@ final class AppModel {
         return filter
     }() {
         didSet { if filter != oldValue { applyFilter() } }
+    }
+    /// Searches as weather over the map: where the season before the time shown gathered more
+    /// than usual. Like searches on the map before them, they start hidden.
+    var showsClouds = UserDefaults.standard.bool(forKey: "showsClouds") {
+        didSet {
+            UserDefaults.standard.set(showsClouds, forKey: "showsClouds")
+            if showsClouds != oldValue { applyFilter() }
+            if !showsClouds, case .cloud = selection { selection = nil }
+        }
     }
     let controller = TerrainController()
     let palette = PaletteController()
@@ -194,6 +205,7 @@ final class AppModel {
             do {
                 let filter = self.filter
                 let chosen = chosenMap
+                let clouds = showsClouds
                 defer { openingMap = nil }
                 let (library, loaded, search, peak, scene, slicer) = try await Task.detached(priority: .userInitiated) {
                     let library = try Library()
@@ -202,7 +214,7 @@ final class AppModel {
                     // Contour heights come from what shows by default, not what starts hidden.
                     let shown = map.items.indices.filter { map.items[$0].platform != "google" }.map(Int32.init)
                     let peak = DensityField(items: map.items, visible: shown).peak
-                    let scene = TerrainScene(map: map, visible: filter.visible(in: map.items, search: search), fullPeak: peak)
+                    let scene = TerrainScene(map: map, visible: filter.visible(in: map.items, search: search), fullPeak: peak, clouds: clouds)
                     return (library, map, search, peak, scene, TimeSlicer(filter: filter, items: map.items, search: search))
                 }.value
                 self.library = library
@@ -223,7 +235,7 @@ final class AppModel {
                 platforms = tally.keys.sorted { tally[$0]! > tally[$1]! }
                 self.search = search
                 fullPeak = peak
-                self.scene = TerrainScene(map: map, visible: scene.visible, fullPeak: peak)
+                self.scene = TerrainScene(map: map, visible: scene.visible, fullPeak: peak, clouds: showsClouds)
                 selection = nil
                 phase = .ready
                 Task { await refreshSources() }
@@ -278,8 +290,12 @@ final class AppModel {
 
     /// Whether find looks for what things are about, not the words in them.
     var findsByMeaning = false
+    /// What's typed in find.
+    var findQuery = ""
     private var lastMeaningQuery: String?
     private var bandToReturnTo: Int?
+    /// A cloud one of its searches was looked for from, to go back to.
+    private var cloudToReturnTo: Selection?
     /// The model is about 600 MB, so it's set up separately (mac/tools/convert_clip.py).
     let canFindByMeaning = CLIPEncoder.isInstalled()
 
@@ -311,6 +327,7 @@ final class AppModel {
         filter.query = ""
         filter.nearest = ranked
         lastMeaningQuery = text
+        if case .cloud = selection { cloudToReturnTo = selection }
         selection = .found(text)
     }
 
@@ -326,10 +343,25 @@ final class AppModel {
             selection = .colorBand(bandToReturnTo)
         } else if case .item = selection, let query = lastMeaningQuery, filter.nearest != nil {
             selection = .found(query)
+        } else if case .found = selection, let cloud = cloudToReturnTo {
+            selection = cloud
+            cloudToReturnTo = nil
+            findQuery = ""
         } else {
             selection = nil
         }
         if case .colorBand = selection {} else { bandToReturnTo = nil }
+    }
+
+    func openCloud(at spot: SIMD2<Double>) {
+        cloudToReturnTo = nil
+        selection = .cloud(x: spot.x, y: spot.y)
+    }
+
+    /// Looks for one of a cloud's searches in the library, by meaning when it can.
+    func findSearch(_ text: String) {
+        if canFindByMeaning { findsByMeaning = true }
+        findQuery = text
     }
 
     func openColorBand(_ band: Int) {
@@ -524,6 +556,7 @@ final class AppModel {
         let wantsOverview = wantsStrata && (current == nil || strataOverview == nil)
         let wantsColors = section == .palette && paletteView == .time
         let share = paletteShowsShare
+        let clouds = showsClouds
         let (scene, newSlicer, newOrder, counts, overview) = await Task.detached(priority: .userInitiated) { () -> (TerrainScene, TimeSlicer, [Int]?, [Int]?, StrataModel?) in
             let slicer = current ?? TimeSlicer(filter: filter, items: map.items, search: search)
             let counts = current == nil ? axis?.counts(of: slicer.times) : nil
@@ -533,7 +566,8 @@ final class AppModel {
             let strata = wantsStrata ? axis.map { StrataModel(map: map, visible: visible, axis: $0, order: order) } : nil
             let colors = wantsColors ? axis.map { StrataModel(colorsOf: map, visible: visible, axis: $0, share: share) } : nil
             let overview = wantsOverview ? axis.map { StrataModel(map: map, visible: slicer.all, axis: $0, order: order) } : nil
-            return (TerrainScene(map: map, visible: visible, fullPeak: peak, strata: strata, colorStrata: colors, range: filter.range), slicer, order, counts, overview)
+            return (TerrainScene(map: map, visible: visible, fullPeak: peak, strata: strata, colorStrata: colors, range: filter.range, clouds: clouds),
+                    slicer, order, counts, overview)
         }.value
         guard generation == mapGeneration else { return }
         self.scene = scene

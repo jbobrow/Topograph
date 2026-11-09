@@ -48,6 +48,8 @@ do {
         try checkRegions(library: library, map: values.first ?? "blended")
     case "check-palette":
         try checkPalette(library: library)
+    case "check-clouds":
+        try checkClouds(endingAt: values.first)
     case "check-words":
         try checkWords(library: library)
     default:

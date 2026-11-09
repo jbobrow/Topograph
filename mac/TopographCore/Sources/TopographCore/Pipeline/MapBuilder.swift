@@ -1,3 +1,4 @@
+import Accelerate
 import Foundation
 import GRDB
 
@@ -192,12 +193,64 @@ public enum MapBuilder {
         return UMAP.embed(vectors, neighbors: neighbors) { epoch, _ in moving.advance(epoch - moving.done) }
     }
 
+    /// Where each search floats: over the pictures nearest it in meaning, averaged with the
+    /// closest counting most, so a search between two subjects hangs between them.
+    /// `place_clouds` in layout.py.
+    ///
+    /// Scored as search by meaning scores (`EmbeddingStore.nearest`), for the same reasons: by
+    /// plain similarity every search sat over the land made of words, whatever it was about. So
+    /// each search is taken minus the average search, the land under it is pictures alone (the
+    /// blended map still keeps words and pictures apart), and scores are in standard deviations.
+    /// CLIP vectors, unit length. `near` is positions in `land`, closest first.
+    static func placeClouds(_ sky: Matrix, over land: Matrix, hasPicture: [Bool], xy: [Float], k: Int = 8) -> [(x: Float, y: Float, near: [Int32])] {
+        let pictures = hasPicture.indices.filter { hasPicture[$0] }
+        let under = pictures.isEmpty ? Array(0..<land.rows) : pictures
+        guard !under.isEmpty, sky.rows > 0 else { return [] }
+        let candidates = land.selecting(under), n = under.count, k = min(k, n)
+        let everyday = sky.mean(of: Array(0..<sky.rows))
+        var targets = sky
+        for row in 0..<sky.rows { for d in 0..<sky.columns { targets.values[row * sky.columns + d] -= everyday[d] } }
+        var out = [(x: Float, y: Float, near: [Int32])](repeating: (0, 0, []), count: sky.rows)
+        let chunk = 512
+        var start = 0
+        while start < sky.rows {
+            let end = min(start + chunk, sky.rows)
+            var scores = targets.selecting(Array(start..<end)).product(transposeOf: candidates)
+            let found = LockedResults<(x: Float, y: Float, near: [Int32])>(count: end - start)
+            scores.values.withUnsafeMutableBufferPointer { table in
+                nonisolated(unsafe) let source = table.baseAddress!
+                DispatchQueue.concurrentPerform(iterations: end - start) { row in
+                    let line = source + row * n
+                    var mean: Float = 0, spread: Float = 0
+                    vDSP_normalize(line, 1, line, 1, &mean, &spread, vDSP_Length(n))
+                    let scored = UnsafeBufferPointer(start: line, count: n)
+                    let near = VectorMath.largest(scored, k: k)
+                    let top = scored[Int(near[0])]
+                    var (x, y, total) = (Float(0), Float(0), Float(0))
+                    for index in near {
+                        let item = under[Int(index)]
+                        let weight = exp((scored[Int(index)] - top) / 0.3)
+                        x += weight * xy[item * 2]
+                        y += weight * xy[item * 2 + 1]
+                        total += weight
+                    }
+                    found.set(row, (x / total, y / total, near.map { Int32(under[Int($0)]) }))
+                }
+            }
+            for (row, value) in found.values.enumerated() { out[start + row] = value! }
+            start = end
+        }
+        return out
+    }
+
     /// Lay out and name one map from vectors already in the library. Returns how many items.
+    /// Searches stay out of the land and float over it as clouds (`placeClouds`).
     @discardableResult
     public static func computeLayout(library: LibraryWriter, recipe: MapRecipe, clip clipEncoder: CLIPEncoder?, reporter: PipelineReporter) throws -> Int {
         let model = CLIPEncoder.modelName
         reporter.progress("Arranging the \(recipe.rawValue) map")
-        let (ids, clip, infos, wordDimensions) = try library.db.read { db -> ([String], Matrix, [MapVectors.ItemInfo], Int) in
+        let (allIDs, allClip, allInfos, wordDimensions, searches) = try library.db.read { db -> ([String], Matrix, [MapVectors.ItemInfo], Int, Set<String>) in
+            let searches = Set(try String.fetchAll(db, sql: LibraryWriter.searchOnlySQL))
             var ids: [String] = []
             var values: [Float] = []
             var words: [String: [Float]] = [:]
@@ -217,8 +270,12 @@ public enum MapBuilder {
             let infos = ids.map { id in
                 MapVectors.ItemInfo(platform: details[id]?.platform ?? "", text: details[id]?.text, hasPicture: pictures.contains(id), words: words[id].map { ArraySlice($0) })
             }
-            return (ids, Matrix(rows: ids.count, columns: dimensions, values: values), infos, words.first?.value.count ?? 0)
+            return (ids, Matrix(rows: ids.count, columns: dimensions, values: values), infos, words.first?.value.count ?? 0, searches)
         }
+        let sky = allIDs.indices.filter { searches.contains(allIDs[$0]) }
+        let land = sky.isEmpty ? Array(allIDs.indices) : allIDs.indices.filter { !searches.contains(allIDs[$0]) }
+        let ids = land.map { allIDs[$0] }, infos = land.map { allInfos[$0] }
+        let clip = sky.isEmpty ? allClip : allClip.selecting(land)
         guard !ids.isEmpty else {
             reporter.say("Nothing to map yet.")
             return 0
@@ -274,8 +331,19 @@ public enum MapBuilder {
             }
             try db.execute(sql: "insert into meta(key, value) values('map', ?) on conflict(key) do update set value = excluded.value", arguments: [recipe.rawValue])
         }
+        if !sky.isEmpty { reporter.progress("Setting \(sky.count.formatted()) searches over the land") }
+        let placed = placeClouds(allClip.selecting(sky), over: clip, hasPicture: infos.map(\.hasPicture), xy: xy)
+        try library.db.write { db in
+            try db.execute(sql: "delete from cloud where model = ?", arguments: [stored])
+            let insert = try db.makeStatement(sql: "insert into cloud(item_id, model, x, y, region, near) values (?,?,?,?,?,?)")
+            for (cloud, item) in zip(placed, sky) {
+                try insert.execute(arguments: [allIDs[item], stored, Double(cloud.x), Double(cloud.y),
+                                               labels[Int(cloud.near[0])], Pipeline.jsonList(cloud.near.map { ids[Int($0)] })])
+            }
+        }
         let top = roots.sorted { (regions[$0]?.members.count ?? 0) > (regions[$1]?.members.count ?? 0) }.prefix(8).map { regions[$0]?.label ?? "" }
         reporter.say("\(regions.count) regions in \((regions.values.map(\.depth).max() ?? -1) + 1) levels; largest: \(top.joined(separator: ", "))")
+        if !sky.isEmpty { reporter.say("\(sky.count.formatted()) searches float over it as clouds.") }
         return n
     }
 
@@ -332,6 +400,7 @@ extension LibraryWriter {
             for id in gone {
                 try db.execute(sql: "delete from embedding where item_id = ?", arguments: [id])
                 try db.execute(sql: "delete from layout where item_id = ?", arguments: [id])
+                try db.execute(sql: "delete from cloud where item_id = ?", arguments: [id])
             }
             return gone.count
         }

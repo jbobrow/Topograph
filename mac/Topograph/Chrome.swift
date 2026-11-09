@@ -5,7 +5,6 @@ import TopographCore
 struct FilterBar: View {
     @Bindable var model: AppModel
     let theme: Theme
-    @State private var query = ""
     @FocusState private var findFocused: Bool
     /// Counts tries to turn off the last of creation and consumption.
     @State private var triedLastOff = 0
@@ -80,6 +79,13 @@ struct FilterBar: View {
                         .hotkey("⌘\(key.character)", key: key, model: model, theme: theme)
                 }
             }
+            Button("clouds") { model.showsClouds.toggle() }
+                .buttonStyle(KeyStyle(theme: theme, led: model.showsClouds))
+                .hotkey("⌘K", key: "k", model: model, theme: theme)
+                .disabled(model.map?.clouds.isEmpty ?? true)
+                .help(model.map?.clouds.isEmpty ?? true
+                      ? "Searches float over the map once Google activity is imported and the map is updated."
+                      : "Your searches as weather: where the season before the time shown searched more than usual.")
             Spacer(minLength: 0)
             HStack(spacing: 4) {
                 HStack(spacing: 0) {
@@ -93,7 +99,7 @@ struct FilterBar: View {
                     }
                     .buttonStyle(.plain)
                     .overlay(alignment: .trailing) { Rectangle().fill(theme.rule.color).frame(width: 1) }
-                    TextField("", text: $query, prompt: Text(model.findsByMeaning ? "what it's about" : "words or @author").foregroundStyle(theme.secondary.color))
+                    TextField("", text: $model.findQuery, prompt: Text(model.findsByMeaning ? "what it's about" : "words or @author").foregroundStyle(theme.secondary.color))
                         .textFieldStyle(.plain)
                         .focused($findFocused)
                         .font(PlexMono.font(.regular, size: 11))
@@ -129,11 +135,11 @@ struct FilterBar: View {
         }
         .padding(.horizontal, 16)
         .padding(.bottom, 8)
-        .task(id: FindRequest(query: query, byMeaning: model.findsByMeaning)) {
+        .task(id: FindRequest(query: model.findQuery, byMeaning: model.findsByMeaning)) {
             // Wait for a pause in the typing.
             try? await Task.sleep(for: .milliseconds(model.findsByMeaning ? 300 : 150))
             guard !Task.isCancelled else { return }
-            await model.find(query)
+            await model.find(model.findQuery)
         }
     }
 }

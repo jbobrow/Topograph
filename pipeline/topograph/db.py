@@ -80,6 +80,17 @@ create table if not exists cluster (
   primary key (model, id)
 );
 
+-- Searches float over a map rather than shaping it: curiosity, not taste.
+create table if not exists cloud (
+  item_id  text not null references item(id) on delete cascade,
+  model    text not null,     -- the map it's over, named as in layout
+  x        real not null,
+  y        real not null,
+  region   integer not null,  -- the region under it
+  near     text,              -- the land nearest it in meaning (JSON list of item ids)
+  primary key (item_id, model)
+);
+
 create table if not exists phrase_vec (
   model  text not null,
   phrase text not null,
@@ -207,6 +218,9 @@ def upsert_record(lib: Library, rec: Record, ingest_media) -> bool:
 GONE_SQL = ("item.hydrated = -1 and coalesce(item.text, '') = '' and not exists "
             "(select 1 from media m where m.item_id = item.id and m.status = 'ok')")
 
+# Items you only searched for. They're clouds over the map, not land.
+SEARCH_ONLY_SQL = "select item_id from interaction group by item_id having sum(type != 'search') = 0"
+
 
 def mark_unavailable(lib: Library) -> int:
     """Clear X's "this post is unavailable" notices that were stored as text.
@@ -235,5 +249,6 @@ def mark_unavailable(lib: Library) -> int:
         q = ",".join("?" * len(chunk))
         c.execute(f"delete from embedding where item_id in ({q})", chunk)
         c.execute(f"delete from layout where item_id in ({q})", chunk)
+        c.execute(f"delete from cloud where item_id in ({q})", chunk)
     c.commit()
     return len(gone)

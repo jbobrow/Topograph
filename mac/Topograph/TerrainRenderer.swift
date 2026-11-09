@@ -18,8 +18,13 @@ struct TerrainScene: Sendable {
     /// Likewise for color through time, while that's showing.
     let colorStrata: StrataModel?
     let range: ClosedRange<Int>?
+    /// The weather over the land on the field's grid, when clouds are showing (`Clouds.weather`).
+    let weather: [Float]?
+    /// The end of the season the weather is for.
+    let weatherEnd: Int?
 
-    init(map: LibraryMap, visible: [Int32], fullPeak: Double, strata: StrataModel? = nil, colorStrata: StrataModel? = nil, range: ClosedRange<Int>? = nil) {
+    init(map: LibraryMap, visible: [Int32], fullPeak: Double, strata: StrataModel? = nil, colorStrata: StrataModel? = nil, range: ClosedRange<Int>? = nil,
+         clouds: Bool = false) {
         self.colorStrata = colorStrata
         self.map = map
         self.visible = visible
@@ -30,6 +35,9 @@ struct TerrainScene: Sendable {
         spatial = SpatialIndex(items: map.items, visible: visible)
         pictures = visible.filter { map.items[Int($0)].thumb != nil }
             .sorted { map.items[Int($0)].resonance > map.items[Int($1)].resonance }
+        // The season up to the end of the time shown: with all time, the latest.
+        weatherEnd = range?.upperBound ?? map.clouds.searches.last?.time
+        weather = clouds ? weatherEnd.flatMap { map.clouds.weather(endingAt: $0) } : nil
     }
 }
 
@@ -205,6 +213,7 @@ final class TerrainRenderer {
     private let reliefPipeline: MTLRenderPipelineState
     private let groundPipeline: MTLRenderPipelineState
     private let reliefMarkerPipeline: MTLRenderPipelineState
+    private let cloudPipeline: MTLRenderPipelineState
     private let linePipeline: MTLRenderPipelineState
     /// Depth for the relief: tested and written by the ground, only tested by what stands on
     /// it, and ignored by everything on top.
@@ -212,6 +221,17 @@ final class TerrainRenderer {
     private let standing: MTLDepthStencilState
     private let flat: MTLDepthStencilState
     private var field: MTLTexture?
+    /// The weather on the same grid, while clouds show.
+    private var weather: MTLTexture?
+    /// What the shaders read for weather when there is none: one cell of clear sky.
+    private lazy var clearSky: MTLTexture? = {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r32Float, width: 1, height: 1, mipmapped: false)
+        descriptor.usage = .shaderRead
+        let texture = device.makeTexture(descriptor: descriptor)
+        var zero: Float = 0
+        texture?.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0, withBytes: &zero, bytesPerRow: MemoryLayout<Float>.stride)
+        return texture
+    }()
     /// The relief's triangles, two to a cell of the field.
     private var mesh: MTLBuffer?
     private var meshCount = 0
@@ -250,6 +270,7 @@ final class TerrainRenderer {
         reliefPipeline = try pipeline("reliefVertex", "reliefFragment", blended: false)
         groundPipeline = try pipeline("groundVertex", "reliefFragment", blended: false)
         reliefMarkerPipeline = try pipeline("reliefMarkerVertex", "markerFragment", blended: true)
+        cloudPipeline = try pipeline("cloudVertex", "cloudFragment", blended: true)
         linePipeline = try pipeline("paletteLineVertex", "paletteLineFragment", blended: true)
 
         func depth(_ compare: MTLCompareFunction, write: Bool) throws -> MTLDepthStencilState {
@@ -267,6 +288,7 @@ final class TerrainRenderer {
     func setScene(_ scene: TerrainScene?) {
         guard let scene else {
             field = nil
+            weather = nil
             markers = nil
             markerCount = 0
             return
@@ -283,6 +305,21 @@ final class TerrainRenderer {
             field?.replace(region: MTLRegionMake2D(0, 0, scene.field.width, scene.field.height),
                            mipmapLevel: 0, withBytes: bytes.baseAddress!,
                            bytesPerRow: scene.field.width * MemoryLayout<Float>.stride)
+        }
+        if let values = scene.weather {
+            if weather?.width != scene.field.width || weather?.height != scene.field.height {
+                let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                    pixelFormat: .r32Float, width: scene.field.width, height: scene.field.height, mipmapped: false)
+                descriptor.usage = .shaderRead
+                weather = device.makeTexture(descriptor: descriptor)
+            }
+            values.withUnsafeBytes { bytes in
+                weather?.replace(region: MTLRegionMake2D(0, 0, scene.field.width, scene.field.height),
+                                 mipmapLevel: 0, withBytes: bytes.baseAddress!,
+                                 bytesPerRow: scene.field.width * MemoryLayout<Float>.stride)
+            }
+        } else {
+            weather = nil
         }
 
         let instances = scene.visible.map { index -> Marker in
@@ -339,6 +376,7 @@ final class TerrainRenderer {
             setBytes(TerrainStyle.bayer, encoder, index: 3)
             encoder.setFragmentBytes(&levels, length: MemoryLayout<UInt32>.stride, index: 4)
             encoder.setFragmentTexture(field, index: 0)
+            encoder.setFragmentTexture(weather ?? clearSky, index: 1)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         }
 
@@ -449,7 +487,7 @@ final class TerrainRenderer {
         commands.commit()
     }
 
-    /// The ground plane, the relief over it, and the markers standing on it.
+    /// The ground plane, the relief over it, the markers standing on it, and the clouds over them.
     private func drawRelief(_ relief: ReliefFrame, encoder: MTLRenderCommandEncoder, uniforms: inout Uniforms) {
         guard let field, let mesh else { return }
         let camera = relief.camera, projection = relief.projection
@@ -477,6 +515,7 @@ final class TerrainRenderer {
         encoder.setFragmentBytes(&levels, length: MemoryLayout<UInt32>.stride, index: 4)
         encoder.setFragmentBytes(&r, length: length, index: 5)
         encoder.setFragmentTexture(field, index: 0)
+        encoder.setFragmentTexture(weather ?? clearSky, index: 1)
 
         encoder.setRenderPipelineState(groundPipeline)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
@@ -490,7 +529,23 @@ final class TerrainRenderer {
             encoder.setVertexBytes(&r, length: length, index: 2)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: markerCount)
         }
+        // The clouds above, after the markers so that what's under a cloud shows between its dots,
+        // and before the pictures, which they hide where the dots fall.
+        if weather != nil {
+            encoder.setDepthStencilState(solid)
+            encoder.setRenderPipelineState(cloudPipeline)
+            encoder.setVertexBytes(&r, length: length, index: 1)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: Self.cloudSlices)
+        }
         encoder.setDepthStencilState(flat)
+    }
+
+    /// Keep in step with `cloudSlices` in Terrain.metal.
+    private static let cloudSlices = 4
+
+    /// How high the lowest of the clouds floats. Keep in step with `cloudAltitude` in Terrain.metal.
+    static func cloudAltitude(rise: Float) -> Float {
+        Relief.height * rise * 1.35 + 1.5
     }
 
     /// Four sides, one point wide, in pixels.

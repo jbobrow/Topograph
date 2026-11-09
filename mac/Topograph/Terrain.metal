@@ -58,13 +58,28 @@ static Elevation sampleField(texture2d<float, access::read> field, float2 c) {
     return e;
 }
 
+// Clouds: where this season's searches gather more than usual (`Clouds.weather`, where 1 is a
+// cloud's edge and 2 its core). A light dot screen over the land, filling in toward the core but
+// never past half, so the land always shows through, with a rule around each. `step` is how
+// much the weather changes across one pixel.
+static float3 overcast(float3 color, constant Uniforms &u, constant float *bayer, float2 point, float weather, float step) {
+    if (weather >= 1.0) {
+        float cover = 0.25 + 0.25 * saturate(weather - 1.0);
+        uint2 dot = uint2(point) % 8;
+        if (bayer[dot.y * 8 + dot.x] < cover * 64) color = u.surface.rgb;
+    }
+    float edge = saturate(0.5 * u.scale + 0.5 - abs(weather - 1.0) / max(step, 1e-7));
+    return mix(color, u.ink.rgb, edge * 0.55);
+}
+
 fragment float4 terrainFragment(TerrainVarying in [[stage_in]],
                                 constant Uniforms &u [[buffer(0)]],
                                 constant float *thresholds [[buffer(1)]],
                                 constant float *dither [[buffer(2)]],
                                 constant float *bayer [[buffer(3)]],
                                 constant uint &levels [[buffer(4)]],
-                                texture2d<float, access::read> field [[texture(0)]]) {
+                                texture2d<float, access::read> field [[texture(0)]],
+                                texture2d<float, access::read> weather [[texture(1)]]) {
     float2 point = in.position.xy / u.scale;
     float3 color = u.ground.rgb;
 
@@ -95,6 +110,9 @@ fragment float4 terrainFragment(TerrainVarying in [[stage_in]],
         float coverage = saturate(half_width + 0.5 - distance);
         color = mix(color, u.ink.rgb, coverage * (index ? 0.9 : 0.45));
     }
+
+    Elevation w = sampleField(weather, (map + u.origin) / u.cell - 0.5);
+    if (w.value > 0.5) color = overcast(color, u, bayer, point, w.value, length(w.slope) / (u.cell * u.k * u.scale));
     return float4(color, 1);
 }
 
@@ -325,6 +343,17 @@ struct ReliefVarying {
     float3 world;
 };
 
+// Clouds float well above the highest peak, and rise out of the map with the relief.
+constant uint cloudSlices = 4;
+
+static float cloudAltitude(constant Relief &r, float slice) {
+    return r.height * (1.35 + 0.07 * slice) + 1.5;
+}
+
+static float fog(constant Relief &r, float3 world) {
+    return 1 - saturate((length(world - r.eye.xyz) - r.fogNear) / max(r.fogFar - r.fogNear, 1.0));
+}
+
 static float3 surface(texture2d<float, access::read> field, constant Uniforms &u, constant Relief &r, float2 map) {
     Elevation e = sampleField(field, (map + u.origin) / u.cell - 0.5);
     return float3(map.x, r.height * pow(max(e.value, 0.0), r.exponent), map.y);
@@ -352,11 +381,11 @@ fragment float4 reliefFragment(ReliefVarying in [[stage_in]],
                                constant float *bayer [[buffer(3)]],
                                constant uint &levels [[buffer(4)]],
                                constant Relief &r [[buffer(5)]],
-                               texture2d<float, access::read> field [[texture(0)]]) {
+                               texture2d<float, access::read> field [[texture(0)]],
+                               texture2d<float, access::read> weather [[texture(1)]]) {
     float2 point = in.position.xy / u.scale;
     float3 color = u.ground.rgb;
-    float distance = length(in.world - r.eye.xyz);
-    float clear = 1 - saturate((distance - r.fogNear) / max(r.fogFar - r.fogNear, 1.0));
+    float clear = fog(r, in.world);
 
     // The ground's rules, fading out before they'd crowd into moiré.
     float2 across = fwidth(in.map);
@@ -378,6 +407,10 @@ fragment float4 reliefFragment(ReliefVarying in [[stage_in]],
         if (value >= thresholds[i]) band = i;
     }
     float density = (band >= 0 ? dither[band] : 0.0) + (value > 0.004 ? shade : 0.0);
+    // The clouds' shadows, cast away from the sun onto whatever lies under them.
+    float2 toCloud = r.sun.xz / r.sun.y * (cloudAltitude(r, 0) - in.world.y);
+    float shadow = sampleField(weather, (in.map + toCloud + u.origin) / u.cell - 0.5).value;
+    if (shadow >= 1.0) density += 0.12 + 0.12 * saturate(shadow - 1.0);
     // Capped, as the flat map's is, so pictures and names stay readable on the shadowed side.
     density = clamp(density, 0.0, 0.6) * clear;
     uint2 dot = uint2(point) % 8;
@@ -392,6 +425,40 @@ fragment float4 reliefFragment(ReliefVarying in [[stage_in]],
         color = mix(color, u.ink.rgb, coverage * (index ? 0.9 : 0.45) * clear);
     }
     return float4(color, 1);
+}
+
+// The clouds in 3D: the weather as a few level slices in the sky, each higher one only where
+// the weather is thicker, so a cloud stacks up the way a hill does in contours. Dotted and
+// ruled like the flat map's clouds, see-through between the dots, and thinned by the fog.
+
+struct CloudVarying {
+    float4 position [[position]];
+    float2 map;
+    float3 world;
+    float threshold;  // the weather this slice starts at
+};
+
+vertex CloudVarying cloudVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
+                                constant Uniforms &u [[buffer(0)]], constant Relief &r [[buffer(1)]]) {
+    float2 corner = float2(vid & 1, (vid >> 1) & 1);
+    float2 map = corner * float(r.side) * u.cell - u.origin;
+    float3 world = float3(map.x, cloudAltitude(r, iid), map.y);
+    return { r.viewProjection * float4(world, 1), map, world, 1.0 + 0.3 * iid };
+}
+
+fragment float4 cloudFragment(CloudVarying in [[stage_in]],
+                              constant Uniforms &u [[buffer(0)]],
+                              constant float *bayer [[buffer(3)]],
+                              constant Relief &r [[buffer(5)]],
+                              texture2d<float, access::read> weather [[texture(1)]]) {
+    float w = sampleField(weather, (in.map + u.origin) / u.cell - 0.5).value;
+    float clear = fog(r, in.world);
+    float rule = saturate(0.5 * u.scale + 0.5 - abs(w - in.threshold) / max(fwidth(w), 1e-7)) * 0.55 * clear;
+    float cover = (0.25 + 0.25 * saturate(w - 1.0)) * clear;
+    uint2 dot = uint2(in.position.xy / u.scale) % 8;
+    bool filled = w >= in.threshold && bayer[dot.y * 8 + dot.x] < cover * 64;
+    if (!filled && rule < 0.02) discard_fragment();
+    return filled ? float4(mix(u.surface.rgb, u.ink.rgb, rule), 1) : float4(u.ink.rgb * rule, rule);
 }
 
 // Markers standing on the relief: drawn a little toward the eye so the ground doesn't swallow

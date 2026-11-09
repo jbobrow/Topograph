@@ -49,7 +49,8 @@ It lives in `~/Library/Application Support/Topograph/` (override with `TOPOGRAPH
 
 - `topograph.sqlite`: WAL mode. Tables: `item`, `interaction`, `media`, `embedding`,
   `layout`, `cluster` (regions, with `parent`, `depth`, label anchor `x`, `y` and
-  size `r`), `phrase_vec` (cached CLIP vectors of candidate names), `meta`. Use `db.py`
+  size `r`), `cloud` (searches over a map), `phrase_vec` (cached CLIP vectors of candidate
+  names), `meta`. Use `db.py`
   as the reference: SPEC §3 is close but older (for example, `media` is keyed by
   `(item_id, ord)` and paths are relative to the library root).
 - `media/<2 hex>/<sha256>-d.webp` is the display copy (long edge 1600) and
@@ -73,6 +74,14 @@ Details that matter for compatibility:
   region names and Tributaries all read those vectors on every map. The text model's vectors
   (`minilm-l6-v2`, 384 dimensions) are in `embedding` too, so filter by model. Region numbers
   are per map, so `Library.detail`, `sources` and your region names all take the map.
+- Searches (items whose only interaction is `search`, `SEARCH_ONLY_SQL`) aren't land. Each
+  map is laid out without them, then each is set over the pictures nearest it in meaning,
+  scored as search by meaning scores (`place_clouds` / `MapBuilder.placeClouds`, which match),
+  into `cloud`. They aren't "waiting to be mapped". The app shows them as weather
+  (`Clouds.weather`): where the 90 days before the time shown searched more than usual. In 3D
+  they float as stacked slices above the peaks and cast shadows. Clicking one opens its searches,
+  grouped into themes (`CloudThemes`: by the text model's vectors, named by their own words);
+  `topograph-native check-clouds [yyyy-mm-dd]` prints a season's themes for judging them.
 - An item is "gone" when it's unreachable (`hydrated = -1`) with no text and no
   `ok` media. It stays in the database so it isn't re-imported or re-fetched, and
   it's left off the map and out of counts (`GONE_SQL` in `db.py`). X's
