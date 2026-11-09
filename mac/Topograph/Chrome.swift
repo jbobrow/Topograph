@@ -264,7 +264,7 @@ struct TimeBar: View {
                     if model.filter.range != nil {
                         Button("all time") {
                             model.stopPlaying()
-                            model.filter.range = nil
+                            model.clearStrataSelection()
                         }
                         .buttonStyle(KeyStyle(theme: theme))
                         .help("Show the entire timeline")
@@ -374,6 +374,7 @@ struct TimeBar: View {
         guard abs(value.translation.width) >= 2 else { return }
         switch drag {
         case .fresh(let anchor):
+            if model.section == .strata { model.holdStrata() }
             model.filter.range = min(anchor, now)...max(anchor, now)
         case .moving(let offset):
             guard let range = model.filter.range else { return }
@@ -392,7 +393,13 @@ struct TimeBar: View {
     }
 
     private func ended(_ value: DragGesture.Value, width: Double) {
-        if abs(value.translation.width) < 2, case .fresh = drag { model.filter.range = nil }
+        if case .fresh = drag {
+            if abs(value.translation.width) < 2 {
+                model.clearStrataSelection()
+            } else if model.section == .strata {
+                model.fitStrataToNewSelection()
+            }
+        }
         drag = nil
         setCursor(at: value.location.x, width: width)
     }

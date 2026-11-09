@@ -12,10 +12,8 @@ struct TerrainScene: Sendable {
     let spatial: SpatialIndex
     /// Visible items with pictures, most resonant first.
     let pictures: [Int32]
-    /// The chart for these items, made together with them while Strata is showing so its
-    /// shape and its time range change in the same frame.
-    let strata: StrataModel?
-    /// Likewise for color through time, while that's showing.
+    /// The chart of color through time for these items, while that's showing, made together
+    /// with them so its shape and its time range change in the same frame.
     let colorStrata: StrataModel?
     let range: ClosedRange<Int>?
     /// The weather over the land on the field's grid, when clouds are showing (`Clouds.weather`).
@@ -23,12 +21,11 @@ struct TerrainScene: Sendable {
     /// The end of the season the weather is for.
     let weatherEnd: Int?
 
-    init(map: LibraryMap, visible: [Int32], fullPeak: Double, strata: StrataModel? = nil, colorStrata: StrataModel? = nil, range: ClosedRange<Int>? = nil,
+    init(map: LibraryMap, visible: [Int32], fullPeak: Double, colorStrata: StrataModel? = nil, range: ClosedRange<Int>? = nil,
          clouds: Bool = false) {
         self.colorStrata = colorStrata
         self.map = map
         self.visible = visible
-        self.strata = strata
         self.range = range
         field = DensityField(items: map.items, visible: visible, fullPeak: fullPeak)
         counts = map.regions.counts(items: map.items, visible: visible)

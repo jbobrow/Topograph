@@ -7,7 +7,6 @@ import TopographCore
 struct StrataScreen: View {
     let model: AppModel
     let theme: Theme
-    @State private var strata: StrataModel?
     @State private var tip: StrataTip?
 
     /// The chart stays clear of the side panel, or recent months end up behind it.
@@ -15,10 +14,12 @@ struct StrataScreen: View {
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            if let strata = model.scene?.strata ?? strata, let map = model.map {
+            // Always all of time, for the filters set: the selection moves the view and the
+            // shading, never the shape.
+            if let strata = model.strataChart, let map = model.map {
                 let window = model.strataWindow
                 StrataCanvas(model: strata, labels: { map.regions.regions[$0]?.label }, patterns: Dictionary(map.regions.strataLayers().enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a }),
-                             colors: nil, range: model.strataShowsSelection ? nil : model.filter.range, marked: markedItem(in: map), theme: theme,
+                             colors: nil, range: model.strataShowsSelection && model.strataHold == nil ? nil : model.filter.range, marked: markedItem(in: map), theme: theme,
                              window: window, easing: model.strataEasingTo == window, quiet: model.pointerIsOnStrataMinimap,
                              isPlaying: model.isPlaying,
                              onTip: { tip = $0 },
@@ -46,15 +47,7 @@ struct StrataScreen: View {
             }
         }
         .background(theme.ground.color)
-        .onAppear { model.prepareStrataOverview() }
-        // For a scene made while another view was showing, which has no chart of its own.
-        .task(id: model.scene?.id) {
-            guard let scene = model.scene, scene.strata == nil, let axis = model.axis else { return }
-            let order = model.strataOrder
-            strata = await Task.detached(priority: .userInitiated) {
-                StrataModel(map: scene.map, visible: scene.visible, axis: axis, order: order)
-            }.value
-        }
+        .onAppear { model.prepareStrataChart() }
     }
 }
 
@@ -64,10 +57,19 @@ extension StrataScreen {
     @ViewBuilder
     private var controls: some View {
         HStack(spacing: 4) {
-            Button("selection") { model.strataShowsSelection = true }
+            if (model.map?.waiting ?? 0) > 0 {
+                Button("not yet mapped") { model.strataShowsWaiting.toggle() }
+                    .buttonStyle(KeyStyle(theme: theme, led: model.strataShowsWaiting))
+                    .help("A layer for links still waiting for their pictures, by when you engaged with them.")
+                    .padding(.trailing, 8)
+            }
+            // Either way the selection stays, unlike the timeline's "all time", which clears it.
+            Button("close up") { model.strataShowsSelection = true }
                 .buttonStyle(KeyStyle(theme: theme, led: model.strataShowsSelection))
-            Button("all time") { model.strataShowsSelection = false }
+                .help("Fit the chart to the time selected")
+            Button("in context") { model.strataShowsSelection = false }
                 .buttonStyle(KeyStyle(theme: theme, led: !model.strataShowsSelection))
+                .help("Show all of time, with the selection shaded")
         }
         .padding(.top, 12)
         .padding(.trailing, 16 + panel)
@@ -86,7 +88,7 @@ extension StrataScreen {
         .padding(.trailing, 16 + panel)
         .padding(.bottom, 36)
         .frame(maxWidth: .infinity, alignment: .trailing)
-        if model.strataShowsSelection, !model.strataWindow.isWhole, let overview = model.strataOverview {
+        if model.strataShowsSelection, !model.strataWindow.isWhole, let overview = model.strataChart {
             StrataMinimap(model: overview, selection: model.strataWindow, theme: theme,
                           onMove: { model.centerStrataSelection(at: $0) },
                           onPointer: { model.pointerIsOnStrataMinimap = $0 })
@@ -242,11 +244,18 @@ final class StrataNSView: NSView {
     private var tracking: NSTrackingArea?
     private var builtFor: CGSize = .zero
     private var shownScale: (low: Double, high: Double)?
+    /// How fast the shown scale is moving, per second: it springs to fit rather than lurching.
+    private var scaleVelocity = (low: 0.0, high: 0.0)
+    private var lastSpringStep: CFTimeInterval = 0
+    /// The spring's stiffness: critically damped, it settles in about half a second.
+    private static let scaleSpring = 9.0
     private var scaleLink: CADisplayLink?
     private var lastScaleStep: CFTimeInterval = 0
     /// Layers on their way from where they were on screen, by layer id, and since when.
     private var morph: (from: [Int: (top: [Double], bottom: [Double])], start: CFTimeInterval)?
     private static let morphDuration = 0.55
+    /// When the chart last changed, to tell a change on its own from a stream of them.
+    private var lastChange: CFTimeInterval = 0
     private var names: [Int: ShownName] = [:]
     private var lastNameStep: CFTimeInterval = 0
     private var namesMoving = false
@@ -295,11 +304,21 @@ final class StrataNSView: NSView {
                 range: ClosedRange<Int>?, marked: MapItem?, theme: Theme) {
         // Amounts and shares are on different scales, so easing the scale would drag every
         // layer through the middle. Each layer goes straight from where it is to where it's going.
-        if let shown = self.model, shown.isShare != model.isShare,
-           !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-            morph = (Dictionary(shown.layers.map { ($0.id, edges(of: $0, model: shown)) }, uniquingKeysWith: { a, _ in a }), CACurrentMediaTime())
-            shownScale = (model.low, model.high)
-            startMotion()
+        //
+        // A change on its own, like clearing a selection, morphs the same way, so what was
+        // hidden grows back in. A stream of them, from playing or dragging along time, is
+        // followed directly, so the chart never trails behind.
+        if let shown = self.model, !Self.sameShape(shown, model) {
+            let now = CACurrentMediaTime()
+            let alone = now - lastChange > 0.15 && !isPlaying
+            lastChange = now
+            if shown.isShare != model.isShare || alone, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                morph = (Dictionary(shown.layers.map { ($0.id, edges(of: $0, model: shown)) }, uniquingKeysWith: { a, _ in a }), now)
+                // The morph goes from where layers are on screen, so the scale can be the new one at once.
+                shownScale = scaleGoal(model)
+                scaleVelocity = (0, 0)
+                startMotion()
+            }
         }
         self.model = model
         self.labels = labels
@@ -311,6 +330,10 @@ final class StrataNSView: NSView {
         builtFor = .zero
         easeScale()
         needsDisplay = true
+    }
+
+    private static func sameShape(_ a: StrataModel, _ b: StrataModel) -> Bool {
+        a.layers.count == b.layers.count && zip(a.layers, b.layers).allSatisfy { $0.id == $1.id && $0.top == $1.top && $0.bottom == $1.bottom }
     }
 
     override func updateTrackingAreas() {
@@ -359,23 +382,26 @@ final class StrataNSView: NSView {
         shownTime = next
         builtFor = .zero
         needsDisplay = true
+        // What's in view has changed, so its height may have.
+        if let model, !scaleIsSettled(model) { startMotion() }
     }
 
     private func y(_ value: Double, model: StrataModel) -> Double {
         let top = margin.top, bottom = bounds.height - margin.bottom
-        let (low, high) = shownScale ?? (model.low, model.high)
+        let (low, high) = shownScale ?? scaleGoal(model)
         let span = max(high - low, 1e-9)
         return bottom + (value - low) / span * (top - bottom)
     }
 
     // MARK: Scale
 
-    /// A burst of activity coming into a time range rescales the whole chart. Eased, so
+    /// Moving to a busier or quieter stretch of time rescales the chart's height. Eased, so
     /// that's a movement rather than a jump.
     private func easeScale() {
         guard let model else { return }
         if shownScale == nil || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-            shownScale = (model.low, model.high)
+            shownScale = scaleGoal(model)
+            scaleVelocity = (0, 0)
             return
         }
         if !scaleIsSettled(model) { startMotion() }
@@ -392,15 +418,56 @@ final class StrataNSView: NSView {
 
     private func scaleIsSettled(_ model: StrataModel) -> Bool {
         guard let shownScale else { return true }
-        let tolerance = (model.high - model.low) * 0.001
-        return abs(shownScale.low - model.low) <= tolerance && abs(shownScale.high - model.high) <= tolerance
+        let goal = scaleGoal(model)
+        let tolerance = (goal.high - goal.low) * 0.001
+        return abs(shownScale.low - goal.low) <= tolerance && abs(shownScale.high - goal.high) <= tolerance
+            && abs(scaleVelocity.low) + abs(scaleVelocity.high) <= tolerance * 20
+    }
+
+    /// The height that fits what's on screen: the chart's whole on all of time, and only what's
+    /// in view close up, so a quiet stretch still fills the chart. The shape is all of time's
+    /// either way; only its height follows you around it.
+    ///
+    /// It fits where the view is going, so height and time arrive together rather than the
+    /// height chasing each step of the way. And it slides across part-shown months at the
+    /// edges rather than jumping a month at a time, so scrolling stays smooth.
+    private func scaleGoal(_ model: StrataModel) -> (low: Double, high: Double) {
+        let window = windowGoal ?? shownTime
+        let axis = model.axis
+        guard !window.isWhole, axis.count > 1 else { return (model.low, model.high) }
+        // Months from the start, continuously: each month's value is drawn at its first edge.
+        func position(_ fraction: Double) -> Double {
+            let time = axis.time(atFraction: fraction)
+            guard let month = axis.index(of: time) else { return fraction <= 0.5 ? 0 : Double(axis.count - 1) }
+            return Double(month) + Double(time - axis.edges[month]) / Double(max(axis.edges[month + 1] - axis.edges[month], 1))
+        }
+        let from = min(max(position(window.start), 0), Double(axis.count - 1))
+        let to = min(max(position(window.end), from), Double(axis.count - 1))
+        func at(_ values: [Double], _ p: Double) -> Double {
+            let below = Int(p.rounded(.down)), above = min(below + 1, values.count - 1)
+            return values[below] + (values[above] - values[below]) * (p - Double(below))
+        }
+        var low = Double.infinity, high = -Double.infinity
+        for layer in model.layers {
+            high = max(high, at(layer.top, from), at(layer.top, to))
+            low = min(low, at(layer.bottom, from), at(layer.bottom, to))
+            var month = Int(from.rounded(.up))
+            while Double(month) <= to {
+                high = max(high, layer.top[month])
+                low = min(low, layer.bottom[month])
+                month += 1
+            }
+        }
+        return low < high ? (low, high) : (model.low, model.high)
     }
 
     @objc private func stepMotion() {
-        guard let model, let shown = shownScale else { return stopEasing() }
+        guard let model, shownScale != nil else { return stopEasing() }
         let now = CACurrentMediaTime()
+        let elapsed = now - lastScaleStep
+        lastScaleStep = now
         if let goal = windowGoal {
-            let share = 1 - exp(-(now - lastScaleStep) / 0.07)
+            let share = 1 - exp(-elapsed / 0.07)
             if abs(goal.start - shownTime.start) + abs(goal.end - shownTime.end) < 0.0005 {
                 windowGoal = nil
                 place(goal)
@@ -415,19 +482,42 @@ final class StrataNSView: NSView {
             if now - morph.start >= Self.morphDuration { self.morph = nil }
             return
         }
-        let share = 1 - exp(-(now - lastScaleStep) / 0.09)
-        lastScaleStep = now
+        // The height springs as each frame is drawn (`stepScale`), not here: a flick moves time
+        // as its events arrive, and stepping the height on this timer instead put the two out
+        // of step, frame by frame, as the flick slowed.
+        if scaleIsSettled(model), !namesMoving, windowGoal == nil { return stopEasing() }
+        needsDisplay = true
+    }
+
+    /// Moves the height toward its fit by the time since the last frame drawn, so it moves in
+    /// the same frames as time does.
+    private func stepScale(_ model: StrataModel) {
+        guard morph == nil, let shown = shownScale else { return }
+        let now = CACurrentMediaTime()
+        // Short steps, so a dropped frame doesn't throw the spring.
+        let dt = min(max(now - lastSpringStep, 0), 1.0 / 30)
+        lastSpringStep = now
+        let goal = scaleGoal(model)
         if scaleIsSettled(model) {
-            if shown != (model.low, model.high) {
-                shownScale = (model.low, model.high)
+            scaleVelocity = (0, 0)
+            if shown != goal {
+                shownScale = goal
                 builtFor = .zero
             }
-            if !namesMoving, windowGoal == nil { stopEasing() }
-        } else {
-            shownScale = (shown.low + (model.low - shown.low) * share, shown.high + (model.high - shown.high) * share)
-            builtFor = .zero
+            return
         }
-        needsDisplay = true
+        // A critically damped spring: it starts gently, and arrives without overshooting.
+        let w = Self.scaleSpring
+        func spring(_ x: Double, _ v: inout Double, _ target: Double) -> Double {
+            v += (w * w * (target - x) - 2 * w * v) * dt
+            return x + v * dt
+        }
+        var v = scaleVelocity
+        shownScale = (spring(shown.low, &v.low, goal.low), spring(shown.high, &v.high, goal.high))
+        scaleVelocity = v
+        builtFor = .zero
+        // Frames keep coming until it settles.
+        startMotion()
     }
 
     private func stopEasing() {
@@ -525,6 +615,7 @@ final class StrataNSView: NSView {
         guard let model, let c = NSGraphicsContext.current?.cgContext else { return }
         let scale = window?.backingScaleFactor ?? 2
         buildTiles(scale: scale)
+        stepScale(model)
         buildPaths()
         let axis = model.axis
         c.setFillColor(theme.ground.cg)

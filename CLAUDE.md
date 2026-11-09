@@ -193,7 +193,7 @@ The plan is in SPEC §6 and §8:
   about feel, integration and the native pipeline, not rescuing performance.
 - **Strata's view of time:** there's one state, the time selected (`filter.range`), so the
   timeline, the minimap and the canvas can't disagree. Zooming and moving change it, and the
-  selection / all time switch only decides whether the canvas fits it.
+  close up / in context switch only decides whether the canvas fits it.
 - **The timeline:** playing and scrubbing update the map up to 60 times a second, so
   a map update has about 2 ms to run. `TimeSlicer` works out everything but the time
   range once, `DensityField` blurs across all cores, and `TopographCore` is optimized even
