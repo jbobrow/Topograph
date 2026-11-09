@@ -352,6 +352,7 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
     private func labelPlacements(_ scene: TerrainScene, size: CGSize, scale: Double,
                                  locate: (Region) -> (point: CGPoint, k: Double)?) -> [LabelPlacement] {
         guard let labels else { return [] }
+        labels.beginFrame()
         placed = planner.plan(tree: scene.map.regions, counts: scene.counts, size: size,
                               width: { labels.width($0, size: $1) }, locate: locate)
         let now = CACurrentMediaTime()
