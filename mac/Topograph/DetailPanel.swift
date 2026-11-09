@@ -46,15 +46,26 @@ struct DetailPanel: View {
             .scrollIndicators(.never)
             Button("×") { model.closePanel() }
                 .buttonStyle(SquareKeyStyle(theme: theme))
-                .keyboardShortcut(.cancelAction)
+                // Esc is `AppModel.escape`, which closes a large picture first.
                 .accessibilityLabel("Close")
                 .hotkey("esc", model: model, theme: theme)
                 .padding(16)
         }
         .frame(width: Self.width)
         .frame(maxHeight: .infinity)
+        // What's in the drawer gives way to the picture, as the drawer grows over the window.
+        .opacity(model.showsLargePicture ? 0 : 1)
+        .allowsHitTesting(!model.showsLargePicture)
         .background(theme.ground.color)
         .overlay(alignment: .leading) { Rectangle().fill(theme.ink.color).frame(width: 1) }
+        // Where the drawer is, for it to grow from when a picture opens large.
+        .background {
+            GeometryReader { drawer in
+                Color.clear
+                    .onAppear { model.drawerFrame = drawer.frame(in: .global) }
+                    .onChange(of: drawer.frame(in: .global)) { model.drawerFrame = $1 }
+            }
+        }
     }
 }
 
@@ -80,7 +91,8 @@ private struct ItemPanel: View {
     let index: Int32
     @State private var detail: ItemDetail?
     @State private var hero = 0
-    @State private var fileMissing = false
+    /// Where the picture is in the window, for it to fly from when it opens large.
+    @State private var heroFrame = CGRect.zero
     @State private var tributaries: [Int32] = []
     @State private var findingTributaries = false
 
@@ -91,10 +103,15 @@ private struct ItemPanel: View {
             if let media = detail?.media, !media.isEmpty {
                 let picture = media[min(hero, media.count - 1)]
                 if let path = picture.display ?? picture.thumb {
-                    LibraryPicture(url: library.file(path), longEdge: 1520, mode: .color, theme: theme)
-                        .aspectRatio(CGFloat(hero == 0 ? (item.aspect ?? 1) : 1), contentMode: .fit)
-                        .overlay(Rectangle().strokeBorder(theme.rule.color, lineWidth: 1))
-                        .padding(.trailing, 32)
+                    Button { model.enlarged = Enlarged(index: index, hero: hero, from: heroFrame, copy: library.file(path)) } label: {
+                        LibraryPicture(url: library.file(path), longEdge: 1520, mode: .color, theme: theme)
+                            .aspectRatio(CGFloat(hero == 0 ? (item.aspect ?? 1) : 1), contentMode: .fit)
+                            .overlay(Rectangle().strokeBorder(theme.rule.color, lineWidth: 1))
+                            .background { GeometryReader { g in Color.clear.onAppear { heroFrame = g.frame(in: .global) }.onChange(of: g.frame(in: .global)) { heroFrame = $1 } } }
+                    }
+                    .buttonStyle(.plain)
+                    .help("See it large")
+                    .padding(.trailing, 32)
                 }
                 if media.count > 1 {
                     ScrollView(.horizontal) {
@@ -143,7 +160,7 @@ private struct ItemPanel: View {
                 .font(PlexMono.font(.regular, size: 11))
                 .foregroundStyle(theme.secondary.color)
                 .padding(.top, 6)
-            actions.padding(.top, 12)
+            ItemActions(item: item, detail: detail, theme: theme).padding(.top, 12)
 
             PanelHeading(text: "history", theme: theme)
             ForEach(Array((detail?.interactions ?? []).enumerated()), id: \.offset) { _, interaction in
@@ -194,35 +211,6 @@ private struct ItemPanel: View {
     private func when(_ interaction: Interaction) -> String {
         guard interaction.at != 0 else { return "" }
         return interaction.estimated ? "~" + Format.month(interaction.at) : Format.date(interaction.at)
-    }
-
-    @ViewBuilder
-    private var actions: some View {
-        HStack(spacing: 4) {
-            if item.platform == "files" {
-                if let file = fileURL {
-                    Button(fileMissing ? "file not found: it may have moved" : "show in finder") {
-                        if FileManager.default.fileExists(atPath: file.path) {
-                            NSWorkspace.shared.activateFileViewerSelecting([file])
-                        } else {
-                            fileMissing = true
-                        }
-                    }
-                    .buttonStyle(KeyStyle(theme: theme))
-                }
-                if let source = detail?.media.first?.originalURL, let url = URL(string: source), let host = url.host {
-                    Button("source: \(host)") { NSWorkspace.shared.open(url) }.buttonStyle(KeyStyle(theme: theme))
-                }
-            } else if let link = detail?.url, let url = URL(string: link) {
-                Button("open on \(Format.platform(item.platform))") { NSWorkspace.shared.open(url) }
-                    .buttonStyle(KeyStyle(theme: theme))
-            }
-        }
-    }
-
-    private var fileURL: URL? {
-        guard let link = detail?.url, link.hasPrefix("file://") else { return nil }
-        return URL(string: link)
     }
 }
 

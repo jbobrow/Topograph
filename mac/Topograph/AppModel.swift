@@ -51,7 +51,22 @@ final class AppModel {
     var section = Section.terrain
     /// ⌘ is down, so every key shows its shortcut.
     private(set) var commandHeld = false
-    var selection: Selection?
+    var selection: Selection? {
+        didSet {
+            // Anything but the large picture's own item closes it, however it was reached.
+            if let enlarged, selection == .item(enlarged.index) { return }
+            if enlarged != nil { enlarged = nil }
+            if pictureOpen { pictureOpen = false }
+        }
+    }
+    /// The open item's picture, shown as large as the map allows.
+    var enlarged: Enlarged?
+    /// Whether it's open or opening: the drawer growing over the window and the picture flying
+    /// go together on this. Only means anything while `enlarged` is set.
+    var pictureOpen = false
+    var showsLargePicture: Bool { enlarged != nil && pictureOpen }
+    /// Where the side panel is in the window.
+    var drawerFrame = CGRect.zero
     var hover: Hover?
     /// How pictures show on the map and in most views. Gray unless you've changed it.
     private(set) var mapImageMode: ImageMode {
@@ -191,6 +206,19 @@ final class AppModel {
             guard playing else { return event }
             MainActor.assumeIsolated { self?.stopPlaying() }
             return nil
+        }
+        // Esc closes a large picture, then the panel (`escape`), wherever the cursor is: a
+        // shortcut on a key never saw it once a caption had been clicked to select, and find
+        // keeps the cursor after you pick what it found.
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.keyCode == 53 else { return event }
+            let handled = MainActor.assumeIsolated { () -> Bool in
+                guard let self, self.enlarged != nil || self.selection != nil else { return false }
+                event.window?.makeFirstResponder(nil)
+                self.escape()
+                return true
+            }
+            return handled ? nil : event
         }
         // A key released in another app never reaches this one.
         NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
@@ -362,6 +390,21 @@ final class AppModel {
     func findSearch(_ text: String) {
         if canFindByMeaning { findsByMeaning = true }
         findQuery = text
+    }
+
+    /// Shrinks the large picture back into the panel.
+    func closeLargePicture() {
+        guard let closing = enlarged else { return }
+        withAnimation(LargePicture.closing) { pictureOpen = false } completion: {
+            // Unless another was opened while this one closed.
+            if self.enlarged == closing, !self.pictureOpen { self.enlarged = nil }
+        }
+    }
+
+    /// Esc: a large picture first, then the panel. One place for both, rather than a shortcut
+    /// on each ×: SwiftUI didn't reliably give the panel's back once the picture's had gone.
+    func escape() {
+        if enlarged != nil { closeLargePicture() } else if selection != nil { closePanel() }
     }
 
     func openColorBand(_ band: Int) {

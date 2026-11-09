@@ -53,6 +53,11 @@ struct ContentView: View {
                 TimeBar(model: model, theme: theme)
             }
         }
+        .overlay {
+            if let enlarged = model.enlarged, let library = model.library, let map = model.map {
+                LargePicture(model: model, library: library, map: map, theme: theme, enlarged: enlarged)
+            }
+        }
         .ignoresSafeArea(edges: .top)
         .background(theme.ground.color)
         .frame(minWidth: 760, minHeight: 480)
