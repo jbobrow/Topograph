@@ -8,7 +8,8 @@ into peaks) and as strata (the same regions through time). The owner is Jonathan
 Bobrow (`jbobrow` on GitHub), a designer and maker, and the library is his own.
 
 `docs/SPEC.md` is the product spec (principles, sources, data model, views, privacy,
-roadmap). `README.md` is how to run the prototype. Read both before larger changes.
+roadmap). `README.md` is how to run the prototype. `docs/MAPPING.md` explains how the map is
+made (vectors, recipes, UMAP, regions, names, terrain) and the alternatives. Read both before larger changes.
 
 ## What exists
 
