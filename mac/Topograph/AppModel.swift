@@ -4,7 +4,7 @@ import SwiftUI
 import TopographCore
 
 enum Section: String, CaseIterable, Sendable {
-    case terrain, strata, echoes, palette, drift, process, sources
+    case terrain, strata, palette, echoes, drift, process, sources
 
     /// The views that follow the filters and the time scrubber.
     var isFiltered: Bool { self == .terrain || self == .strata || self == .palette || self == .echoes }
