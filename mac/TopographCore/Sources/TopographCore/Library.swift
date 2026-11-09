@@ -60,14 +60,17 @@ public struct LibraryMap: Sendable {
     public let waiting: Int
     /// Which arrangement of the library this is.
     public let recipe: MapRecipe
+    /// Searches, floating over the land.
+    public let clouds: Clouds
     /// Where each item id sits in `items`.
     public let indexOfID: [String: Int32]
 
     public func withRegions(_ regions: RegionTree) -> LibraryMap {
-        LibraryMap(items: items, regions: regions, waitingTimes: waitingTimes, waiting: waiting, recipe: recipe)
+        LibraryMap(items: items, regions: regions, waitingTimes: waitingTimes, waiting: waiting, recipe: recipe, clouds: clouds)
     }
 
-    public init(items: [MapItem], regions: RegionTree, waitingTimes: [Int] = [], waiting: Int = 0, recipe: MapRecipe = .pictures) {
+    public init(items: [MapItem], regions: RegionTree, waitingTimes: [Int] = [], waiting: Int = 0, recipe: MapRecipe = .pictures,
+                clouds: Clouds = Clouds()) {
         var ids: [String: Int32] = [:]
         ids.reserveCapacity(items.count)
         for index in items.indices { ids[items[index].id] = Int32(index) }
@@ -77,6 +80,7 @@ public struct LibraryMap: Sendable {
         self.waitingTimes = waitingTimes
         self.waiting = waiting
         self.recipe = recipe
+        self.clouds = clouds
     }
 }
 
@@ -246,9 +250,19 @@ public struct Library: Sendable {
             }
             guard !items.isEmpty else { throw LibraryError.noMap }
 
+            // A library last written by older tools has no clouds, and this connection can't add the table.
+            let hasClouds = try db.tableExists("cloud")
+            var searches: [Clouds.Search] = []
+            let clouds = try Row.fetchCursor(db, sql: hasClouds ? Self.cloudsSQL : "select 1 where 0", arguments: hasClouds ? [model] : [])
+            while let row = try clouds.next() {
+                guard let time = engaged[row[0] as String]?.time ?? (row[4] as Int?) else { continue }
+                searches.append(Clouds.Search(x: Float(row[1] as Double), y: Float(row[2] as Double), time: time, text: row[3] ?? "",
+                                              id: row[0], region: row[5]))
+            }
+
             var waitingTimes: [Int] = []
             var waiting = 0
-            let unplaced = try Row.fetchCursor(db, sql: Self.waitingSQL, arguments: [model])
+            let unplaced = try Row.fetchCursor(db, sql: Self.waitingSQL(clouds: hasClouds), arguments: hasClouds ? [model, model] : [model])
             while let row = try unplaced.next() {
                 waiting += 1
                 if let time = engaged[row[0] as String]?.time ?? (row[1] as Int?) { waitingTimes.append(time) }
@@ -263,7 +277,7 @@ public struct Library: Sendable {
                                          x: row[5], y: row[6], r: row[7])
             }
             return LibraryMap(items: items, regions: RegionTree(records: regions, items: items),
-                              waitingTimes: waitingTimes, waiting: waiting, recipe: recipe)
+                              waitingTimes: waitingTimes, waiting: waiting, recipe: recipe, clouds: Clouds(searches: searches))
         }
     }
 
@@ -316,10 +330,17 @@ public struct Library: Sendable {
         from layout join item on item.id = layout.item_id
         where layout.model = ? and not (\(goneSQL))
         """
-    private static let waitingSQL = """
+    private static func waitingSQL(clouds: Bool) -> String {
+        """
         select item.id, item.created_at from item
         where not (\(goneSQL))
           and not exists (select 1 from layout where layout.item_id = item.id and layout.model = ?)
+        """ + (clouds ? " and not exists (select 1 from cloud where cloud.item_id = item.id and cloud.model = ?)" : "")
+    }
+    private static let cloudsSQL = """
+        select item.id, cloud.x, cloud.y, item.text, item.created_at, cloud.region
+        from cloud join item on item.id = cloud.item_id
+        where cloud.model = ? and not (\(goneSQL))
         """
 }
 
@@ -433,10 +454,9 @@ extension Library {
             var accounts: [String: String] = [:]
             for (key, value) in meta where key.hasPrefix("sync_") { accounts[String(key.dropFirst(5))] = value }
             let shown = try Self.resolve(showing, db)
-            let unplaced = try Int.fetchOne(db, sql: """
-                select count(*) from item where not (\(Self.goneSQL))
-                and not exists (select 1 from layout where layout.item_id = item.id and layout.model = ?)
-                """, arguments: [shown?.1 ?? ""]) ?? 0
+            let hasClouds = try db.tableExists("cloud")
+            let unplaced = try Int.fetchOne(db, sql: "select count(*) from (\(Self.waitingSQL(clouds: hasClouds)))",
+                                            arguments: hasClouds ? [shown?.1 ?? "", shown?.1 ?? ""] : [shown?.1 ?? ""]) ?? 0
             let counts = try Row.fetchAll(db, sql: "select model, count(*) from layout group by model")
                 .reduce(into: [String: Int]()) { $0[$1[0] as String] = $1[1] as Int }
             var maps: [MapRecipe: Int] = [:]

@@ -148,8 +148,10 @@ public struct StrataModel: Sendable {
 
     /// `order` keeps the layers in a set order, from `stackingOrder`. Without it they're
     /// ordered by what's in `visible`, which would swap them around as a time range moves.
-    public init(map: LibraryMap, visible: [Int32], axis: MonthAxis, order: [Int]? = nil) {
-        let (keys, table) = Self.table(map: map, visible: visible, axis: axis)
+    /// With `waiting`, links still waiting for their pictures get a layer of their own; the
+    /// order must have been made the same way.
+    public init(map: LibraryMap, visible: [Int32], axis: MonthAxis, order: [Int]? = nil, waiting: Bool = false) {
+        let (keys, table) = Self.table(map: map, visible: visible, axis: axis, waiting: waiting)
 
         // Light smoothing so layers read as strata rather than noise.
         let smooth = table.map(Self.smoothed)
@@ -209,12 +211,12 @@ public struct StrataModel: Sendable {
     }
 
     /// The order to stack layers in for everything a filter shows, across all of time.
-    public static func stackingOrder(map: LibraryMap, visible: [Int32], axis: MonthAxis) -> [Int] {
-        insideOut(table(map: map, visible: visible, axis: axis).values.map(smoothed))
+    public static func stackingOrder(map: LibraryMap, visible: [Int32], axis: MonthAxis, waiting: Bool = false) -> [Int] {
+        insideOut(table(map: map, visible: visible, axis: axis, waiting: waiting).values.map(smoothed))
     }
 
     /// Each layer's resonance per month, with which region each layer is.
-    private static func table(map: LibraryMap, visible: [Int32], axis: MonthAxis) -> (keys: [Int?], values: [[Double]]) {
+    private static func table(map: LibraryMap, visible: [Int32], axis: MonthAxis, waiting: Bool) -> (keys: [Int?], values: [[Double]]) {
         let cut = map.regions.strataLayers()
         var layerOf: [Int: Int] = [:]
         func mark(_ id: Int, as layer: Int) {
@@ -231,7 +233,7 @@ public struct StrataModel: Sendable {
             table[layer][month] += Double(item.resonance)
         }
         var keys: [Int?] = cut
-        if !map.waitingTimes.isEmpty {
+        if waiting, !map.waitingTimes.isEmpty {
             keys.append(nil)
             table.append(axis.counts(of: map.waitingTimes).map(Double.init))
         }

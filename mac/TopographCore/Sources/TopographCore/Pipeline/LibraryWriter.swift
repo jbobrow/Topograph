@@ -78,6 +78,8 @@ public final class LibraryWriter: @unchecked Sendable {
     /// An item that can't be reached and has nothing of its own: left off the map, kept so
     /// it isn't imported or fetched again.
     public static let goneSQL = "item.hydrated = -1 and coalesce(item.text, '') = '' and not exists (select 1 from media m where m.item_id = item.id and m.status = 'ok')"
+    /// Items you only searched for. They're clouds over the map, not land.
+    public static let searchOnlySQL = "select item_id from interaction group by item_id having sum(type != 'search') = 0"
 
     public init(root: URL = Library.defaultRoot) throws {
         self.root = root

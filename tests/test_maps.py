@@ -201,3 +201,23 @@ def test_a_tool_waits_for_another_one_to_finish_writing(tmp_path):
     lib = Library(tmp_path / "lib")
     assert lib.conn.execute("pragma busy_timeout").fetchone()[0] == 120_000
     lib.close()
+
+
+def test_searches_float_over_the_pictures_they_are_about():
+    from topograph.layout import place_clouds
+    rng = np.random.default_rng(1)
+    subjects = _unit(rng.normal(size=(3, 32)))
+    # Words sit apart on the map, and every search shares a lean toward words.
+    wordy = _unit(rng.normal(size=(1, 32)))[0]
+    pictures = _unit(np.repeat(subjects, 20, 0) + rng.normal(scale=0.05, size=(60, 32)))
+    words = _unit(np.repeat(subjects, 20, 0) * 0.3 + wordy + rng.normal(scale=0.05, size=(60, 32)))
+    land = np.vstack([pictures, words]).astype(np.float32)
+    has_picture = np.array([True] * 60 + [False] * 60)
+    xy = np.vstack([np.repeat([[100, 100], [500, 900], [900, 100]], 20, 0) + rng.normal(scale=5, size=(60, 2)),
+                    np.full((60, 2), 500.0)])
+    searches = _unit(np.repeat(subjects, 5, 0) * 0.5 + wordy + rng.normal(scale=0.05, size=(15, 32)))
+    places, near = place_clouds(searches, land, has_picture, xy)
+    for subject, center in enumerate([[100, 100], [500, 900], [900, 100]]):
+        mine = slice(subject * 5, subject * 5 + 5)
+        assert np.linalg.norm(places[mine] - center, axis=1).max() < 40, "over its own subject's pictures"
+        assert (near[mine, 0] // 20 == subject).all() and (near[mine] < 60).all()

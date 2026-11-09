@@ -174,22 +174,38 @@ struct PaletteScreen: View {
     @State private var hover: Hover?
     @State private var cardHeight: CGFloat = 0
     @State private var space: PaletteSpace?
+    /// The seasons' share of the height when a drag of the rule between them began.
+    @State private var dragFrom: Double?
 
     var body: some View {
+        GeometryReader { whole in
+            VStack(spacing: 0) {
+                wheel
+                if model.paletteShowsSeasons {
+                    divider(height: whole.size.height)
+                    ColorStrataCanvas(model: model, theme: theme)
+                        .frame(height: whole.size.height * model.paletteSeasonsShare)
+                }
+            }
+        }
+        .background(theme.ground.color)
+        .task(id: model.map?.items.count) {
+            guard let map = model.map else { return }
+            space = await Task.detached(priority: .userInitiated) { PaletteSpace(items: map.items) }.value
+        }
+    }
+
+    private var wheel: some View {
         GeometryReader { geometry in
             ZStack(alignment: .topLeading) {
-                if model.paletteView == .time {
-                    ColorStrataCanvas(model: model, theme: theme)
-                } else {
-                    PaletteCanvas(space: space, scene: model.scene, root: model.library?.root, controller: model.palette,
-                                  camera: model.paletteCamera, selected: selectedItem, imageMode: model.imageMode,
-                                  onCamera: { camera, size in
-                                      model.paletteCamera = camera
-                                      model.paletteSize = size
-                                  },
-                                  onHover: { hover = $0 },
-                                  onPick: { model.openItem($0) })
-                }
+                PaletteCanvas(space: space, scene: model.scene, root: model.library?.root, controller: model.palette,
+                              camera: model.paletteCamera, selected: selectedItem, imageMode: model.imageMode,
+                              onCamera: { camera, size in
+                                  model.paletteCamera = camera
+                                  model.paletteSize = size
+                              },
+                              onHover: { hover = $0 },
+                              onPick: { model.openItem($0) })
                 PaletteChrome(model: model, theme: theme, space: space)
                 if let hover, let map = model.map, let library = model.library {
                     HoverCard(item: map.items[Int(hover.item)], library: library, theme: theme)
@@ -202,11 +218,25 @@ struct PaletteScreen: View {
                 }
             }
         }
-        .background(theme.ground.color)
-        .task(id: model.map?.items.count) {
-            guard let map = model.map else { return }
-            space = await Task.detached(priority: .userInitiated) { PaletteSpace(items: map.items) }.value
-        }
+    }
+
+    /// The rule between the wheel and its seasons, dragged to give either more room.
+    private func divider(height: Double) -> some View {
+        Rectangle().fill(theme.ink.color)
+            .frame(height: 1)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 3)
+            .contentShape(Rectangle())
+            .onHover { inside in (inside ? NSCursor.resizeUpDown : NSCursor.arrow).set() }
+            .gesture(DragGesture(minimumDistance: 1)
+                .onChanged { value in
+                    let from = dragFrom ?? model.paletteSeasonsShare
+                    dragFrom = from
+                    model.paletteSeasonsShare = min(max(from - value.translation.height / max(height, 1), 0.18), 0.7)
+                }
+                .onEnded { _ in dragFrom = nil })
+            .padding(.vertical, -3)
+            .zIndex(1)
     }
 
     private var selectedItem: Int32? {
@@ -215,26 +245,38 @@ struct PaletteScreen: View {
     }
 }
 
-/// Color through time, on Strata's chart.
+/// Color's seasons, under the wheel: color through time on Strata's chart, all of time with
+/// the time selected shaded on it.
 private struct ColorStrataCanvas: View {
     let model: AppModel
     let theme: Theme
-    @State private var fallback: StrataModel?
     @State private var colors: [Int: CGColor]?
     @State private var tip: StrataTip?
 
+    private static let keys = 34.0
+
     var body: some View {
         ZStack(alignment: .topLeading) {
-            if let chart = model.scene?.colorStrata ?? fallback, let colors {
+            if let chart = model.paletteSeasons, let colors {
                 StrataCanvas(model: chart, labels: { ColorBands.names.indices.contains($0) ? ColorBands.names[$0] : nil },
-                             patterns: [:], colors: colors, range: model.scene?.range, marked: markedItem, theme: theme,
+                             patterns: [:], colors: colors, range: model.filter.range, marked: markedItem, theme: theme,
                              onTip: { tip = $0 }, onPick: { model.openColorBand($0) })
-                    .padding(.top, 34)
+                    .padding(.top, Self.keys)
                     .padding(.trailing, model.selection == nil ? 0 : DetailPanel.width)
             } else {
                 LoadingNote(text: "sorting colors by time", theme: theme)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            HStack(spacing: 8) {
+                Text("seasons")
+                    .font(PlexMono.font(.medium, size: 11))
+                    .foregroundStyle(theme.secondary.color)
+                Button("stacked (percent)") { model.paletteShowsShare.toggle() }
+                    .buttonStyle(KeyStyle(theme: theme, led: model.paletteShowsShare))
+                    .help("On, each month fills the height, showing its mix of colors. Off, thickness shows how much there was.")
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
             if let tip {
                 Text(tip.text)
                     .font(PlexMono.font(.regular, size: 11))
@@ -245,24 +287,18 @@ private struct ColorStrataCanvas: View {
                     .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(theme.ink.color, lineWidth: 1))
                     .frame(maxWidth: 260, alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
-                    .offset(x: tip.x, y: tip.y + 34)
+                    .offset(x: tip.x, y: tip.y + Self.keys)
                     .allowsHitTesting(false)
             }
         }
-        // For a scene made while another view was showing, and for the bands' own colors.
-        .task(id: model.scene?.id) {
-            guard let scene = model.scene, let axis = model.axis else { return }
-            if colors == nil {
-                let means = await Task.detached(priority: .userInitiated) { ColorBands.colors(of: scene.map.items) }.value
-                colors = Dictionary(uniqueKeysWithValues: means.enumerated().map { band, mean in
-                    (band, CGColor(srgbRed: CGFloat(mean.x), green: CGFloat(mean.y), blue: CGFloat(mean.z), alpha: 1))
-                })
-            }
-            guard scene.colorStrata == nil else { return }
-            let share = model.paletteShowsShare
-            fallback = await Task.detached(priority: .userInitiated) {
-                StrataModel(colorsOf: scene.map, visible: scene.visible, axis: axis, share: share)
-            }.value
+        .clipped()
+        // The bands' own colors, once.
+        .task(id: model.map?.items.count) {
+            guard colors == nil, let map = model.map else { return }
+            let means = await Task.detached(priority: .userInitiated) { ColorBands.colors(of: map.items) }.value
+            colors = Dictionary(uniqueKeysWithValues: means.enumerated().map { band, mean in
+                (band, CGColor(srgbRed: CGFloat(mean.x), green: CGFloat(mean.y), blue: CGFloat(mean.z), alpha: 1))
+            })
         }
     }
 
@@ -272,39 +308,26 @@ private struct ColorStrataCanvas: View {
     }
 }
 
-/// What floats over the palette: how it's standing, where you are, the zoom keys.
+/// What floats over the palette's wheel: how it's standing, where you are, the seasons key,
+/// and the 3D and zoom keys.
 private struct PaletteChrome: View {
     let model: AppModel
     let theme: Theme
     let space: PaletteSpace?
 
-    private static let kinds: [(PaletteViewKind, String, KeyEquivalent)] = [
-        (.wheel, "wheel", "e"), (.cylinder, "cylinder", "d"), (.time, "through time", "j"),
-    ]
-
     var body: some View {
         ZStack(alignment: .topLeading) {
-            if model.paletteView != .time { axisLabels }
+            axisLabels
             VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 4) {
-                    ForEach(Self.kinds, id: \.1) { kind, label, key in
-                        Button(label) { choose(kind) }
-                            .buttonStyle(KeyStyle(theme: theme, led: model.paletteView == kind))
-                            .hotkey("⌘\(String(key.character).uppercased())", key: key, model: model, theme: theme)
-                    }
-                    if model.paletteView == .time {
-                        Button("stacked (percent)") { model.paletteShowsShare.toggle() }
-                            .buttonStyle(KeyStyle(theme: theme, led: model.paletteShowsShare))
-                            .help("On, each month fills the height, showing its mix of colors. Off, thickness shows how much there was.")
-                            .padding(.leading, 10)
-                    }
-                }
+                Button("seasons") { model.paletteShowsSeasons.toggle() }
+                    .buttonStyle(KeyStyle(theme: theme, led: model.paletteShowsSeasons))
+                    .hotkey("⌘E", key: "e", model: model, theme: theme)
+                    .help("Color through time, under the wheel. Both follow the time selected.")
                 Spacer()
-                if model.paletteView == .wheel {
+                if !model.paletteIn3D {
                     PaletteMinimap(model: model, theme: theme, space: space)
                 }
-                // Through time, the chart's years are along the bottom here.
-                if model.paletteView != .time, let scene = model.scene, let map = model.map {
+                if let scene = model.scene, let map = model.map {
                     Readout(visible: scene.visible.count, total: map.items.count, waiting: map.waiting, theme: theme)
                 }
             }
@@ -312,30 +335,27 @@ private struct PaletteChrome: View {
             .padding(.vertical, 12)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
 
-            if model.paletteView != .time {
-                VStack(spacing: 4) {
-                    Spacer()
-                    // Their shortcuts are in the Map menu.
-                    Button("+", action: model.palette.zoomIn).accessibilityLabel("Zoom in")
-                        .hotkey("⌘+", placement: .beside, model: model, theme: theme)
-                    Button("−", action: model.palette.zoomOut).accessibilityLabel("Zoom out")
-                        .hotkey("⌘-", placement: .beside, model: model, theme: theme)
-                    Button("fit", action: model.palette.fit).accessibilityLabel("Show everything")
-                        .hotkey("⌘0", placement: .beside, model: model, theme: theme)
-                }
-                .buttonStyle(SquareKeyStyle(theme: theme))
-                .padding(.trailing, 16 + (model.selection == nil ? 0 : DetailPanel.width))
-                .padding(.bottom, 12)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+            VStack(spacing: 4) {
+                Spacer()
+                // It names the view it switches to, as the terrain's does. Its shortcut is in the Map menu.
+                Button(model.paletteIn3D ? "2D" : "3D") { model.paletteIn3D.toggle() }
+                    .accessibilityLabel(model.paletteIn3D ? "Lay the wheel flat" : "Stand the wheel up")
+                    .help(model.paletteIn3D ? "Lay the wheel flat again."
+                          : "Stand the wheel up as a cylinder, with lightness as its height. Drag to turn it.")
+                    .hotkey("⌘D", placement: .beside, model: model, theme: theme)
+                    .padding(.bottom, 4)
+                // Their shortcuts are in the Map menu.
+                Button("+", action: model.palette.zoomIn).accessibilityLabel("Zoom in")
+                    .hotkey("⌘+", placement: .beside, model: model, theme: theme)
+                Button("−", action: model.palette.zoomOut).accessibilityLabel("Zoom out")
+                    .hotkey("⌘-", placement: .beside, model: model, theme: theme)
+                Button("fit", action: model.palette.fit).accessibilityLabel("Show everything")
+                    .hotkey("⌘0", placement: .beside, model: model, theme: theme)
             }
-        }
-    }
-
-    private func choose(_ kind: PaletteViewKind) {
-        model.paletteView = kind
-        // The canvas may be just coming back, so this waits a turn for it to be there.
-        if kind != .time {
-            DispatchQueue.main.async { model.palette.setCylinder(kind == .cylinder) }
+            .buttonStyle(SquareKeyStyle(theme: theme))
+            .padding(.trailing, 16 + (model.selection == nil ? 0 : DetailPanel.width))
+            .padding(.bottom, 12)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
         }
     }
 

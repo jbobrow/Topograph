@@ -886,6 +886,71 @@ final class LayoutTests: XCTestCase {
             XCTAssertGreaterThan(try Int.fetchOne(db, sql: "select count(*) from cluster") ?? 0, 0)
         }
     }
+
+    func testSearchesFloatOverThePicturesTheyAreAbout() {
+        var random = SeededRandom(seed: 3)
+        let dimensions = 32
+        func unit(_ v: [Float]) -> [Float] { let l = sqrt(v.reduce(0) { $0 + $1 * $1 }); return v.map { $0 / l } }
+        func noise(_ scale: Float) -> [Float] { (0..<dimensions).map { _ in Float(random.normal()) * scale } }
+        let subjects = (0..<3).map { _ in unit(noise(1)) }
+        // Words sit apart on the map, and every search shares a lean toward words.
+        let wordy = unit(noise(1))
+        let centers: [(Float, Float)] = [(100, 100), (500, 900), (900, 100)]
+        var land: [Float] = [], xy: [Float] = [], hasPicture: [Bool] = []
+        for (subject, center) in zip(subjects, centers) {
+            for _ in 0..<20 {
+                land += unit(zip(subject, noise(0.05)).map(+))
+                xy += [center.0 + Float(random.normal()) * 5, center.1 + Float(random.normal()) * 5]
+                hasPicture.append(true)
+            }
+        }
+        for subject in subjects {
+            for _ in 0..<20 {
+                land += unit((0..<dimensions).map { subject[$0] * 0.3 + wordy[$0] + Float(random.normal()) * 0.05 })
+                xy += [500, 500]
+                hasPicture.append(false)
+            }
+        }
+        var sky: [Float] = []
+        for subject in subjects {
+            for _ in 0..<5 { sky += unit((0..<dimensions).map { subject[$0] * 0.5 + wordy[$0] + Float(random.normal()) * 0.05 }) }
+        }
+        let placed = MapBuilder.placeClouds(Matrix(rows: 15, columns: dimensions, values: sky),
+                                            over: Matrix(rows: 120, columns: dimensions, values: land), hasPicture: hasPicture, xy: xy)
+        for (search, cloud) in placed.enumerated() {
+            let center = centers[search / 5]
+            XCTAssertLessThan(hypot(cloud.x - center.0, cloud.y - center.1), 40, "over its own subject's pictures")
+            XCTAssertEqual(Int(cloud.near[0]) / 20, search / 5)
+            XCTAssertTrue(cloud.near.allSatisfy { $0 < 60 }, "pictures only")
+        }
+    }
+
+    func testSearchesAreCloudsNotLand() throws {
+        let library = try LibraryWriter(root: try neutralFolder())
+        let (vectors, _) = blobs(3, each: 40, dimensions: CLIPEncoder.dimensions)
+        try library.db.write { db in
+            for item in 0..<vectors.rows {
+                let search = item % 10 == 0
+                let id = search ? "google:\(item)" : "x:\(item)"
+                try db.execute(sql: "insert into item(id, platform, kind, text, created_at, hydrated) values (?, ?, 'text', ?, 1600000000, 1)",
+                               arguments: [id, search ? "google" : "x", "words \(item)"])
+                try db.execute(sql: "insert into interaction(item_id, type, at) values (?, ?, 1600000000)", arguments: [id, search ? "search" : "post"])
+                let data = Array(vectors.row(item)).withUnsafeBytes { Data($0) }
+                try db.execute(sql: "insert into embedding(item_id, model, vector) values (?, ?, ?)", arguments: [id, CLIPEncoder.modelName, data])
+            }
+        }
+        try library.setMeta("embedding_model", CLIPEncoder.modelName)
+        try MapBuilder.computeLayout(library: library, recipe: .pictures, clip: nil, reporter: silent)
+        try library.db.read { db in
+            XCTAssertEqual(try Int.fetchOne(db, sql: "select count(*) from layout where item_id like 'google:%'"), 0)
+            XCTAssertEqual(try Int.fetchOne(db, sql: "select count(*) from cloud"), 12)
+            XCTAssertEqual(try Int.fetchOne(db, sql: "select count(*) from layout"), 108)
+        }
+        let map = try Library(root: library.root).map(.pictures)
+        XCTAssertEqual(map.clouds.searches.count, 12)
+        XCTAssertEqual(map.waiting, 0, "clouds aren't waiting to be mapped")
+        XCTAssertEqual(try Library(root: library.root).sources().unplaced, 0)
+    }
 }
 
 final class WordsTokenizerTests: XCTestCase {

@@ -12,6 +12,9 @@ final class TerrainController {
     func zoomOut() { view?.zoomFromCenter(by: 1 / 1.8) }
     func fit() { view?.animateToFit() }
 
+    /// See the terrain in 3D, rising out of the flat map, or settle back down onto it.
+    func setRelief(_ on: Bool) { view?.setRelief(on) }
+
     /// Put a spot on the map at the middle of the view, right away, as a drag on the minimap does.
     func center(x: Double, y: Double) { view?.center(x: x, y: y) }
 
@@ -65,10 +68,14 @@ struct TerrainView: NSViewRepresentable {
     let selected: Int32?
     let isActive: Bool
     let isPlaying: Bool
+    let showsMarkers: Bool
+    /// The terrain stood up in 3D, to fly over.
+    let relief: Bool
     var onFailure: (String) -> Void
     var onHover: (Hover?) -> Void
     var onPickItem: (Int32) -> Void
     var onPickRegion: (Int) -> Void
+    var onPickCloud: (SIMD2<Double>) -> Void
     var onWhere: ([Int]) -> Void
     var onViewport: (MapViewport) -> Void
 
@@ -89,11 +96,14 @@ struct TerrainView: NSViewRepresentable {
         view.onHover = onHover
         view.onPickItem = onPickItem
         view.onPickRegion = onPickRegion
+        view.onPickCloud = onPickCloud
         view.onWhere = onWhere
         view.onViewport = onViewport
         view.isActive = isActive
         view.isPlaying = isPlaying
+        view.showsMarkers = showsMarkers
         view.show(scene, root: root, imageMode: imageMode, selected: selected)
+        view.setRelief(relief)
     }
 }
 
@@ -102,6 +112,8 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
     private enum Drag {
         case pan(last: CGPoint)
         case box(start: CGPoint, now: CGPoint?)
+        /// In 3D: turning and tilting. Without moving, it's a click.
+        case orbit(start: CGPoint, last: CGPoint, moved: Bool)
     }
 
     private var renderer: TerrainRenderer?
@@ -135,13 +147,35 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
     private var lastLabelFrame: CFTimeInterval = 0
     private var labelsMoving = false
 
+    /// While the terrain is in 3D, the camera flying over it. Everything that works on the flat
+    /// map's transform uses `shown`, the flat equivalent of what the camera sees.
+    private var camera: OrbitCamera? {
+        // Into or out of 3D, the cursor changes with what a drag does.
+        didSet { if (camera == nil) != (oldValue == nil) { updateCursor() } }
+    }
+    /// How far the relief has risen out of the flat map, 0 to 1.
+    private var rise = 0.0
+    private var wantsRelief = false
+    private var flight: (from: OrbitCamera, to: OrbitCamera, riseFrom: Double, riseTo: Double,
+                         start: CFTimeInterval, duration: CFTimeInterval)?
+    /// Where each item stands on the relief, for this scene.
+    private var points: ReliefPoints?
+    /// Pictures standing in 3D last frame, nearest last, for finding what's under the pointer.
+    private var standing: [(index: Int32, frame: CGRect)] = []
+
     private var hovered: Int32?
+    /// The hovered item is showing as a lifted picture this frame, so its marker isn't enlarged.
+    private var hoverIsPicture = false
+    /// Where the pointer is over the map, in points: markers show around it when zoomed out.
+    private var pointer: CGPoint?
     var pointerIsOnMinimap = false
     private var whereKey: [Int] = []
 
     var onHover: ((Hover?) -> Void)?
     var onPickItem: ((Int32) -> Void)?
     var onPickRegion: ((Int) -> Void)?
+    /// A spot on the map under a cloud.
+    var onPickCloud: ((SIMD2<Double>) -> Void)?
     var onWhere: (([Int]) -> Void)?
     var onViewport: ((MapViewport) -> Void)?
     /// Whether the map is the view showing. Other views get the keyboard to themselves.
@@ -155,12 +189,26 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
     }
     /// While the timeline plays, space pauses it instead of moving the map.
     var isPlaying = false
+    /// Hidden, markers show only around the pointer.
+    var showsMarkers = true {
+        didSet { if showsMarkers != oldValue { fade() } }
+    }
+    /// How much markers and clouds show, 0 to 1: they fade rather than blink.
+    private var markersLevel = 1.0
+    private var cloudsLevel = 0.0
+    private var fadeLink: CADisplayLink?
+    private var lastFade: CFTimeInterval = 0
     private var lastViewport: MapViewport?
 
-    var zoom: Double { transform.k }
+    var zoom: Double { shown.k }
+
+    /// The flat map's transform, or in 3D the flat transform showing the same middle at the same scale.
+    private var shown: MapTransform { camera?.transform(viewSize: bounds.size) ?? transform }
 
     func setUp() throws {
         colorPixelFormat = .bgra8Unorm
+        // For the terrain in 3D, where the ground hides what's behind it.
+        depthStencilPixelFormat = .depth32Float
         (layer as? CAMetalLayer)?.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
         isPaused = true
         enableSetNeedsDisplay = true
@@ -186,9 +234,58 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
         guard scene?.id != shownScene else { return keep(newlySelected) }
         shownScene = scene?.id
         self.scene = scene
+        points = nil
         renderer?.setScene(scene)
         needsDisplay = true
+        fade()
         keep(newlySelected)
+    }
+
+    // MARK: Fading markers and clouds
+
+    private var markersWanted: Double { showsMarkers ? 1 : 0 }
+    private var cloudsWanted: Double { scene?.weather != nil ? 1 : 0 }
+
+    /// Starts markers and clouds toward what's wanted, over a quarter of a second.
+    private func fade() {
+        guard markersLevel != markersWanted || cloudsLevel != cloudsWanted else { return }
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            markersLevel = markersWanted
+            cloudsLevel = cloudsWanted
+            needsDisplay = true
+            return
+        }
+        guard fadeLink == nil else { return }
+        lastFade = CACurrentMediaTime()
+        let link = displayLink(target: self, selector: #selector(stepFade))
+        link.add(to: .main, forMode: .common)
+        fadeLink = link
+    }
+
+    @objc private func stepFade() {
+        let now = CACurrentMediaTime()
+        let step = (now - lastFade) / 0.25
+        lastFade = now
+        func toward(_ level: Double, _ wanted: Double) -> Double {
+            level < wanted ? min(level + step, wanted) : max(level - step, wanted)
+        }
+        markersLevel = toward(markersLevel, markersWanted)
+        cloudsLevel = toward(cloudsLevel, cloudsWanted)
+        needsDisplay = true
+        if markersLevel == markersWanted, cloudsLevel == cloudsWanted {
+            fadeLink?.invalidate()
+            fadeLink = nil
+        }
+    }
+
+    /// The fades, the pointer and the hovered marker, for the renderer.
+    private func shade(_ overlay: inout TerrainOverlay) {
+        if let hovered, hovered != selected, !hoverIsPicture, let scene { overlay.hovered = scene.map.items[Int(hovered)] }
+        hoverIsPicture = false
+        func eased(_ t: Double) -> Double { t * t * (3 - 2 * t) }
+        overlay.markers = eased(markersLevel)
+        overlay.clouds = eased(cloudsLevel)
+        overlay.pointer = pointer
     }
 
     private func keep(_ index: Int32?) {
@@ -218,16 +315,23 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
 
     /// Opening the side panel covers the right of the map, so an item there moves out from under it.
     private func keepInView(_ index: Int32, scene: TerrainScene) {
-        guard animation == nil else { return }
+        guard animation == nil, flight == nil else { return }
+        if let camera {
+            guard let at = camera.projection(viewSize: bounds.size).project(reliefPoints(scene).position(index, rise: Float(rise))) else { return }
+            let move = FloatingPicture.correction(for: at.point, bounds: bounds.size)
+            if move != .zero { fly(to: camera.panned(dx: move.width, dy: move.height, viewSize: bounds.size), duration: 0.3) }
+            return
+        }
         let move = FloatingPicture.correction(for: screen(scene.map.items[Int(index)]), bounds: bounds.size)
         if move != .zero { animate(to: transform.panned(dx: move.width, dy: move.height), duration: 0.3) }
     }
 
-    private func placeFloating(_ index: Int32, scene: TerrainScene, scale: Double, into overlay: inout TerrainOverlay) {
+    /// `place` is where it is on screen, and `k` the scale it's seen at there.
+    private func placeFloating(_ index: Int32, scene: TerrainScene, place: CGPoint, k: Double, scale: Double, into overlay: inout TerrainOverlay) {
         let item = scene.map.items[Int(index)]
         guard let path = item.thumb, let thumbnails else { return }
-        let long = TerrainStyle.thumbnailSize(k: transform.k) * TerrainStyle.thumbnailScale(resonance: item.resonance)
-        let placed = FloatingPicture.layout(place: screen(item), aspect: Double(item.aspect ?? 1), long: long, bounds: bounds.size)
+        let long = TerrainStyle.thumbnailSize(k: k) * TerrainStyle.thumbnailScale(resonance: item.resonance)
+        let placed = FloatingPicture.layout(place: place, aspect: Double(item.aspect ?? 1), long: long, bounds: bounds.size)
         let texture = thumbnails.texture(item: index, path: path, pixels: max(placed.size.width, placed.size.height) * scale, dither: false)
         overlay.floating = ThumbPlacement(center: placed.center, size: placed.size, frame: 2, mine: true,
                                           texture: texture, mode: .color, nearest: false)
@@ -238,6 +342,7 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
 
     func draw(in view: MTKView) {
         guard let renderer else { return }
+        if let camera { return draw(renderer, camera: camera) }
         var overlay = TerrainOverlay()
         if let scene {
             let size = bounds.size
@@ -249,13 +354,17 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
                 // With a picture lifted off, this marks the place it came from.
                 let item = scene.map.items[Int(selected)]
                 overlay.viewfinder = (screen(item), item.thumb == nil && overlay.dots ? TerrainStyle.thumbnailSize(k: transform.k) * 0.5 + 8 : 10)
-                placeFloating(selected, scene: scene, scale: scale, into: &overlay)
+                placeFloating(selected, scene: scene, place: screen(item), k: transform.k, scale: scale, into: &overlay)
             }
             thumbnails?.endFrame()
-            overlay.labels = labelPlacements(scene, size: size, scale: scale)
+            let transform = transform
+            overlay.labels = labelPlacements(scene, size: size, scale: scale) { region in
+                (CGPoint(x: region.x * transform.k + transform.x, y: region.y * transform.k + transform.y), transform.k)
+            }
             updateWhere(scene)
         }
         overlay.zoomBox = zoomBox
+        shade(&overlay)
         updateViewport()
         renderer.draw(in: self, transform: transform, theme: theme, overlay: overlay)
     }
@@ -306,14 +415,21 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
         }
         // The selected picture is lifted off the map, so it isn't here as well.
         for index in chosen.reversed() where index != hovered && index != selected { place(index, lifted: false) }
-        if let hovered, hovered != selected, chosen.contains(hovered) { place(hovered, lifted: true) }
+        if let hovered, hovered != selected, chosen.contains(hovered) {
+            let before = out.count
+            place(hovered, lifted: true)
+            hoverIsPicture = out.count > before
+        }
         return out
     }
 
-    private func labelPlacements(_ scene: TerrainScene, size: CGSize, scale: Double) -> [LabelPlacement] {
+    /// `locate` says where a region's name is anchored on screen and the scale it's seen at.
+    private func labelPlacements(_ scene: TerrainScene, size: CGSize, scale: Double,
+                                 locate: (Region) -> (point: CGPoint, k: Double)?) -> [LabelPlacement] {
         guard let labels else { return [] }
-        placed = planner.plan(tree: scene.map.regions, counts: scene.counts, transform: transform, size: size,
-                              width: { labels.width($0, size: $1) })
+        labels.beginFrame()
+        placed = planner.plan(tree: scene.map.regions, counts: scene.counts, size: size,
+                              width: { labels.width($0, size: $1) }, locate: locate)
         let now = CACurrentMediaTime()
         // The first step after a pause is one frame's worth, so a slow frame never
         // leaves a name half-visible for long.
@@ -336,13 +452,14 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
             if alpha != target { moving = true }
             guard let region = scene.map.regions.regions[id] else { continue }
             // A name that's leaving keeps following its anchor as it fades.
+            guard let anchor = shown[id].map({ CGPoint(x: $0.x, y: $0.y) }) ?? locate(region)?.point else { continue }
             let label = shown[id] ?? PlacedLabel.geometry(
-                id: id, x: region.x * transform.k + transform.x, y: region.y * transform.k + transform.y,
+                id: id, x: anchor.x, y: anchor.y,
                 top: region.depth == 0, count: scene.counts[id] ?? 0,
                 nameWidth: labels.width(region.label, size: region.depth == 0 ? 12 : 11),
                 countWidth: labels.width((scene.counts[id] ?? 0).formatted(), size: 10))
             guard let texture = labels.texture(label: label, name: region.label, theme: theme, dark: dark, scale: scale) else { continue }
-            out.append(LabelPlacement(origin: label.box.origin, size: label.box.size, texture: texture, alpha: alpha))
+            out.append(LabelPlacement(origin: label.box.origin, size: label.box.size, texture: texture, alpha: alpha, region: id))
         }
         labelsMoving = moving
         if moving { needsDisplay = true }
@@ -351,6 +468,7 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
 
     /// The regions you've zoomed inside, as a path from the top.
     private func updateWhere(_ scene: TerrainScene) {
+        let transform = shown
         let cx = (bounds.width / 2 - transform.x) / transform.k, cy = (bounds.height / 2 - transform.y) / transform.k
         var path: [Int] = []
         if let index = scene.spatial.nearest(x: cx, y: cy, radius: 80 / transform.k),
@@ -364,7 +482,7 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
     }
 
     private func updateViewport() {
-        let viewport = MapViewport(transform: transform, size: bounds.size)
+        let viewport = MapViewport(transform: shown, size: bounds.size)
         guard viewport != lastViewport else { return }
         lastViewport = viewport
         let notify = onViewport
@@ -376,7 +494,13 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
         super.setFrameSize(newSize)
         guard newSize.width > 0, newSize.height > 0 else { return }
         stopAnimating()
-        if fitted {
+        if let camera {
+            if fitted { self.camera = settled(.overview(viewSize: newSize, yaw: camera.yaw)) }
+        } else if wantsRelief {
+            // Asked for before there was a size to start from.
+            rise = 1
+            camera = settled(.overview(viewSize: newSize))
+        } else if fitted {
             transform = .fit(newSize)
         } else {
             transform = transform.panned(dx: (newSize.width - old.width) / 2, dy: (newSize.height - old.height) / 2)
@@ -447,7 +571,9 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
 
     private var cursor: NSCursor {
         if case .pan = drag { return .closedHand }
-        return spaceHeld ? .openHand : .crosshair
+        if case .orbit(_, _, true) = drag { return .closedHand }
+        // In 3D a drag turns the view, so it's a hand; flat, a drag draws a box to zoom into.
+        return spaceHeld || camera != nil ? .openHand : .crosshair
     }
 
     private func updateCursor() {
@@ -512,13 +638,36 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
 
     private func itemIndex(at point: CGPoint) -> Int32? {
         guard let scene else { return nil }
+        if let camera {
+            if let hit = standing.last(where: { $0.frame.contains(point) }) { return hit.index }
+            return reliefPoints(scene).nearest(scene.visible, to: point, projection: camera.projection(viewSize: bounds.size),
+                                               rise: Float(rise), radius: 8)
+        }
         let k = transform.k
         let radius = (k >= TerrainStyle.thumbnailZoom ? TerrainStyle.thumbnailSize(k: k) * 0.5 : 8) / k
         return scene.spatial.nearest(x: (point.x - transform.x) / k, y: (point.y - transform.y) / k, radius: radius)
     }
 
+    /// Where the pointer meets a cloud, as a spot on the map, when one is there. In 3D that's
+    /// up at the clouds' height, where they're drawn, not down at their shadows.
+    private func cloudSpot(at point: CGPoint) -> SIMD2<Double>? {
+        guard let weather = scene?.weather else { return nil }
+        let spot = camera.map {
+            $0.projection(viewSize: bounds.size).ground(at: point, height: Double(TerrainRenderer.cloudAltitude(rise: Float(rise))))
+        } ?? SIMD2((point.x - transform.x) / transform.k, (point.y - transform.y) / transform.k)
+        guard let spot, Clouds.isCloudy(weather, at: spot.x, spot.y) else { return nil }
+        return spot
+    }
+
     private func labelID(at point: CGPoint) -> Int? {
         placed.first { $0.box.contains(point) }?.id
+    }
+
+    /// Moves the light the pointer casts on hidden markers.
+    private func setPointer(_ point: CGPoint?) {
+        guard point != pointer else { return }
+        pointer = point
+        if markersLevel < 1 { needsDisplay = true }
     }
 
     private func clearHover() {
@@ -532,9 +681,11 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
         // Hidden under another view, the map has no say in the cursor.
         guard isActive else { return }
         guard pointerIsOverMap else {
+            setPointer(nil)
             setCursorOverChrome()
             return clearHover()
         }
+        setPointer(location(of: event))
         if spaceHeld {
             NSCursor.openHand.set()
             return
@@ -542,7 +693,7 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
         let point = location(of: event)
         let onLabel = labelID(at: point) != nil
         let index = onLabel ? nil : itemIndex(at: point)
-        if onLabel || index != nil { NSCursor.pointingHand.set() } else { NSCursor.crosshair.set() }
+        if onLabel || index != nil || cloudSpot(at: point) != nil { NSCursor.pointingHand.set() } else { cursor.set() }
         guard let index else { return clearHover() }
         if index != hovered { needsDisplay = true }
         hovered = index
@@ -550,6 +701,7 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
     }
 
     override func mouseExited(with event: NSEvent) {
+        setPointer(nil)
         clearHover()
     }
 
@@ -557,16 +709,28 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
         let point = location(of: event)
         stopAnimating()
         clearHover()
-        drag = spaceHeld ? .pan(last: point) : .box(start: point, now: nil)
+        drag = spaceHeld ? .pan(last: point) : camera != nil ? .orbit(start: point, last: point, moved: false) : .box(start: point, now: nil)
         updateCursor()
     }
 
     override func mouseDragged(with event: NSEvent) {
         let now = location(of: event)
+        // Drawing a box to zoom into, the pointer lights nothing: the box is what you're looking at.
+        if case .box = drag { setPointer(nil) } else { setPointer(now) }
         switch drag {
         case .pan(let last):
-            apply(transform.panned(dx: now.x - last.x, dy: now.y - last.y))
+            if let camera {
+                apply(camera.panned(dx: now.x - last.x, dy: now.y - last.y, viewSize: bounds.size))
+            } else {
+                apply(transform.panned(dx: now.x - last.x, dy: now.y - last.y))
+            }
             drag = .pan(last: now)
+        case .orbit(let start, let last, let moved):
+            guard moved || abs(now.x - start.x) + abs(now.y - start.y) > 3, let camera else { return }
+            // Dragging sideways turns the map under the pointer; down looks more from above.
+            apply(camera.orbited(yaw: -(now.x - last.x) * 0.006, pitch: (now.y - last.y) * 0.005))
+            drag = .orbit(start: start, last: now, moved: true)
+            if !moved { updateCursor() }
         case .box(let start, let moved):
             // A hand's small wobble on a click isn't a rectangle.
             guard moved != nil || abs(now.x - start.x) + abs(now.y - start.y) > 3 else { return }
@@ -578,13 +742,37 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
         }
     }
 
+    // Pressing with two fingers and dragging, or dragging with the right button, pans, on the
+    // flat map and in 3D, as space and drag do.
+    override func rightMouseDown(with event: NSEvent) {
+        stopAnimating()
+        clearHover()
+        drag = .pan(last: location(of: event))
+        NSCursor.closedHand.set()
+    }
+
+    override func rightMouseDragged(with event: NSEvent) {
+        mouseDragged(with: event)
+    }
+
+    override func rightMouseUp(with event: NSEvent) {
+        drag = nil
+        setPointer(location(of: event))
+        updateCursor()
+    }
+
     override func mouseUp(with event: NSEvent) {
         // The last drag event can be some way short of where the button came up.
         if case .box(let start, let now?) = drag { drag = .box(start: start, now: location(of: event)) }
         let finished = drag
         let box = zoomBox
         drag = nil
+        setPointer(location(of: event))
         updateCursor()
+        if case .orbit(_, _, let moved) = finished {
+            if !moved { pick(at: location(of: event)) }
+            return
+        }
         guard case .box = finished else { return }
         needsDisplay = true
         if let box {
@@ -594,11 +782,16 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
             animate(to: transform.zoomed(toFill: box, viewSize: bounds.size), duration: 0.35)
             return
         }
-        let point = location(of: event)
+        pick(at: location(of: event))
+    }
+
+    private func pick(at point: CGPoint) {
         if let id = labelID(at: point) {
             onPickRegion?(id)
         } else if let index = itemIndex(at: point) {
             onPickItem?(index)
+        } else if let spot = cloudSpot(at: point) {
+            onPickCloud?(spot)
         }
     }
 
@@ -606,6 +799,15 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
     /// so do two fingers with ⌘ or ⌥ held.
     override func scrollWheel(with event: NSEvent) {
         let zoomKey = !event.modifierFlags.intersection([.command, .option]).isEmpty
+        if let camera {
+            if event.hasPreciseScrollingDeltas && !zoomKey {
+                apply(camera.panned(dx: event.scrollingDeltaX, dy: event.scrollingDeltaY, viewSize: bounds.size))
+            } else {
+                let rate = event.hasPreciseScrollingDeltas ? 0.01 : 0.05
+                zoomCamera(camera, by: pow(2, event.scrollingDeltaY * rate), at: location(of: event))
+            }
+            return
+        }
         if event.hasPreciseScrollingDeltas && !zoomKey {
             apply(transform.panned(dx: event.scrollingDeltaX, dy: event.scrollingDeltaY))
         } else {
@@ -615,10 +817,27 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
     }
 
     override func magnify(with event: NSEvent) {
+        if let camera { return zoomCamera(camera, by: 1 + event.magnification, at: location(of: event)) }
         apply(transform.zoomed(by: 1 + event.magnification, around: location(of: event)))
     }
 
+    /// Two fingers turning on a trackpad turn the map with them, in 3D.
+    override func rotate(with event: NSEvent) {
+        guard let camera else { return }
+        apply(camera.orbited(yaw: -Double(event.rotation) * .pi / 180, pitch: 0))
+    }
+
+    /// Toward the ground under the pointer.
+    private func zoomCamera(_ camera: OrbitCamera, by factor: Double, at point: CGPoint) {
+        let spot = camera.projection(viewSize: bounds.size).ground(at: point, height: camera.ground)
+        apply(camera.zoomed(by: factor, toward: spot))
+    }
+
     fileprivate func zoomFromCenter(by factor: Double) {
+        if let camera {
+            fitted = false
+            return fly(to: (flight?.to ?? camera).zoomed(by: factor), duration: 0.25)
+        }
         let center = CGPoint(x: bounds.width / 2, y: bounds.height / 2)
         fitted = false
         // Quick presses add up: each one starts from where the last was heading.
@@ -627,10 +846,16 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
 
     fileprivate func animateToFit() {
         fitted = true
+        if camera != nil { return fly(to: .overview(viewSize: bounds.size), duration: 0.6) }
         animate(to: .fit(bounds.size), duration: 0.4)
     }
 
     fileprivate func center(x: Double, y: Double) {
+        if var camera {
+            camera.x = x
+            camera.y = y
+            return apply(camera)
+        }
         apply(transform.centered(onX: x, y: y, viewSize: bounds.size))
     }
 
@@ -638,6 +863,13 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
     fileprivate func fly(x: Double, y: Double, k: Double, besidePanel: Bool = false) {
         fitted = false
         let zoom = min(max(k, MapTransform.zoomRange.lowerBound), MapTransform.zoomRange.upperBound)
+        if var camera = flight?.to ?? camera {
+            camera.x = x
+            camera.y = y
+            camera.distance = OrbitCamera.focal(bounds.size) / zoom
+            if besidePanel { camera = camera.panned(dx: -DetailPanel.width / 2, dy: 0, viewSize: bounds.size) }
+            return fly(to: camera, duration: 0.6)
+        }
         let width = bounds.width - (besidePanel ? DetailPanel.width : 0)
         animate(to: MapTransform(k: zoom, x: width / 2 - x * zoom, y: bounds.height / 2 - y * zoom), duration: 0.6)
     }
@@ -660,6 +892,7 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
     }
 
     @objc private func step() {
+        if let flight { return stepFlight(flight) }
         guard let animation else { return stopAnimating() }
         let t = min((CACurrentMediaTime() - animation.start) / animation.duration, 1)
         let eased = t * t * (3 - 2 * t)
@@ -672,7 +905,204 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
 
     private func stopAnimating() {
         animation = nil
+        if let flight {
+            // Cut short, the relief finishes rising or settling at once, from wherever the camera is.
+            self.flight = nil
+            rise = flight.riseTo
+            if rise == 0 { land() } else { camera = camera.map(settled) }
+        }
         link?.invalidate()
         link = nil
+    }
+}
+
+// MARK: - 3D
+
+extension TerrainMTKView {
+    /// Rises out of the flat map, seen from straight above, and tilts; or turns back north,
+    /// looks straight down and settles flat again, where the flat map takes over.
+    fileprivate func setRelief(_ on: Bool) {
+        guard on != wantsRelief else { return }
+        wantsRelief = on
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        if on {
+            let start = camera ?? OrbitCamera(above: transform, viewSize: bounds.size)
+            flight = nil
+            camera = start
+            var tilted = start
+            tilted.pitch = OrbitCamera.tilt
+            fly(to: tilted, rise: 1, duration: 0.9)
+        } else if let camera {
+            var down = flight?.to ?? camera
+            down.pitch = .pi / 2
+            down.yaw = 0
+            down.ground = 0
+            fly(to: down, rise: 0, duration: 0.7)
+        }
+    }
+
+    /// The camera as moved by a pan, zoom or turn, at the height of the ground it's circling.
+    fileprivate func apply(_ next: OrbitCamera) {
+        stopAnimating()
+        // Cutting short the way down lands on the flat map.
+        guard camera != nil else { return }
+        fitted = false
+        camera = settled(next)
+        clearHover()
+        needsDisplay = true
+    }
+
+    fileprivate func settled(_ camera: OrbitCamera) -> OrbitCamera {
+        var camera = camera
+        camera.ground = scene.map { Double(Relief.height($0.field, x: camera.x, y: camera.y, rise: Float(rise))) } ?? 0
+        return camera
+    }
+
+    fileprivate func fly(to target: OrbitCamera, duration: CFTimeInterval) {
+        fly(to: target, rise: flight?.riseTo ?? rise, duration: duration)
+    }
+
+    private func fly(to target: OrbitCamera, rise riseTo: Double, duration: CFTimeInterval) {
+        guard let camera else { return }
+        clearHover()
+        var target = target
+        if riseTo > 0 {
+            target.ground = scene.map { Double(Relief.height($0.field, x: target.x, y: target.y, rise: Float(riseTo))) } ?? 0
+        }
+        animation = nil
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            flight = nil
+            self.camera = target
+            rise = riseTo
+            if riseTo == 0 { land() }
+            needsDisplay = true
+            return
+        }
+        flight = (camera, target, rise, riseTo, CACurrentMediaTime(), duration)
+        if link == nil {
+            let link = displayLink(target: self, selector: #selector(stepRelief))
+            link.add(to: .main, forMode: .common)
+            self.link = link
+        }
+    }
+
+    @objc private func stepRelief() {
+        if let flight { stepFlight(flight) } else { stopAnimating() }
+    }
+
+    fileprivate func stepFlight(_ flight: (from: OrbitCamera, to: OrbitCamera, riseFrom: Double, riseTo: Double,
+                                           start: CFTimeInterval, duration: CFTimeInterval)) {
+        let t = min((CACurrentMediaTime() - flight.start) / flight.duration, 1)
+        let eased = t * t * (3 - 2 * t)
+        camera = flight.from.interpolated(to: flight.to, t: eased)
+        rise = flight.riseFrom + (flight.riseTo - flight.riseFrom) * eased
+        needsDisplay = true
+        if t >= 1 {
+            self.flight = nil
+            if rise == 0 { land() }
+            stopAnimating()
+        }
+    }
+
+    /// Back on the flat map, showing just what the camera showed looking straight down.
+    private func land() {
+        guard let camera else { return }
+        transform = camera.transform(viewSize: bounds.size)
+        self.camera = nil
+        rise = 0
+        standing = []
+        needsDisplay = true
+    }
+
+    fileprivate func reliefPoints(_ scene: TerrainScene) -> ReliefPoints {
+        if let points { return points }
+        let made = ReliefPoints(items: scene.map.items, visible: scene.visible, field: scene.field)
+        points = made
+        return made
+    }
+
+    fileprivate func draw(_ renderer: TerrainRenderer, camera: OrbitCamera) {
+        let size = bounds.size
+        let scale = bounds.width > 0 ? Double(drawableSize.width / bounds.width) : 1
+        let projection = camera.projection(viewSize: size)
+        let rise = Float(self.rise)
+        var overlay = TerrainOverlay()
+        if let scene {
+            let points = reliefPoints(scene)
+            thumbnails?.beginFrame()
+            overlay.thumbs = standingPlacements(scene, points: points, projection: projection, camera: camera, scale: scale)
+            if let selected, scene.visible.contains(selected), let at = projection.project(points.position(selected, rise: rise)) {
+                let item = scene.map.items[Int(selected)]
+                let near = at.scale >= TerrainStyle.thumbnailZoom
+                overlay.viewfinder = (at.point, item.thumb == nil && near ? TerrainStyle.thumbnailSize(k: at.scale) * 0.5 + 8 : 10)
+                placeFloating(selected, scene: scene, place: at.point, k: at.scale, scale: scale, into: &overlay)
+            }
+            thumbnails?.endFrame()
+
+            // Names float like clouds above the ground they name, a rule running down to it.
+            var grounds: [Int: CGPoint] = [:]
+            overlay.labels = labelPlacements(scene, size: size, scale: scale) { region in
+                let height = Relief.height(scene.field, x: region.x, y: region.y, rise: rise)
+                let x = Float(region.x), y = Float(region.y)
+                guard let ground = projection.project(SIMD3(x, height, y)),
+                      let sky = projection.project(SIMD3(x, height + Relief.height * 0.3 * rise, y)) else { return nil }
+                grounds[region.id] = ground.point
+                return (sky.point, ground.scale)
+            }
+            for label in overlay.labels {
+                guard let id = label.region, let ground = grounds[id] else { continue }
+                // The crosshair, as `PlacedLabel.geometry` places it.
+                let anchor = CGPoint(x: label.origin.x + 5, y: label.origin.y + label.size.height / 2)
+                if hypot(anchor.x - ground.x, anchor.y - ground.y) > 4 { overlay.stems.append((anchor, ground, label.alpha)) }
+            }
+            updateWhere(scene)
+        }
+        shade(&overlay)
+        updateViewport()
+        renderer.draw(in: self, transform: camera.transform(viewSize: size), theme: theme, overlay: overlay,
+                      relief: ReliefFrame(camera: camera, projection: projection, rise: rise))
+    }
+
+    /// The most resonant pictures near enough to show, standing on their spots, farthest first
+    /// so nearer ones draw over them. Seen straight down they lie flat, as on the flat map.
+    private func standingPlacements(_ scene: TerrainScene, points: ReliefPoints, projection: Projection,
+                                    camera: OrbitCamera, scale: Double) -> [ThumbPlacement] {
+        guard let thumbnails else { return [] }
+        let rise = Float(self.rise)
+        let found = points.onScreen(scene.pictures, projection: projection, rise: rise, margin: 80,
+                                    minimumScale: TerrainStyle.thumbnailZoom, limit: 800)
+        let stand = min(1, cos(camera.pitch) * 3)
+        var out: [ThumbPlacement] = []
+        var hits: [(Int32, CGRect)] = []
+        func place(_ index: Int32, _ at: Projection.Projected, lifted: Bool) {
+            let item = scene.map.items[Int(index)]
+            guard let path = item.thumb else { return }
+            let long = TerrainStyle.thumbnailSize(k: at.scale) * TerrainStyle.thumbnailScale(resonance: item.resonance) * (lifted ? 1.18 : 1)
+            let aspect = Double(item.aspect ?? 1)
+            let size = aspect >= 1 ? CGSize(width: long, height: long / aspect) : CGSize(width: long * aspect, height: long)
+            let mode = lifted ? ImageMode.color : imageMode
+            let dither = mode == .dither
+            let texture = thumbnails.texture(item: index, path: path, pixels: long * scale, dither: dither)
+            if texture == nil, !lifted { return }
+            let center = CGPoint(x: at.point.x, y: at.point.y - size.height / 2 * stand)
+            // A little toward the eye, so the ground it stands on doesn't cut into it. Lifted, nothing does.
+            let spot = points.position(index, rise: rise)
+            let toward = simd_normalize(projection.eye - spot)
+            let depth = lifted ? 0 : projection.project(spot + toward * 3)?.depth ?? at.depth
+            out.append(ThumbPlacement(center: center, size: size, frame: item.mine || lifted ? 2 : 1, mine: item.mine || lifted,
+                                      texture: texture, mode: mode,
+                                      nearest: dither && long * scale >= Double(texture?.width ?? 0), depth: depth))
+            hits.append((index, CGRect(x: center.x - size.width / 2, y: center.y - size.height / 2, width: size.width, height: size.height)))
+        }
+        for (index, at) in found.sorted(by: { $0.at.depth > $1.at.depth }) where index != hovered && index != selected {
+            place(index, at, lifted: false)
+        }
+        if let hovered, hovered != selected, let at = found.first(where: { $0.index == hovered })?.at {
+            let before = out.count
+            place(hovered, at, lifted: true)
+            hoverIsPicture = out.count > before
+        }
+        standing = hits
+        return out
     }
 }

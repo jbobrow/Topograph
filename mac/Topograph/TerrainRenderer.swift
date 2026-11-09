@@ -12,24 +12,25 @@ struct TerrainScene: Sendable {
     let spatial: SpatialIndex
     /// Visible items with pictures, most resonant first.
     let pictures: [Int32]
-    /// The chart for these items, made together with them while Strata is showing so its
-    /// shape and its time range change in the same frame.
-    let strata: StrataModel?
-    /// Likewise for color through time, while that's showing.
-    let colorStrata: StrataModel?
     let range: ClosedRange<Int>?
+    /// The weather over the land on the field's grid, when clouds are showing (`Clouds.weather`).
+    let weather: [Float]?
+    /// The end of the season the weather is for.
+    let weatherEnd: Int?
 
-    init(map: LibraryMap, visible: [Int32], fullPeak: Double, strata: StrataModel? = nil, colorStrata: StrataModel? = nil, range: ClosedRange<Int>? = nil) {
-        self.colorStrata = colorStrata
+    init(map: LibraryMap, visible: [Int32], fullPeak: Double, range: ClosedRange<Int>? = nil,
+         clouds: Bool = false) {
         self.map = map
         self.visible = visible
-        self.strata = strata
         self.range = range
         field = DensityField(items: map.items, visible: visible, fullPeak: fullPeak)
         counts = map.regions.counts(items: map.items, visible: visible)
         spatial = SpatialIndex(items: map.items, visible: visible)
         pictures = visible.filter { map.items[Int($0)].thumb != nil }
             .sorted { map.items[Int($0)].resonance > map.items[Int($1)].resonance }
+        // The season up to the end of the time shown: with all time, the latest.
+        weatherEnd = range?.upperBound ?? map.clouds.searches.last?.time
+        weather = clouds ? weatherEnd.flatMap { map.clouds.weather(endingAt: $0) } : nil
     }
 }
 
@@ -53,6 +54,14 @@ struct Uniforms {
     var origin: Float
     var cell: Float
     var dotRadius: Float
+    /// Pixels; far off when the pointer isn't over the map.
+    var pointer = SIMD2<Float>(-1e6, -1e6)
+    /// Pixels around the pointer where markers show however far out you are.
+    var reveal: Float = 0
+    /// How much markers show everywhere, 0 to 1.
+    var markers: Float = 1
+    /// How much clouds show, 0 to 1.
+    var clouds: Float = 1
 }
 
 private struct Marker {
@@ -69,6 +78,8 @@ struct ThumbDraw {
     var mode: Float
     var hasImage: Float
     var nearest: Float
+    /// Metal's depth, for a picture standing in 3D.
+    var depth: Float = 0
 }
 
 struct Bar {
@@ -92,6 +103,8 @@ struct ThumbPlacement {
     let mode: ImageMode
     /// Drawn larger than its pixels, in 1-bit: keep the dots square.
     let nearest: Bool
+    /// Metal's depth where it stands, in 3D, so the ground in front of it hides it.
+    var depth: Float = 0
 }
 
 /// One region name to draw this frame.
@@ -100,6 +113,8 @@ struct LabelPlacement {
     let size: CGSize
     let texture: MTLTexture
     let alpha: Double
+    /// The region it names.
+    var region: Int? = nil
 }
 
 /// The open item's picture, lifted off the map or the wheel and drifting above its place, so
@@ -147,6 +162,14 @@ enum FloatingPicture {
 struct TerrainOverlay {
     var thumbs: [ThumbPlacement] = []
     var dots = false
+    /// How much markers show everywhere, 0 to 1; around the pointer they always do.
+    var markers = 1.0
+    /// How much clouds show, 0 to 1, as they fade in and out.
+    var clouds = 0.0
+    /// Where the pointer is over the map, in points.
+    var pointer: CGPoint?
+    /// The marker under the pointer, drawn larger, when it isn't showing as a picture.
+    var hovered: MapItem?
     /// The selection's viewfinder: its center and half its width, in points.
     var viewfinder: (center: CGPoint, half: Double)?
     /// The selection's picture, floating over its place, and the rule that ties them, in points.
@@ -155,6 +178,34 @@ struct TerrainOverlay {
     /// The rectangle being drawn to zoom into, in points.
     var zoomBox: CGRect?
     var labels: [LabelPlacement] = []
+    /// In 3D, the rules from each name down to the ground it names, in points.
+    var stems: [(from: CGPoint, to: CGPoint, alpha: Double)] = []
+}
+
+/// Keep in step with `Relief` in Terrain.metal.
+private struct ReliefUniforms {
+    var viewProjection: simd_float4x4
+    var eye: SIMD4<Float>
+    var sun: SIMD4<Float>
+    var height: Float
+    var exponent: Float
+    var fogNear: Float
+    var fogFar: Float
+    var focal: Float
+    var thumbnailZoom: Float
+    var dotRadius: Float
+    var gridStep: Float
+    var side: UInt32
+    var extent: Float
+    var center: SIMD2<Float>
+}
+
+/// The terrain seen in 3D this frame.
+struct ReliefFrame {
+    let camera: OrbitCamera
+    let projection: Projection
+    /// How far the relief has risen out of the flat map, 0 to 1.
+    let rise: Float
 }
 
 /// Draws the terrain with one full-view pass, an instanced pass of markers, and then
@@ -168,7 +219,32 @@ final class TerrainRenderer {
     private let thumbPipeline: MTLRenderPipelineState
     private let barPipeline: MTLRenderPipelineState
     private let labelPipeline: MTLRenderPipelineState
+    private let reliefPipeline: MTLRenderPipelineState
+    private let groundPipeline: MTLRenderPipelineState
+    private let reliefMarkerPipeline: MTLRenderPipelineState
+    private let cloudPipeline: MTLRenderPipelineState
+    private let flatCloudPipeline: MTLRenderPipelineState
+    private let linePipeline: MTLRenderPipelineState
+    /// Depth for the relief: tested and written by the ground, only tested by what stands on
+    /// it, and ignored by everything on top.
+    private let solid: MTLDepthStencilState
+    private let standing: MTLDepthStencilState
+    private let flat: MTLDepthStencilState
     private var field: MTLTexture?
+    /// The weather on the same grid, while clouds show.
+    private var weather: MTLTexture?
+    /// What the shaders read for weather when there is none: one cell of clear sky.
+    private lazy var clearSky: MTLTexture? = {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r32Float, width: 1, height: 1, mipmapped: false)
+        descriptor.usage = .shaderRead
+        let texture = device.makeTexture(descriptor: descriptor)
+        var zero: Float = 0
+        texture?.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0, withBytes: &zero, bytesPerRow: MemoryLayout<Float>.stride)
+        return texture
+    }()
+    /// The relief's triangles, two to a cell of the field.
+    private var mesh: MTLBuffer?
+    private var meshCount = 0
     private var markers: MTLBuffer?
     private var markerCount = 0
 
@@ -184,6 +260,7 @@ final class TerrainRenderer {
             let descriptor = MTLRenderPipelineDescriptor()
             descriptor.vertexFunction = library.makeFunction(name: vertex)
             descriptor.fragmentFunction = library.makeFunction(name: fragment)
+            descriptor.depthAttachmentPixelFormat = view.depthStencilPixelFormat
             let color = descriptor.colorAttachments[0]!
             color.pixelFormat = view.colorPixelFormat
             if blended {
@@ -200,11 +277,29 @@ final class TerrainRenderer {
         thumbPipeline = try pipeline("thumbVertex", "thumbFragment", blended: false)
         barPipeline = try pipeline("barVertex", "barFragment", blended: false)
         labelPipeline = try pipeline("labelVertex", "labelFragment", blended: true)
+        reliefPipeline = try pipeline("reliefVertex", "reliefFragment", blended: false)
+        groundPipeline = try pipeline("groundVertex", "reliefFragment", blended: false)
+        reliefMarkerPipeline = try pipeline("reliefMarkerVertex", "markerFragment", blended: true)
+        cloudPipeline = try pipeline("cloudVertex", "cloudFragment", blended: true)
+        flatCloudPipeline = try pipeline("terrainVertex", "flatCloudFragment", blended: true)
+        linePipeline = try pipeline("paletteLineVertex", "paletteLineFragment", blended: true)
+
+        func depth(_ compare: MTLCompareFunction, write: Bool) throws -> MTLDepthStencilState {
+            let descriptor = MTLDepthStencilDescriptor()
+            descriptor.depthCompareFunction = compare
+            descriptor.isDepthWriteEnabled = write
+            guard let state = device.makeDepthStencilState(descriptor: descriptor) else { throw RendererError.unavailable }
+            return state
+        }
+        solid = try depth(.less, write: true)
+        standing = try depth(.lessEqual, write: false)
+        flat = try depth(.always, write: false)
     }
 
     func setScene(_ scene: TerrainScene?) {
         guard let scene else {
             field = nil
+            weather = nil
             markers = nil
             markerCount = 0
             return
@@ -215,12 +310,27 @@ final class TerrainRenderer {
                 pixelFormat: .r32Float, width: scene.field.width, height: scene.field.height, mipmapped: false)
             descriptor.usage = .shaderRead
             field = device.makeTexture(descriptor: descriptor)
+            makeMesh(width: scene.field.width, height: scene.field.height)
         }
         scene.field.elevation.withUnsafeBytes { bytes in
             field?.replace(region: MTLRegionMake2D(0, 0, scene.field.width, scene.field.height),
                            mipmapLevel: 0, withBytes: bytes.baseAddress!,
                            bytesPerRow: scene.field.width * MemoryLayout<Float>.stride)
         }
+        if let values = scene.weather {
+            if weather?.width != scene.field.width || weather?.height != scene.field.height {
+                let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                    pixelFormat: .r32Float, width: scene.field.width, height: scene.field.height, mipmapped: false)
+                descriptor.usage = .shaderRead
+                weather = device.makeTexture(descriptor: descriptor)
+            }
+            values.withUnsafeBytes { bytes in
+                weather?.replace(region: MTLRegionMake2D(0, 0, scene.field.width, scene.field.height),
+                                 mipmapLevel: 0, withBytes: bytes.baseAddress!,
+                                 bytesPerRow: scene.field.width * MemoryLayout<Float>.stride)
+            }
+        }
+        // Without weather, the last stays while the clouds fade out; they aren't drawn once gone.
 
         let instances = scene.visible.map { index -> Marker in
             let item = scene.map.items[Int(index)]
@@ -232,7 +342,20 @@ final class TerrainRenderer {
         markerCount = instances.count
     }
 
-    func draw(in view: MTKView, transform: MapTransform, theme: Theme, overlay: TerrainOverlay) {
+    private func makeMesh(width: Int, height: Int) {
+        var indices: [UInt32] = []
+        indices.reserveCapacity((width - 1) * (height - 1) * 6)
+        for j in 0..<(height - 1) {
+            for i in 0..<(width - 1) {
+                let a = UInt32(j * width + i), b = a + 1, c = a + UInt32(width), d = c + 1
+                indices += [a, c, b, b, c, d]
+            }
+        }
+        mesh = device.makeBuffer(bytes: indices, length: indices.count * MemoryLayout<UInt32>.stride)
+        meshCount = indices.count
+    }
+
+    func draw(in view: MTKView, transform: MapTransform, theme: Theme, overlay: TerrainOverlay, relief: ReliefFrame? = nil) {
         guard let pass = view.currentRenderPassDescriptor, let drawable = view.currentDrawable,
               let commands = queue.makeCommandBuffer() else { return }
         let ground = theme.ground.simd
@@ -248,10 +371,17 @@ final class TerrainRenderer {
                                 translate: SIMD2(Float(transform.x), Float(transform.y)),
                                 scale: scale, k: Float(transform.k),
                                 origin: Float(DensityField.origin), cell: Float(DensityField.cellSize),
-                                dotRadius: overlay.dots ? TerrainStyle.dotRadius : 0)
+                                // In 3D, markers are sized by their depth.
+                                dotRadius: overlay.dots || relief != nil ? TerrainStyle.dotRadius : 0)
+        if let pointer = overlay.pointer { uniforms.pointer = SIMD2(Float(pointer.x), Float(pointer.y)) * scale }
+        uniforms.reveal = TerrainStyle.markerReveal * scale
+        uniforms.markers = Float(overlay.markers)
+        uniforms.clouds = weather == nil ? 0 : Float(overlay.clouds)
         let uniformLength = MemoryLayout<Uniforms>.stride
 
-        if let field {
+        if let relief {
+            drawRelief(relief, encoder: encoder, uniforms: &uniforms, hovered: overlay.hovered)
+        } else if let field {
             var levels = UInt32(TerrainStyle.levels)
             encoder.setRenderPipelineState(terrainPipeline)
             encoder.setFragmentBytes(&uniforms, length: uniformLength, index: 0)
@@ -263,15 +393,30 @@ final class TerrainRenderer {
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         }
 
-        if let markers, markerCount > 0 {
+        if relief == nil, let markers, markerCount > 0 {
             encoder.setRenderPipelineState(markerPipeline)
             encoder.setVertexBytes(&uniforms, length: uniformLength, index: 0)
             encoder.setVertexBuffer(markers, offset: 0, index: 1)
+            var hover: Float = 0
+            encoder.setVertexBytes(&hover, length: MemoryLayout<Float>.stride, index: 3)
             encoder.setFragmentBytes(&uniforms, length: uniformLength, index: 0)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: markerCount)
         }
+        // On the flat map the clouds cover the markers, and the pictures come over them.
+        if relief == nil, let weather, uniforms.clouds > 0 {
+            encoder.setRenderPipelineState(flatCloudPipeline)
+            encoder.setFragmentBytes(&uniforms, length: uniformLength, index: 0)
+            setBytes(TerrainStyle.bayer, encoder, index: 3)
+            encoder.setFragmentTexture(weather, index: 1)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        }
+        if relief == nil, let item = overlay.hovered {
+            encoder.setRenderPipelineState(markerPipeline)
+            drawHovered(item, encoder: encoder, uniforms: &uniforms)
+        }
 
         if !overlay.thumbs.isEmpty {
+            if relief != nil { encoder.setDepthStencilState(standing) }
             encoder.setRenderPipelineState(thumbPipeline)
             encoder.setVertexBytes(&uniforms, length: uniformLength, index: 0)
             encoder.setFragmentBytes(&uniforms, length: uniformLength, index: 0)
@@ -282,12 +427,27 @@ final class TerrainRenderer {
                                      mine: thumb.mine ? 1 : 0,
                                      mode: thumb.mode == .color ? 0 : 1,
                                      hasImage: thumb.texture == nil ? 0 : 1,
-                                     nearest: thumb.nearest ? 1 : 0)
+                                     nearest: thumb.nearest ? 1 : 0,
+                                     depth: thumb.depth)
                 encoder.setVertexBytes(&data, length: MemoryLayout<ThumbDraw>.stride, index: 1)
                 encoder.setFragmentBytes(&data, length: MemoryLayout<ThumbDraw>.stride, index: 1)
                 encoder.setFragmentTexture(thumb.texture, index: 0)
                 encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
             }
+        }
+        // Everything from here floats above the ground, the names like clouds.
+        encoder.setDepthStencilState(flat)
+
+        if !overlay.stems.isEmpty {
+            let lines = overlay.stems.map {
+                LineDraw(from: SIMD2(Float($0.from.x), Float($0.from.y)) * scale, to: SIMD2(Float($0.to.x), Float($0.to.y)) * scale,
+                         width: scale, alpha: 0.55 * Float($0.alpha))
+            }
+            encoder.setRenderPipelineState(linePipeline)
+            encoder.setVertexBytes(&uniforms, length: uniformLength, index: 0)
+            lines.withUnsafeBytes { encoder.setVertexBytes($0.baseAddress!, length: $0.count, index: 1) }
+            encoder.setFragmentBytes(&uniforms, length: uniformLength, index: 0)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: lines.count)
         }
 
         if let finder = overlay.viewfinder {
@@ -352,6 +512,86 @@ final class TerrainRenderer {
         encoder.endEncoding()
         commands.present(drawable)
         commands.commit()
+    }
+
+    /// The ground plane, the relief over it, the markers standing on it, and the clouds over them.
+    private func drawRelief(_ relief: ReliefFrame, encoder: MTLRenderCommandEncoder, uniforms: inout Uniforms, hovered: MapItem?) {
+        guard let field, let mesh else { return }
+        let camera = relief.camera, projection = relief.projection
+        let sun = simd_normalize(SIMD3<Float>(-0.55, 0.75, -0.45))
+        let extent = Float(projection.far * 0.9)
+        var r = ReliefUniforms(viewProjection: projection.viewProjection,
+                               eye: SIMD4(projection.eye, 1), sun: SIMD4(sun, 0),
+                               height: Relief.height * relief.rise, exponent: Relief.exponent,
+                               fogNear: Float(camera.distance * 1.2), fogFar: Float(camera.distance * 3 + 400),
+                               focal: Float(projection.focal), thumbnailZoom: Float(TerrainStyle.thumbnailZoom),
+                               dotRadius: TerrainStyle.dotRadius, gridStep: 100, side: UInt32(field.width),
+                               extent: extent, center: SIMD2(Float(camera.x), Float(camera.y)))
+        let length = MemoryLayout<ReliefUniforms>.stride
+        let uniformLength = MemoryLayout<Uniforms>.stride
+        var levels = UInt32(TerrainStyle.levels)
+
+        encoder.setDepthStencilState(solid)
+        encoder.setVertexBytes(&uniforms, length: uniformLength, index: 0)
+        encoder.setVertexBytes(&r, length: length, index: 1)
+        encoder.setVertexTexture(field, index: 0)
+        encoder.setFragmentBytes(&uniforms, length: uniformLength, index: 0)
+        setBytes(TerrainStyle.thresholds, encoder, index: 1)
+        setBytes(TerrainStyle.ditherDensity, encoder, index: 2)
+        setBytes(TerrainStyle.bayer, encoder, index: 3)
+        encoder.setFragmentBytes(&levels, length: MemoryLayout<UInt32>.stride, index: 4)
+        encoder.setFragmentBytes(&r, length: length, index: 5)
+        encoder.setFragmentTexture(field, index: 0)
+        encoder.setFragmentTexture(weather ?? clearSky, index: 1)
+
+        encoder.setRenderPipelineState(groundPipeline)
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        encoder.setRenderPipelineState(reliefPipeline)
+        encoder.drawIndexedPrimitives(type: .triangle, indexCount: meshCount, indexType: .uint32, indexBuffer: mesh, indexBufferOffset: 0)
+
+        if let markers, markerCount > 0 {
+            encoder.setDepthStencilState(standing)
+            encoder.setRenderPipelineState(reliefMarkerPipeline)
+            encoder.setVertexBuffer(markers, offset: 0, index: 1)
+            encoder.setVertexBytes(&r, length: length, index: 2)
+            var hover: Float = 0
+            encoder.setVertexBytes(&hover, length: MemoryLayout<Float>.stride, index: 3)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: markerCount)
+        }
+        // The clouds above, after the markers so that what's under a cloud shows between its dots,
+        // and before the pictures, which they hide where the dots fall.
+        if weather != nil, uniforms.clouds > 0 {
+            encoder.setDepthStencilState(solid)
+            encoder.setRenderPipelineState(cloudPipeline)
+            encoder.setVertexBytes(&r, length: length, index: 1)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: Self.cloudSlices)
+        }
+        encoder.setDepthStencilState(flat)
+        if let hovered {
+            encoder.setRenderPipelineState(reliefMarkerPipeline)
+            encoder.setVertexBytes(&r, length: length, index: 2)
+            drawHovered(hovered, encoder: encoder, uniforms: &uniforms)
+        }
+    }
+
+    /// The marker under the pointer again, twice the size and outlined in the ground color, over
+    /// the rest. The pipeline is the flat map's markers' or the relief's.
+    private func drawHovered(_ item: MapItem, encoder: MTLRenderCommandEncoder, uniforms: inout Uniforms) {
+        var marker = Marker(position: SIMD2(item.x, item.y), base: TerrainStyle.markerBase(resonance: item.resonance), mine: item.mine ? 1 : 0)
+        var hover: Float = 1.5
+        encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
+        encoder.setVertexBytes(&marker, length: MemoryLayout<Marker>.stride, index: 1)
+        encoder.setVertexBytes(&hover, length: MemoryLayout<Float>.stride, index: 3)
+        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+    }
+
+    /// Keep in step with `cloudSlices` in Terrain.metal.
+    private static let cloudSlices = 4
+
+    /// How high the lowest of the clouds floats. Keep in step with `cloudAltitude` in Terrain.metal.
+    static func cloudAltitude(rise: Float) -> Float {
+        Relief.height * rise * 1.35 + 1.5
     }
 
     /// Four sides, one point wide, in pixels.

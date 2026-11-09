@@ -42,13 +42,15 @@ final class StrataTests: XCTestCase {
         XCTAssertNil(MonthAxis(times: [Int]()))
     }
 
-    func testLayersFollowResonanceAndWaitingItemsGetTheirOwn() throws {
+    func testLayersFollowResonanceAndWaitingItemsGetTheirOwnWhenAsked() throws {
         let t0 = 1579046400
         let items = [MapItem(x: 1, y: 1, resonance: 3, region: 1, time: t0), MapItem(x: 2, y: 2, resonance: 2, region: 2, time: t0)]
         let tree = RegionTree(records: [.init(id: 1, label: "a", x: 1, y: 1, r: 4), .init(id: 2, label: "b", x: 2, y: 2, r: 4)], items: items)
         let map = LibraryMap(items: items, regions: tree, waitingTimes: [t0], waiting: 1)
         let axis = try XCTUnwrap(MonthAxis(times: [t0], calendar: utc))
-        let model = StrataModel(map: map, visible: [0], axis: axis)
+        XCTAssertEqual(StrataModel(map: map, visible: [0], axis: axis).layers.map(\.region).sorted { ($0 ?? -1) < ($1 ?? -1) }, [1, 2],
+                       "links waiting for pictures aren't on the chart unless asked for")
+        let model = StrataModel(map: map, visible: [0], axis: axis, waiting: true)
         XCTAssertEqual(model.layers.count, 3)
         XCTAssertEqual(model.layers.first { $0.region == 1 }?.raw, [3])
         XCTAssertEqual(model.layers.first { $0.region == 2 }?.raw, [0], "not visible")

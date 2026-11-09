@@ -23,6 +23,8 @@ struct TopographApp: App {
                 Button("Zoom In") { model.zoomIn() }.keyboardShortcut("=")
                 Button("Zoom Out") { model.zoomOut() }.keyboardShortcut("-")
                 Button("Show Everything") { model.fit() }.keyboardShortcut("0")
+                // The terrain, or on Palette, the wheel.
+                Toggle("In 3D", isOn: Bindable(model).showsThreeD).keyboardShortcut("d")
                 Divider()
                 Button("Reload Library") { model.load() }.keyboardShortcut("r")
             }

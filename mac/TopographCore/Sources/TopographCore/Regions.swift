@@ -186,14 +186,27 @@ public struct LabelPlanner: Sendable {
 
     /// The regions that want a name at this zoom.
     public mutating func named(tree: RegionTree, counts: [Int: Int], transform: MapTransform, size: CGSize) -> [Int] {
+        named(tree: tree, counts: counts, size: size) { region in
+            (CGPoint(x: region.x * transform.k + transform.x, y: region.y * transform.k + transform.y), transform.k)
+        }
+    }
+
+    /// The same, wherever a region's anchor lands on screen and at whatever scale it's seen
+    /// there (points per map unit), as in 3D, where nearer regions open up first. `locate`
+    /// returns nil for a region that can't be seen at all.
+    public mutating func named(tree: RegionTree, counts: [Int: Int], size: CGSize,
+                               locate: (Region) -> (point: CGPoint, k: Double)?) -> [Int] {
         let open = Self.expandAt(size), past = Self.pastAt(size)
         var out: [Int] = []
         func visit(_ id: Int) {
             guard let region = tree.regions[id], (counts[id] ?? 0) > 0 else { return }
-            let sx = region.x * transform.k + transform.x, sy = region.y * transform.k + transform.y
-            let onScreen = region.r * transform.k
+            guard let (at, k) = locate(region) else {
+                expanded.remove(id)
+                return
+            }
+            let onScreen = region.r * k
             let reach = onScreen * 3 + 120
-            if sx + reach < 0 || sx - reach > size.width || sy + reach < 0 || sy - reach > size.height { return }
+            if at.x + reach < 0 || at.x - reach > size.width || at.y + reach < 0 || at.y - reach > size.height { return }
             let limit = region.children.isEmpty ? past : open
             // A little hysteresis so a name doesn't flicker at the threshold.
             let isOpen = expanded.contains(id) ? onScreen > limit * 0.85 : onScreen > limit
@@ -213,18 +226,31 @@ public struct LabelPlanner: Sendable {
     /// Widths come from the caller, which knows the font.
     public mutating func plan(tree: RegionTree, counts: [Int: Int], transform: MapTransform, size: CGSize,
                               width: (String, Double) -> Double) -> [PlacedLabel] {
-        let wanted = named(tree: tree, counts: counts, transform: transform, size: size).sorted {
+        plan(tree: tree, counts: counts, size: size, width: width) { region in
+            (CGPoint(x: region.x * transform.k + transform.x, y: region.y * transform.k + transform.y), transform.k)
+        }
+    }
+
+    /// The same, with anchors and scales from `locate`, as `named(tree:counts:size:locate:)` takes them.
+    public mutating func plan(tree: RegionTree, counts: [Int: Int], size: CGSize, width: (String, Double) -> Double,
+                              locate: (Region) -> (point: CGPoint, k: Double)?) -> [PlacedLabel] {
+        var anchors: [Int: CGPoint] = [:]
+        let wanted = named(tree: tree, counts: counts, size: size) { region in
+            guard let found = locate(region) else { return nil }
+            anchors[region.id] = found.point
+            return found
+        }.sorted {
             let a = tree.regions[$0]!, b = tree.regions[$1]!
             return a.depth != b.depth ? a.depth < b.depth : a.count > b.count
         }
         var placed: [PlacedLabel] = []
         let screen = CGRect(origin: .zero, size: size)
         for id in wanted {
-            let region = tree.regions[id]!
+            guard let region = tree.regions[id], let at = anchors[id] else { continue }
             let count = counts[id] ?? 0
             let top = region.depth == 0
             let label = PlacedLabel.geometry(
-                id: id, x: region.x * transform.k + transform.x, y: region.y * transform.k + transform.y, top: top,
+                id: id, x: at.x, y: at.y, top: top,
                 count: count, nameWidth: width(region.label, top ? 12 : 11), countWidth: width(count.formatted(), 10))
             guard label.box.intersects(screen) else { continue }
             if placed.contains(where: { $0.box.intersects(label.box) }) { continue }

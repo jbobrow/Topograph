@@ -129,3 +129,37 @@ func checkPalette(library: LibraryWriter) throws {
     weight.sort()
     print("\(first.count) pictures. Leading color, summed channel difference: median \(first[first.count / 2]), 90th \(first[first.count * 9 / 10]); weight difference: median \(weight[weight.count / 2]), 90th \(weight[weight.count * 9 / 10]). Hash: \(Double(bits) / Double(max(hashed, 1))) bits apart on average")
 }
+
+/// The biggest clouds of a season and their themes, for judging the themes on real searches.
+/// The season ends at the given day (yyyy-mm-dd), or at the latest search.
+func checkClouds(endingAt day: String?) throws {
+    let library = try Library()
+    let map = try library.map()
+    let format = DateFormatter()
+    format.dateFormat = "yyyy-MM-dd"
+    guard let end = day.flatMap({ format.date(from: $0) }).map({ Int($0.timeIntervalSince1970) }) ?? map.clouds.searches.last?.time,
+          let weather = map.clouds.weather(endingAt: end) else { return print("no weather then") }
+    var seen = Set<String>()
+    var clouds: [Clouds.Cloud] = []
+    for y in stride(from: 0.0, through: 1000, by: 8) {
+        for x in stride(from: 0.0, through: 1000, by: 8) {
+            guard Clouds.isCloudy(weather, at: x, y), let cloud = map.clouds.cloud(at: x, y, weather: weather, endingAt: end),
+                  let first = cloud.searches.first, !seen.contains(first.id) else { continue }
+            seen.formUnion(cloud.searches.map(\.id))
+            clouds.append(cloud)
+        }
+    }
+    print("season ending \(format.string(from: Date(timeIntervalSince1970: TimeInterval(end)))): \(clouds.count) clouds")
+    for cloud in clouds.sorted(by: { $0.searches.count > $1.searches.count }).prefix(5) {
+        let started = Date()
+        let vectors = try library.textVectors(of: cloud.searches.map(\.id))
+        let (themes, rest) = CloudThemes.find(cloud.searches, vectors: vectors)
+        let ms = Int(Date().timeIntervalSince(started) * 1000)
+        print("\n\(cloud.searches.count) searches (\(ms) ms)")
+        for theme in themes {
+            let examples = theme.searches.map(\.text).reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }.prefix(4)
+            print("  \(theme.name) [\(theme.searches.count)]: \(examples.joined(separator: " | "))")
+        }
+        print("  and \(rest.count) others")
+    }
+}

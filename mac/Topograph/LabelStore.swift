@@ -17,10 +17,20 @@ final class LabelStore {
 
     private let device: MTLDevice
     private var textures: [Key: MTLTexture] = [:]
+    /// What the frame being drawn has asked for.
+    private var used: Set<Key> = []
     private var widths: [String: Double] = [:]
 
     init(device: MTLDevice) {
         self.device = device
+    }
+
+    /// Call before a frame asks for labels: lets go of every one the last frame didn't draw.
+    /// A count is part of each label, so playing the timeline makes new ones every frame,
+    /// and keeping them all once filled 23 GB.
+    func beginFrame() {
+        textures = textures.filter { used.contains($0.key) }
+        used.removeAll(keepingCapacity: true)
     }
 
     private func font(size: Double, weight: Int) -> CTFont {
@@ -48,6 +58,7 @@ final class LabelStore {
 
     func texture(label: PlacedLabel, name: String, theme: Theme, dark: Bool, scale: Double) -> MTLTexture? {
         let key = Key(id: label.id, name: name, count: label.count, dark: dark, scale: Int(scale))
+        used.insert(key)
         if let known = textures[key] { return known }
         guard let texture = draw(label: label, name: name, theme: theme, scale: scale) else { return nil }
         textures[key] = texture

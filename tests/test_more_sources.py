@@ -158,3 +158,24 @@ def test_fetcher_waits_between_requests_and_stops_after_ten_failures():
         except SystemExit:
             stopped = True
     assert stopped and waits == [1.5] * 10
+
+
+def test_searches_are_clouds_not_land(tmp_path):
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from fixtures import build_x_archive
+    lib_dir = tmp_path / "lib"
+    args = ["--library", str(lib_dir)]
+    cli.main(args + ["import", str(build_x_archive(tmp_path / "twitter.zip")), "--platform", "x"])
+    cli.main(args + ["import", str(takeout(tmp_path / "t"))])
+    cli.main(args + ["build", "--backend", "lite"])
+    lib = Library(lib_dir)
+    land = {r[0] for r in lib.conn.execute("select item_id from layout")}
+    clouds = {r[0] for r in lib.conn.execute("select item_id from cloud")}
+    searches = {r[0] for r in lib.conn.execute("select id from item where platform = 'google'")}
+    lib.close()
+    assert searches and clouds == searches and not land & searches
+    assert land, "the rest is still land"
+    exported = json.loads((lib_dir / "topograph.json").read_text())
+    assert len(exported["clouds"]) == len(searches)
+    searched = {"2023-01", "2023-02", "2023-06"}   # when the fixture's searches were made
+    assert not searched & set(exported["unmapped"]), "clouds aren't waiting to be mapped"

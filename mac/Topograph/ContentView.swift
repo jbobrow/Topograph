@@ -21,11 +21,13 @@ struct ContentView: View {
                 // The map stays alive under other views so it keeps your place.
                 TerrainView(scene: model.scene, root: model.library?.root, controller: model.controller,
                             imageMode: model.mapImageMode, selected: selectedItem, isActive: model.section == .terrain,
-                            isPlaying: model.isPlaying,
+                            isPlaying: model.isPlaying, showsMarkers: model.showsMarkers,
+                            relief: model.showsRelief,
                             onFailure: { model.fail($0) },
                             onHover: { model.hover = $0 },
                             onPickItem: { model.openItem($0) },
                             onPickRegion: { model.openRegion($0) },
+                            onPickCloud: { model.openCloud(at: $0) },
                             onWhere: { model.setWhere($0) },
                             onViewport: { model.viewport = $0 })
                     .opacity(model.section == .terrain ? 1 : 0)
@@ -50,6 +52,11 @@ struct ContentView: View {
             if model.section.isFiltered {
                 Rectangle().fill(theme.ink.color).frame(height: 1)
                 TimeBar(model: model, theme: theme)
+            }
+        }
+        .overlay {
+            if let enlarged = model.enlarged, let library = model.library, let map = model.map {
+                LargePicture(model: model, library: library, map: map, theme: theme, enlarged: enlarged)
             }
         }
         .ignoresSafeArea(edges: .top)
@@ -155,8 +162,15 @@ private struct MapChrome: View {
             .padding(.vertical, 12)
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            VStack(spacing: 4) {
+            VStack(alignment: .trailing, spacing: 4) {
                 Spacer()
+                // It names the view it switches to.
+                Button(model.showsRelief ? "2D" : "3D") { model.showsRelief.toggle() }
+                    .accessibilityLabel(model.showsRelief ? "Lay the terrain flat" : "Terrain in 3D")
+                    .help(model.showsRelief ? "Lay the terrain flat again."
+                          : "Stand the terrain up in 3D. Drag to turn it, space and drag to move.")
+                    .hotkey("⌘D", placement: .beside, model: model, theme: theme)
+                    .padding(.bottom, 4)
                 // Their shortcuts are in the Map menu. Stacked this closely, labels go to the side.
                 Button("+", action: model.controller.zoomIn).accessibilityLabel("Zoom in")
                     .hotkey("⌘+", placement: .beside, model: model, theme: theme)

@@ -13,7 +13,7 @@ enum HotkeyPlacement {
         switch self {
         case .below: .bottomTrailing
         case .belowLeft: .bottomLeading
-        case .beside: .trailing
+        case .beside: .leading
         }
     }
 }
@@ -52,8 +52,9 @@ private struct Hotkey: ViewModifier {
                         .padding(.horizontal, 4)
                         .frame(height: 13)
                         .background(theme.ink.color, in: Rectangle())
-                        // A square key is 28 wide, and the label stops just short of its left edge.
-                        .offset(x: placement == .beside ? -31 : 0, y: placement == .beside ? 0 : 8)
+                        // Beside, it ends just short of the key's left edge, however wide the key.
+                        .frame(width: placement == .beside ? 0 : nil, alignment: .trailing)
+                        .offset(x: placement == .beside ? -3 : 0, y: placement == .beside ? 0 : 8)
                         .allowsHitTesting(false)
                 }
             }

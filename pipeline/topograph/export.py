@@ -72,7 +72,11 @@ def export(lib, model: str) -> Path:
     # count toward Strata, as an "unmapped" layer. Posts that are gone don't.
     from .db import GONE_SQL
     gone = {r[0] for r in c.execute(f"select id from item where {GONE_SQL}")}
-    placed = set(index)
+    # Searches float over the map as clouds: where, when, and what you asked.
+    clouds = [{"x": round(r["x"], 2), "y": round(r["y"], 2), "c": r["region"], "at": taste_time(r["item_id"]),
+               "t": (items[r["item_id"]]["text"] or "")[:200] or None}
+              for r in c.execute("select * from cloud where model=?", (model,)) if r["item_id"] not in gone]
+    placed = set(index) | {r[0] for r in c.execute("select item_id from cloud where model=?", (model,))}
     unmapped = Counter()
     for iid in items:
         if iid not in placed and iid not in gone:
@@ -90,6 +94,7 @@ def export(lib, model: str) -> Path:
         },
         "clusters": region_list(clusters, sizes),
         "items": out_items,
+        "clouds": clouds,
         "unmapped": dict(sorted(unmapped.items())),
     }
     path = lib.root / "topograph.json"
