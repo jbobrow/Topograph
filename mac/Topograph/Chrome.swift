@@ -79,17 +79,20 @@ struct FilterBar: View {
                         .hotkey("⌘\(key.character)", key: key, model: model, theme: theme)
                 }
             }
-            Button("markers") { model.showsMarkers.toggle() }
-                .buttonStyle(KeyStyle(theme: theme, led: model.showsMarkers))
-                .hotkey("⌘J", key: "j", model: model, theme: theme)
-                .help("Hidden, they show only around the pointer, so the terrain reads on its own.")
-            Button("clouds") { model.showsClouds.toggle() }
-                .buttonStyle(KeyStyle(theme: theme, led: model.showsClouds))
-                .hotkey("⌘K", key: "k", model: model, theme: theme)
-                .disabled(model.map?.clouds.isEmpty ?? true)
-                .help(model.map?.clouds.isEmpty ?? true
-                      ? "Searches float over the map once Google activity is imported and the map is updated."
-                      : "Your searches as weather: where the season before the time shown searched more than usual.")
+            // The terrain's own: they do nothing on the other views.
+            if model.section == .terrain {
+                Button("markers") { model.showsMarkers.toggle() }
+                    .buttonStyle(KeyStyle(theme: theme, led: model.showsMarkers))
+                    .hotkey("⌘J", key: "j", model: model, theme: theme)
+                    .help("Hidden, they show only around the pointer, so the terrain reads on its own.")
+                Button("clouds") { model.showsClouds.toggle() }
+                    .buttonStyle(KeyStyle(theme: theme, led: model.showsClouds))
+                    .hotkey("⌘K", key: "k", model: model, theme: theme)
+                    .disabled(model.map?.clouds.isEmpty ?? true)
+                    .help(model.map?.clouds.isEmpty ?? true
+                          ? "Searches float over the map once Google activity is imported and the map is updated."
+                          : "Your searches as weather: where the season before the time shown searched more than usual.")
+            }
             Spacer(minLength: 0)
             HStack(spacing: 4) {
                 HStack(spacing: 0) {

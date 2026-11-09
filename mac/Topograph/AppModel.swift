@@ -21,10 +21,6 @@ enum Selection: Equatable {
     case cloud(x: Double, y: Double)
 }
 
-/// The palette's three ways of looking: two across color, and one through time.
-enum PaletteViewKind: Sendable {
-    case wheel, cylinder, time
-}
 
 /// Loads the library off the main thread and keeps what's showing.
 @MainActor
@@ -113,12 +109,37 @@ final class AppModel {
     /// Kept here so the palette is as you left it when you come back to it.
     var paletteCamera = PaletteCamera()
     var paletteSize = CGSize.zero
-    var paletteView = PaletteViewKind.wheel {
-        didSet { if paletteView != oldValue, paletteView == .time { applyFilter() } }
+    /// The palette's wheel stood up as a cylinder, with lightness as its height.
+    var paletteIn3D = false {
+        didSet { if paletteIn3D != oldValue { palette.setCylinder(paletteIn3D) } }
     }
+    /// The 3D key, wherever it is: the terrain stood up, or the palette's wheel.
+    var showsThreeD: Bool {
+        get { section == .palette ? paletteIn3D : showsRelief }
+        set { if section == .palette { paletteIn3D = newValue } else { showsRelief = newValue } }
+    }
+    /// Color's seasons: color through time in a band under the palette's wheel, which both
+    /// follow the time selected.
+    var paletteShowsSeasons = UserDefaults.standard.bool(forKey: "paletteSeasons") {
+        didSet {
+            UserDefaults.standard.set(paletteShowsSeasons, forKey: "paletteSeasons")
+            if paletteShowsSeasons, !oldValue { applyFilter() }
+        }
+    }
+    /// How much of the palette's height the seasons take.
+    var paletteSeasonsShare = UserDefaults.standard.object(forKey: "paletteSeasonsShare") as? Double ?? 0.34 {
+        didSet { UserDefaults.standard.set(paletteSeasonsShare, forKey: "paletteSeasonsShare") }
+    }
+    /// The seasons' chart: all of time for the filters set, as Strata's is, with the time
+    /// selected shaded on it.
+    private(set) var paletteSeasons: StrataModel?
     /// Whether color through time shows each color's part of the month, or how much of it.
     var paletteShowsShare = true {
-        didSet { if paletteShowsShare != oldValue { applyFilter() } }
+        didSet {
+            guard paletteShowsShare != oldValue else { return }
+            paletteSeasons = nil
+            applyFilter()
+        }
     }
     let pipeline = PipelineRunner()
     let instagram = InstagramSession()
@@ -254,6 +275,7 @@ final class AppModel {
                 // Places mean nothing from one map to the next, so don't stay zoomed in on one.
                 if let before = self.map, before.recipe != map.recipe { controller.fit() }
                 strataChart = nil
+                paletteSeasons = nil
                 self.map = map
                 embeddingsTask = nil
                 let times = map.items.compactMap(\.time)
@@ -648,20 +670,20 @@ final class AppModel {
         let current = slicer?.filter == filter.ignoringTime ? slicer : nil
         let (axis, order, wantsStrata) = (self.axis, current == nil ? nil : strataOrder, section == .strata)
         let wantsChart = wantsStrata && (current == nil || strataChart == nil)
-        let wantsColors = section == .palette && paletteView == .time
+        let wantsColors = section == .palette && paletteShowsSeasons && (current == nil || paletteSeasons == nil)
         let share = paletteShowsShare
         let clouds = showsClouds
         let waiting = strataShowsWaiting
-        let (scene, newSlicer, newOrder, counts, overview) = await Task.detached(priority: .userInitiated) { () -> (TerrainScene, TimeSlicer, [Int]?, [Int]?, StrataModel?) in
+        let (scene, newSlicer, newOrder, counts, overview, seasons) = await Task.detached(priority: .userInitiated) { () -> (TerrainScene, TimeSlicer, [Int]?, [Int]?, StrataModel?, StrataModel?) in
             let slicer = current ?? TimeSlicer(filter: filter, items: map.items, search: search)
             let counts = current == nil ? axis?.counts(of: slicer.times) : nil
             // A search by meaning keeps the best of what's in range, not a slice of its best.
             let visible = filter.nearest == nil ? slicer.visible(in: filter.range) : filter.visible(in: map.items, search: search)
             let order = order ?? axis.map { StrataModel.stackingOrder(map: map, visible: slicer.all, axis: $0, waiting: waiting) }
-            let colors = wantsColors ? axis.map { StrataModel(colorsOf: map, visible: visible, axis: $0, share: share) } : nil
+            let seasons = wantsColors ? axis.map { StrataModel(colorsOf: map, visible: slicer.all, axis: $0, share: share) } : nil
             let overview = wantsChart ? axis.map { StrataModel(map: map, visible: slicer.all, axis: $0, order: order, waiting: waiting) } : nil
-            return (TerrainScene(map: map, visible: visible, fullPeak: peak, colorStrata: colors, range: filter.range, clouds: clouds),
-                    slicer, order, counts, overview)
+            return (TerrainScene(map: map, visible: visible, fullPeak: peak, range: filter.range, clouds: clouds),
+                    slicer, order, counts, overview, seasons)
         }.value
         guard generation == mapGeneration else { return }
         self.scene = scene
@@ -669,6 +691,7 @@ final class AppModel {
         strataOrder = newOrder
         if let counts { monthCounts = counts }
         if let overview { strataChart = overview }
+        if let seasons { paletteSeasons = seasons }
     }
 
     /// The order of Strata's layers for the current filter, whatever the time range.

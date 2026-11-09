@@ -654,6 +654,21 @@ final class StrataNSView: NSView {
             }
             c.restoreGState()
         }
+        // Stacked to the full height, the layers cover the selection's shading. So what isn't
+        // selected is greyed out instead, its color taken out and washed toward the ground,
+        // and the selection keeps its own.
+        if model.isShare, let range {
+            let left = x(range.lowerBound, axis: axis), right = x(range.upperBound, axis: axis)
+            let top = margin.top - 8, height = bounds.height - margin.top - margin.bottom + 8
+            let outside = [CGRect(x: side, y: top, width: max(left - side, 0), height: height),
+                           CGRect(x: right, y: top, width: max(bounds.width - side - right, 0), height: height)]
+            c.setBlendMode(.saturation)
+            c.setFillColor(gray: 0.5, alpha: 1)
+            c.fill(outside)
+            c.setBlendMode(.normal)
+            c.setFillColor(theme.ground.cg.copy(alpha: 0.55) ?? theme.ground.cg)
+            c.fill(outside)
+        }
         c.restoreGState()
         drawNames(c, model: model)
         drawAxis(c, axis: axis)
