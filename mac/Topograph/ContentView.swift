@@ -21,7 +21,8 @@ struct ContentView: View {
                 // The map stays alive under other views so it keeps your place.
                 TerrainView(scene: model.scene, root: model.library?.root, controller: model.controller,
                             imageMode: model.mapImageMode, selected: selectedItem, isActive: model.section == .terrain,
-                            isPlaying: model.isPlaying, relief: model.showsRelief,
+                            isPlaying: model.isPlaying, showsMarkers: model.showsMarkers,
+                            relief: model.showsRelief,
                             onFailure: { model.fail($0) },
                             onHover: { model.hover = $0 },
                             onPickItem: { model.openItem($0) },

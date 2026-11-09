@@ -48,6 +48,10 @@ public enum TerrainStyle {
     /// That dot's radius in points.
     public static let dotRadius: Float = 1.8
 
+    /// With markers hidden, the points around the pointer where they show, fading from its
+    /// middle.
+    public static let markerReveal: Float = 160
+
     /// A thumbnail's long edge in points before resonance. It grows with zoom, up to a limit.
     public static func thumbnailSize(k: Double) -> Double { min(150, 6.5 * pow(k, 0.9)) }
 

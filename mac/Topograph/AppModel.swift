@@ -97,6 +97,10 @@ final class AppModel {
     }
     /// Searches as weather over the map: where the season before the time shown gathered more
     /// than usual. Like searches on the map before them, they start hidden.
+    /// Markers on the map. Hidden, they show only around the pointer.
+    var showsMarkers = UserDefaults.standard.object(forKey: "showsMarkers") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(showsMarkers, forKey: "showsMarkers") }
+    }
     var showsClouds = UserDefaults.standard.bool(forKey: "showsClouds") {
         didSet {
             UserDefaults.standard.set(showsClouds, forKey: "showsClouds")

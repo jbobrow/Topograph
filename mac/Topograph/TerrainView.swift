@@ -68,6 +68,7 @@ struct TerrainView: NSViewRepresentable {
     let selected: Int32?
     let isActive: Bool
     let isPlaying: Bool
+    let showsMarkers: Bool
     /// The terrain stood up in 3D, to fly over.
     let relief: Bool
     var onFailure: (String) -> Void
@@ -100,6 +101,7 @@ struct TerrainView: NSViewRepresentable {
         view.onViewport = onViewport
         view.isActive = isActive
         view.isPlaying = isPlaying
+        view.showsMarkers = showsMarkers
         view.show(scene, root: root, imageMode: imageMode, selected: selected)
         view.setRelief(relief)
     }
@@ -147,7 +149,10 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
 
     /// While the terrain is in 3D, the camera flying over it. Everything that works on the flat
     /// map's transform uses `shown`, the flat equivalent of what the camera sees.
-    private var camera: OrbitCamera?
+    private var camera: OrbitCamera? {
+        // Into or out of 3D, the cursor changes with what a drag does.
+        didSet { if (camera == nil) != (oldValue == nil) { updateCursor() } }
+    }
     /// How far the relief has risen out of the flat map, 0 to 1.
     private var rise = 0.0
     private var wantsRelief = false
@@ -159,6 +164,10 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
     private var standing: [(index: Int32, frame: CGRect)] = []
 
     private var hovered: Int32?
+    /// The hovered item is showing as a lifted picture this frame, so its marker isn't enlarged.
+    private var hoverIsPicture = false
+    /// Where the pointer is over the map, in points: markers show around it when zoomed out.
+    private var pointer: CGPoint?
     var pointerIsOnMinimap = false
     private var whereKey: [Int] = []
 
@@ -180,6 +189,15 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
     }
     /// While the timeline plays, space pauses it instead of moving the map.
     var isPlaying = false
+    /// Hidden, markers show only around the pointer.
+    var showsMarkers = true {
+        didSet { if showsMarkers != oldValue { fade() } }
+    }
+    /// How much markers and clouds show, 0 to 1: they fade rather than blink.
+    private var markersLevel = 1.0
+    private var cloudsLevel = 0.0
+    private var fadeLink: CADisplayLink?
+    private var lastFade: CFTimeInterval = 0
     private var lastViewport: MapViewport?
 
     var zoom: Double { shown.k }
@@ -219,7 +237,55 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
         points = nil
         renderer?.setScene(scene)
         needsDisplay = true
+        fade()
         keep(newlySelected)
+    }
+
+    // MARK: Fading markers and clouds
+
+    private var markersWanted: Double { showsMarkers ? 1 : 0 }
+    private var cloudsWanted: Double { scene?.weather != nil ? 1 : 0 }
+
+    /// Starts markers and clouds toward what's wanted, over a quarter of a second.
+    private func fade() {
+        guard markersLevel != markersWanted || cloudsLevel != cloudsWanted else { return }
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            markersLevel = markersWanted
+            cloudsLevel = cloudsWanted
+            needsDisplay = true
+            return
+        }
+        guard fadeLink == nil else { return }
+        lastFade = CACurrentMediaTime()
+        let link = displayLink(target: self, selector: #selector(stepFade))
+        link.add(to: .main, forMode: .common)
+        fadeLink = link
+    }
+
+    @objc private func stepFade() {
+        let now = CACurrentMediaTime()
+        let step = (now - lastFade) / 0.25
+        lastFade = now
+        func toward(_ level: Double, _ wanted: Double) -> Double {
+            level < wanted ? min(level + step, wanted) : max(level - step, wanted)
+        }
+        markersLevel = toward(markersLevel, markersWanted)
+        cloudsLevel = toward(cloudsLevel, cloudsWanted)
+        needsDisplay = true
+        if markersLevel == markersWanted, cloudsLevel == cloudsWanted {
+            fadeLink?.invalidate()
+            fadeLink = nil
+        }
+    }
+
+    /// The fades, the pointer and the hovered marker, for the renderer.
+    private func shade(_ overlay: inout TerrainOverlay) {
+        if let hovered, hovered != selected, !hoverIsPicture, let scene { overlay.hovered = scene.map.items[Int(hovered)] }
+        hoverIsPicture = false
+        func eased(_ t: Double) -> Double { t * t * (3 - 2 * t) }
+        overlay.markers = eased(markersLevel)
+        overlay.clouds = eased(cloudsLevel)
+        overlay.pointer = pointer
     }
 
     private func keep(_ index: Int32?) {
@@ -298,6 +364,7 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
             updateWhere(scene)
         }
         overlay.zoomBox = zoomBox
+        shade(&overlay)
         updateViewport()
         renderer.draw(in: self, transform: transform, theme: theme, overlay: overlay)
     }
@@ -348,7 +415,11 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
         }
         // The selected picture is lifted off the map, so it isn't here as well.
         for index in chosen.reversed() where index != hovered && index != selected { place(index, lifted: false) }
-        if let hovered, hovered != selected, chosen.contains(hovered) { place(hovered, lifted: true) }
+        if let hovered, hovered != selected, chosen.contains(hovered) {
+            let before = out.count
+            place(hovered, lifted: true)
+            hoverIsPicture = out.count > before
+        }
         return out
     }
 
@@ -501,7 +572,8 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
     private var cursor: NSCursor {
         if case .pan = drag { return .closedHand }
         if case .orbit(_, _, true) = drag { return .closedHand }
-        return spaceHeld ? .openHand : .crosshair
+        // In 3D a drag turns the view, so it's a hand; flat, a drag draws a box to zoom into.
+        return spaceHeld || camera != nil ? .openHand : .crosshair
     }
 
     private func updateCursor() {
@@ -591,6 +663,13 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
         placed.first { $0.box.contains(point) }?.id
     }
 
+    /// Moves the light the pointer casts on hidden markers.
+    private func setPointer(_ point: CGPoint?) {
+        guard point != pointer else { return }
+        pointer = point
+        if markersLevel < 1 { needsDisplay = true }
+    }
+
     private func clearHover() {
         guard hovered != nil else { return }
         hovered = nil
@@ -602,9 +681,11 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
         // Hidden under another view, the map has no say in the cursor.
         guard isActive else { return }
         guard pointerIsOverMap else {
+            setPointer(nil)
             setCursorOverChrome()
             return clearHover()
         }
+        setPointer(location(of: event))
         if spaceHeld {
             NSCursor.openHand.set()
             return
@@ -612,7 +693,7 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
         let point = location(of: event)
         let onLabel = labelID(at: point) != nil
         let index = onLabel ? nil : itemIndex(at: point)
-        if onLabel || index != nil || cloudSpot(at: point) != nil { NSCursor.pointingHand.set() } else { NSCursor.crosshair.set() }
+        if onLabel || index != nil || cloudSpot(at: point) != nil { NSCursor.pointingHand.set() } else { cursor.set() }
         guard let index else { return clearHover() }
         if index != hovered { needsDisplay = true }
         hovered = index
@@ -620,6 +701,7 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
     }
 
     override func mouseExited(with event: NSEvent) {
+        setPointer(nil)
         clearHover()
     }
 
@@ -633,6 +715,8 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
 
     override func mouseDragged(with event: NSEvent) {
         let now = location(of: event)
+        // Drawing a box to zoom into, the pointer lights nothing: the box is what you're looking at.
+        if case .box = drag { setPointer(nil) } else { setPointer(now) }
         switch drag {
         case .pan(let last):
             if let camera {
@@ -658,12 +742,32 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
         }
     }
 
+    // Pressing with two fingers and dragging, or dragging with the right button, pans, on the
+    // flat map and in 3D, as space and drag do.
+    override func rightMouseDown(with event: NSEvent) {
+        stopAnimating()
+        clearHover()
+        drag = .pan(last: location(of: event))
+        NSCursor.closedHand.set()
+    }
+
+    override func rightMouseDragged(with event: NSEvent) {
+        mouseDragged(with: event)
+    }
+
+    override func rightMouseUp(with event: NSEvent) {
+        drag = nil
+        setPointer(location(of: event))
+        updateCursor()
+    }
+
     override func mouseUp(with event: NSEvent) {
         // The last drag event can be some way short of where the button came up.
         if case .box(let start, let now?) = drag { drag = .box(start: start, now: location(of: event)) }
         let finished = drag
         let box = zoomBox
         drag = nil
+        setPointer(location(of: event))
         updateCursor()
         if case .orbit(_, _, let moved) = finished {
             if !moved { pick(at: location(of: event)) }
@@ -953,6 +1057,7 @@ extension TerrainMTKView {
             }
             updateWhere(scene)
         }
+        shade(&overlay)
         updateViewport()
         renderer.draw(in: self, transform: camera.transform(viewSize: size), theme: theme, overlay: overlay,
                       relief: ReliefFrame(camera: camera, projection: projection, rise: rise))
@@ -992,7 +1097,11 @@ extension TerrainMTKView {
         for (index, at) in found.sorted(by: { $0.at.depth > $1.at.depth }) where index != hovered && index != selected {
             place(index, at, lifted: false)
         }
-        if let hovered, hovered != selected, let at = found.first(where: { $0.index == hovered })?.at { place(hovered, at, lifted: true) }
+        if let hovered, hovered != selected, let at = found.first(where: { $0.index == hovered })?.at {
+            let before = out.count
+            place(hovered, at, lifted: true)
+            hoverIsPicture = out.count > before
+        }
         standing = hits
         return out
     }

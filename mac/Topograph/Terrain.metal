@@ -18,6 +18,10 @@ struct Uniforms {
     float origin;      // map units the field extends past the map
     float cell;        // map units per field cell
     float dotRadius;   // points; when above 0, every marker is a plain dot this size
+    float2 pointer;    // pixels; far off when the pointer isn't over the map
+    float reveal;      // pixels around the pointer where markers show however far out you are
+    float markers;     // how much markers show everywhere, 0 to 1
+    float clouds;      // how much clouds show, 0 to 1, as they fade in and out
 };
 
 struct TerrainVarying {
@@ -58,28 +62,13 @@ static Elevation sampleField(texture2d<float, access::read> field, float2 c) {
     return e;
 }
 
-// Clouds: where this season's searches gather more than usual (`Clouds.weather`, where 1 is a
-// cloud's edge and 2 its core). A light dot screen over the land, filling in toward the core but
-// never past half, so the land always shows through, with a rule around each. `step` is how
-// much the weather changes across one pixel.
-static float3 overcast(float3 color, constant Uniforms &u, constant float *bayer, float2 point, float weather, float step) {
-    if (weather >= 1.0) {
-        float cover = 0.25 + 0.25 * saturate(weather - 1.0);
-        uint2 dot = uint2(point) % 8;
-        if (bayer[dot.y * 8 + dot.x] < cover * 64) color = u.surface.rgb;
-    }
-    float edge = saturate(0.5 * u.scale + 0.5 - abs(weather - 1.0) / max(step, 1e-7));
-    return mix(color, u.ink.rgb, edge * 0.55);
-}
-
 fragment float4 terrainFragment(TerrainVarying in [[stage_in]],
                                 constant Uniforms &u [[buffer(0)]],
                                 constant float *thresholds [[buffer(1)]],
                                 constant float *dither [[buffer(2)]],
                                 constant float *bayer [[buffer(3)]],
                                 constant uint &levels [[buffer(4)]],
-                                texture2d<float, access::read> field [[texture(0)]],
-                                texture2d<float, access::read> weather [[texture(1)]]) {
+                                texture2d<float, access::read> field [[texture(0)]]) {
     float2 point = in.position.xy / u.scale;
     float3 color = u.ground.rgb;
 
@@ -110,10 +99,29 @@ fragment float4 terrainFragment(TerrainVarying in [[stage_in]],
         float coverage = saturate(half_width + 0.5 - distance);
         color = mix(color, u.ink.rgb, coverage * (index ? 0.9 : 0.45));
     }
-
-    Elevation w = sampleField(weather, (map + u.origin) / u.cell - 0.5);
-    if (w.value > 0.5) color = overcast(color, u, bayer, point, w.value, length(w.slope) / (u.cell * u.k * u.scale));
     return float4(color, 1);
+}
+
+// The flat map's clouds, drawn over the markers but under the pictures: where this season's
+// searches gather more than usual (`Clouds.weather`, where 1 is a cloud's edge and 2 its
+// core). A light dot screen, filling in toward the core but never past half so the land always
+// shows through, with a rule around each.
+fragment float4 flatCloudFragment(TerrainVarying in [[stage_in]],
+                                  constant Uniforms &u [[buffer(0)]],
+                                  constant float *bayer [[buffer(3)]],
+                                  texture2d<float, access::read> weather [[texture(1)]]) {
+    float2 point = in.position.xy / u.scale;
+    float2 map = (point - u.translate) / u.k;
+    Elevation w = sampleField(weather, (map + u.origin) / u.cell - 0.5);
+    if (w.value <= 0.5) discard_fragment();
+    // How much the weather changes across one pixel, to draw the rule a constant width.
+    float step = max(length(w.slope) / (u.cell * u.k * u.scale), 1e-7);
+    float rule = saturate(0.5 * u.scale + 0.5 - abs(w.value - 1.0) / step) * 0.55 * u.clouds;
+    float cover = (0.25 + 0.25 * saturate(w.value - 1.0)) * u.clouds;
+    uint2 dot = uint2(point) % 8;
+    bool filled = w.value >= 1.0 && bayer[dot.y * 8 + dot.x] < cover * 64;
+    if (!filled && rule < 0.02) discard_fragment();
+    return filled ? float4(mix(u.surface.rgb, u.ink.rgb, rule), 1) : float4(u.ink.rgb * rule, rule);
 }
 
 // Markers: squares for what you made or posted, circles for what you kept.
@@ -129,29 +137,45 @@ struct MarkerVarying {
     float2 offset;  // pixels from the center
     float radius;   // pixels
     float mine;
+    float shown;    // 0 to 1
+    float outline;  // pixels of outline in the ground color: the hovered marker's alone
 };
 
+// Markers, or with `hover` above 0, the one under the pointer: twice the size, with an outline
+// that wide in points.
 vertex MarkerVarying markerVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                                   constant Uniforms &u [[buffer(0)]],
-                                  constant Marker *markers [[buffer(1)]]) {
+                                  constant Marker *markers [[buffer(1)]],
+                                  constant float &hover [[buffer(3)]]) {
     Marker m = markers[iid];
-    float radius = (u.dotRadius > 0 ? u.dotRadius : m.base * sqrt(u.k)) * u.scale;
-    float reach = radius + 1.0 * u.scale + 1.0;
-    float2 corner = float2(vid & 1, (vid >> 1) & 1) * 2 - 1;
     float2 center = (m.position * u.k + u.translate) * u.scale;
+    // Far out, markers are so dense they'd hide the terrain: they show around the pointer, and
+    // everywhere once you're closer in. The light falls off from its very middle, and markers
+    // shrink as well as fade toward its edge, so it reads as the terrain lit, not a disc of ink.
+    float lit = 1 - saturate(distance(center, u.pointer) / u.reveal);
+    lit *= lit * lit;
+    float shown = hover > 0 ? 1 : max(u.markers, lit);
+    if (shown < 0.01) return { float4(2, 2, 2, 1), float2(0), 0, 0, 0, 0 };
+    float size = hover > 0 ? 2 : mix(0.35 + 0.65 * lit, 1.0, u.markers);
+    float radius = (u.dotRadius > 0 ? u.dotRadius : m.base * sqrt(u.k)) * u.scale * size;
+    float outline = hover * u.scale;
+    float reach = radius + outline + 1.0 * u.scale + 1.0;
+    float2 corner = float2(vid & 1, (vid >> 1) & 1) * 2 - 1;
     float2 pixel = center + corner * reach;
     float2 clip = pixel / u.drawable * 2 - 1;
-    return { float4(clip.x, -clip.y, 0, 1), corner * reach, radius, m.mine };
+    return { float4(clip.x, -clip.y, 0, 1), corner * reach, radius, m.mine, shown, outline };
 }
 
 fragment float4 markerFragment(MarkerVarying in [[stage_in]], constant Uniforms &u [[buffer(0)]]) {
     float d = in.mine > 0.5 ? max(abs(in.offset.x), abs(in.offset.y)) : length(in.offset);
+    // Ink only, with no outline, so markers darken the terrain they're on and never lighten it.
+    // The hovered one alone is set apart by an outline.
     float fill = saturate(in.radius - d + 0.5);
-    // A thin outline in the ground color keeps overlapping markers apart.
-    float outline = u.dotRadius > 0 ? 0 : saturate(0.4 * u.scale + 0.5 - abs(d - in.radius));
-    float3 rgb = mix(u.ink.rgb * fill, u.ground.rgb, outline);
-    float alpha = mix(fill, 1.0, outline);
-    return float4(rgb, alpha);
+    if (in.outline > 0) {
+        float whole = saturate(in.radius + in.outline - d + 0.5);
+        return float4(u.ink.rgb * fill + u.ground.rgb * (whole - fill), whole);
+    }
+    return float4(u.ink.rgb, 1) * fill * in.shown;
 }
 
 // Thumbnails. Each is drawn on its own, with a frame: heavy for what you made, fine
@@ -410,7 +434,7 @@ fragment float4 reliefFragment(ReliefVarying in [[stage_in]],
     // The clouds' shadows, cast away from the sun onto whatever lies under them.
     float2 toCloud = r.sun.xz / r.sun.y * (cloudAltitude(r, 0) - in.world.y);
     float shadow = sampleField(weather, (in.map + toCloud + u.origin) / u.cell - 0.5).value;
-    if (shadow >= 1.0) density += 0.12 + 0.12 * saturate(shadow - 1.0);
+    if (shadow >= 1.0) density += (0.12 + 0.12 * saturate(shadow - 1.0)) * u.clouds;
     // Capped, as the flat map's is, so pictures and names stay readable on the shadowed side.
     density = clamp(density, 0.0, 0.6) * clear;
     uint2 dot = uint2(point) % 8;
@@ -452,7 +476,7 @@ fragment float4 cloudFragment(CloudVarying in [[stage_in]],
                               constant Relief &r [[buffer(5)]],
                               texture2d<float, access::read> weather [[texture(1)]]) {
     float w = sampleField(weather, (in.map + u.origin) / u.cell - 0.5).value;
-    float clear = fog(r, in.world);
+    float clear = fog(r, in.world) * u.clouds;
     float rule = saturate(0.5 * u.scale + 0.5 - abs(w - in.threshold) / max(fwidth(w), 1e-7)) * 0.55 * clear;
     float cover = (0.25 + 0.25 * saturate(w - 1.0)) * clear;
     uint2 dot = uint2(in.position.xy / u.scale) % 8;
@@ -467,18 +491,27 @@ vertex MarkerVarying reliefMarkerVertex(uint vid [[vertex_id]], uint iid [[insta
                                         constant Uniforms &u [[buffer(0)]],
                                         constant Marker *markers [[buffer(1)]],
                                         constant Relief &r [[buffer(2)]],
+                                        constant float &hover [[buffer(3)]],
                                         texture2d<float, access::read> field [[texture(0)]]) {
     Marker m = markers[iid];
     float3 world = surface(field, u, r, m.position);
     world += normalize(r.eye.xyz - world) * 1.5;
     float4 clip = r.viewProjection * float4(world, 1);
-    if (clip.w <= 0) return { float4(2, 2, 2, 1), float2(0), 0, 0 };
+    if (clip.w <= 0) return { float4(2, 2, 2, 1), float2(0), 0, 0, 0, 0 };
     float k = r.focal / clip.w;
+    // Hidden, they show around the pointer, as on the flat map.
+    float2 center = (float2(clip.x, -clip.y) / clip.w * 0.5 + 0.5) * u.drawable;
+    float lit = 1 - saturate(distance(center, u.pointer) / u.reveal);
+    lit *= lit * lit;
+    float shown = hover > 0 ? 1 : max(u.markers, lit);
+    if (shown < 0.01) return { float4(2, 2, 2, 1), float2(0), 0, 0, 0, 0 };
     // Smaller than on the flat map, and shrinking faster with distance: seen at a slant and far
     // off, many more items share each point of the screen, and at full size they'd ink it solid.
-    float radius = (k >= r.thumbnailZoom ? r.dotRadius * 0.7 : m.base * sqrt(k) * min(1.0, sqrt(k / r.thumbnailZoom)) * 0.8) * u.scale;
-    float reach = radius + 1.0 * u.scale + 1.0;
+    float radius = (k >= r.thumbnailZoom ? r.dotRadius * 0.7 : m.base * sqrt(k) * min(1.0, sqrt(k / r.thumbnailZoom)) * 0.8) * u.scale
+        * (hover > 0 ? 2 : mix(0.35 + 0.65 * lit, 1.0, u.markers));
+    float outline = hover * u.scale;
+    float reach = radius + outline + 1.0 * u.scale + 1.0;
     float2 corner = float2(vid & 1, (vid >> 1) & 1) * 2 - 1;
     clip.xy += corner * reach / u.drawable * 2 * clip.w;
-    return { clip, corner * reach, radius, m.mine };
+    return { clip, corner * reach, radius, m.mine, shown, outline };
 }

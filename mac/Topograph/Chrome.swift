@@ -79,6 +79,10 @@ struct FilterBar: View {
                         .hotkey("⌘\(key.character)", key: key, model: model, theme: theme)
                 }
             }
+            Button("markers") { model.showsMarkers.toggle() }
+                .buttonStyle(KeyStyle(theme: theme, led: model.showsMarkers))
+                .hotkey("⌘J", key: "j", model: model, theme: theme)
+                .help("Hidden, they show only around the pointer, so the terrain reads on its own.")
             Button("clouds") { model.showsClouds.toggle() }
                 .buttonStyle(KeyStyle(theme: theme, led: model.showsClouds))
                 .hotkey("⌘K", key: "k", model: model, theme: theme)
