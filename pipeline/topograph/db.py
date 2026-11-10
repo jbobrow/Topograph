@@ -162,6 +162,13 @@ class Record:
     interactions: list[dict] = field(default_factory=list)
     # each: {"ord": int, "kind": "image"|"video", "data": bytes|None, "url": str|None}
     media: list[dict] = field(default_factory=list)
+    # Ids this same thing was stored under before the importer knew better, like an X repost
+    # under its own id rather than the post's. They're folded into this one (`absorb`).
+    replaces: list[str] = field(default_factory=list)
+
+
+# How much an item's kind says it has. Merging never moves down.
+KIND_RANK = {"link": 0, "text": 1, "image": 2, "video": 2}
 
 
 def upsert_record(lib: Library, rec: Record, ingest_media) -> bool:
@@ -177,7 +184,8 @@ def upsert_record(lib: Library, rec: Record, ingest_media) -> bool:
         )
     else:
         # Merge: never replace richer data with poorer data.
-        kind = existing["kind"] if rec.kind == "link" else rec.kind
+        # A like says "text" for a post whose pictures were fetched since: still pictures.
+        kind = rec.kind if KIND_RANK.get(rec.kind, 0) >= KIND_RANK.get(existing["kind"], 0) else existing["kind"]
         created, estimated = existing["created_at"], existing["created_estimated"]
         if rec.created_at and (created is None or (estimated and not rec.created_estimated)):
             created, estimated = rec.created_at, int(rec.created_estimated)
@@ -208,7 +216,38 @@ def upsert_record(lib: Library, rec: Record, ingest_media) -> bool:
         )
         if m.get("data") is not None:
             ingest_media(lib, rec.id, m["ord"], m["data"], m.get("kind", "image"), m.get("name"))
+    for old in rec.replaces:
+        absorb(lib, old, rec.id)
     return existing is None
+
+
+def absorb(lib: Library, old: str, new: str) -> bool:
+    """Fold the item stored as `old` into `new`, the same thing under its right id.
+
+    What you did with it moves over. So do its pictures, vectors and place on the map
+    when `new` has none, so a repost that was fetched isn't fetched again and the item
+    keeps its place until the map is next built. Then `old` goes.
+    """
+    c = lib.conn
+    was = c.execute("select * from item where id=?", (old,)).fetchone()
+    if was is None or old == new:
+        return False
+    c.execute(
+        "update item set kind=case when kind in ('link', 'text') and ? in ('image', 'video') then ? else kind end, "
+        "author=coalesce(author, ?), text=coalesce(text, ?), hydrated=max(hydrated, ?) where id=?",
+        (was["kind"], was["kind"], was["author"], was["text"], was["hydrated"], new))
+    c.execute(
+        "insert or ignore into interaction(item_id, type, at, at_estimated, collection, source_file) "
+        "select ?, type, at, at_estimated, collection, source_file from interaction where item_id=?", (new, old))
+    has_pictures = c.execute("select 1 from media where item_id=? and status='ok'", (new,)).fetchone()
+    if not has_pictures and c.execute("select 1 from media where item_id=? and status='ok'", (old,)).fetchone():
+        c.execute("delete from media where item_id=?", (new,))
+        c.execute("update media set item_id=? where item_id=?", (new, old))
+    for table in ("embedding", "layout", "cloud"):
+        # Per model: a row `new` already has for a model stays, and `old`'s is dropped.
+        c.execute(f"update or ignore {table} set item_id=? where item_id=?", (new, old))
+    c.execute("delete from item where id=?", (old,))
+    return True
 
 
 # An item is "gone" when the original can't be reached and we have nothing of it:

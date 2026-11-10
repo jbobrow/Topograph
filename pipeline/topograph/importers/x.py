@@ -71,9 +71,64 @@ def _expand_text(tw: dict) -> str | None:
     return clean_text(text)
 
 
+URL_RX = re.compile(r"https?://\S+")
+RT_RX = re.compile(r"RT @([A-Za-z0-9_]+):\s?(.*)", re.S)
+
+
+def _gist(text: str | None) -> str:
+    """Text to match a repost to the post: no links (likes keep t.co, posts expand them),
+    lowercase, spaces collapsed. An archive cuts a long repost short with "…" partway
+    through a word, so that word goes."""
+    text = text or ""
+    cut = text.rstrip().endswith("…")
+    words = URL_RX.sub(" ", text).lower().split()
+    if cut and words:
+        words = words[:-1]
+    return " ".join(words)
+
+
+def _liked_index(archive: Archive) -> tuple[dict, dict]:
+    """Liked and bookmarked posts by their text: whole, and by the start of longer ones.
+    A text shared by two posts can't say which, so it's left out."""
+    whole: dict[str, str | None] = {}
+    start: dict[str, str | None] = {}
+    for feed, key in (("like", "like"), ("bookmark", "bookmark"), ("bookmarks", "bookmark")):
+        for _, entry in read_feed(archive, feed):
+            obj = _unwrap(entry, key)
+            tid = str(obj.get("tweetId") or obj.get("tweet_id") or obj.get("id") or "")
+            gist = _gist(obj.get("fullText") or obj.get("full_text"))
+            if not tid or len(gist) < 12:
+                continue
+            for index, k in ((whole, gist), (start, gist[:MATCH_START] if len(gist) >= MATCH_START else None)):
+                if k is not None:
+                    index[k] = tid if index.get(k, tid) == tid else None
+    return whole, start
+
+
+MATCH_START = 40
+
+
+def _reposted(tw: dict, body: str, liked: tuple[dict, dict]) -> str | None:
+    """The id of the post a repost reposts, when the archive says or it's one you liked.
+
+    The archive gives a repost its own id. Its pictures name the post they came from, and
+    otherwise its text is the post's, cut short.
+    """
+    for m in (tw.get("extended_entities") or tw.get("entities") or {}).get("media") or []:
+        if m.get("source_status_id_str"):
+            return m["source_status_id_str"]
+    whole, start = liked
+    gist = _gist(body)
+    if len(gist) < 12:
+        return None
+    found = start.get(gist[:MATCH_START]) if len(gist) >= MATCH_START else whole.get(gist)
+    return found
+
+
 def parse(archive: Archive):
     me = account_username(archive) or "i"
     media_idx = _media_index(archive)
+    liked = _liked_index(archive)
 
     # --- your posts, replies and reposts -----------------------------------
     for src, entry in read_feed(archive, "tweets"):
@@ -84,10 +139,12 @@ def parse(archive: Archive):
         at = parse_twitter_date(tw.get("created_at", "")) or snowflake_time(tid)
         full = tw.get("full_text") or ""
         author = me
+        original = None
         if full.startswith("RT @"):
             ix_type = "repost"
-            m = re.match(r"RT @([A-Za-z0-9_]+):", full)
+            m = RT_RX.match(full)
             author = m.group(1) if m else None
+            original = _reposted(tw, m.group(2) if m else "", liked)
         elif tw.get("in_reply_to_status_id_str"):
             ix_type = "reply"
         else:
@@ -117,6 +174,23 @@ def parse(archive: Archive):
         has_video = any(m.get("video") for m in media)
         kind = "video" if has_video else ("image" if media else
                                           ("link" if (tw.get("entities") or {}).get("urls") else "text"))
+        if original:
+            # The post itself, with your repost as something you did with it.
+            text = _expand_text(tw)
+            yield Record(
+                id=f"x:{original}",
+                platform="x",
+                kind=kind,
+                url=f"https://x.com/{author or me}/status/{original}",
+                author=author,
+                text=RT_RX.sub(r"\2", text) if text else None,
+                created_at=snowflake_time(original),
+                hydrated=1 if media else 0,
+                interactions=[{"type": ix_type, "at": at, "source": src}],
+                media=media,
+                replaces=[f"x:{tid}"],
+            )
+            continue
         yield Record(
             id=f"x:{tid}",
             platform="x",

@@ -7,7 +7,10 @@ public enum XImporter: ArchiveImporter {
     public static let title = "X"
     private static let shim = PipelineText.regex(#"^\s*window\.YTD\.[A-Za-z0-9_]+\.part\d+\s*=\s*"#)
     private static let trailingLink = PipelineText.regex(#"\s*https://t\.co/\w+\s*$"#)
-    private static let repostAuthor = PipelineText.regex(#"^RT @([A-Za-z0-9_]+):"#)
+    private static let repost = PipelineText.regex(#"^RT @([A-Za-z0-9_]+):\s?(.*)"#, .dotMatchesLineSeparators)
+    private static let link = PipelineText.regex(#"https?://\S+"#)
+    /// How much of a long text has to agree to match a repost to the post.
+    static let matchStart = 40
 
     public static func detect(_ archive: Archive) -> Bool {
         !archive.find(#"(^|/)data/(tweets|like|account)(-part\d+)?\.js$"#).isEmpty
@@ -60,6 +63,57 @@ public enum XImporter: ArchiveImporter {
         }
     }
 
+    /// Text to match a repost to the post: no links (likes keep t.co, posts expand them),
+    /// lowercase, spaces collapsed. An archive cuts a long repost short with "…" partway
+    /// through a word, so that word goes. Same as `_gist` in x.py.
+    static func gist(_ text: String?) -> String {
+        let text = text ?? ""
+        let cut = text.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("…")
+        let unlinked = link.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: " ")
+        var words = unlinked.lowercased().components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+        if cut, !words.isEmpty { words.removeLast() }
+        return words.joined(separator: " ")
+    }
+
+    /// The first characters, counted as Python counts them.
+    private static func start(_ text: String) -> String? {
+        text.unicodeScalars.count >= matchStart ? String(String.UnicodeScalarView(text.unicodeScalars.prefix(matchStart))) : nil
+    }
+
+    /// Liked and bookmarked posts by their text: whole, and by the start of longer ones. A text
+    /// shared by two posts can't say which, so it's left out.
+    private static func likedIndex(_ archive: Archive) throws -> (whole: [String: String?], start: [String: String?]) {
+        var whole: [String: String?] = [:], starts: [String: String?] = [:]
+        for (name, key) in [("like", "like"), ("bookmark", "bookmark"), ("bookmarks", "bookmark")] {
+            for (_, entry) in try feed(archive, name) {
+                let object = unwrap(entry, key)
+                let id = string(["tweetId", "tweet_id", "id"].lazy.compactMap { object[$0].flatMap { $0.isTruthy ? $0 : nil } }.first)
+                let gist = gist(object.text("fullText") ?? object.text("full_text"))
+                guard !id.isEmpty, gist.unicodeScalars.count >= 12 else { continue }
+                if let had = whole[gist] { whole[gist] = had == id ? id : .some(nil) } else { whole[gist] = id }
+                if let key = start(gist) {
+                    if let had = starts[key] { starts[key] = had == id ? id : .some(nil) } else { starts[key] = id }
+                }
+            }
+        }
+        return (whole, starts)
+    }
+
+    /// The id of the post a repost reposts, when the archive says or it's one you liked. The
+    /// archive gives a repost its own id. Its pictures name the post they came from, and
+    /// otherwise its text is the post's, cut short.
+    private static func reposted(_ tweet: JSONValue, body: String, liked: (whole: [String: String?], start: [String: String?])) -> String? {
+        let extended = tweet["extended_entities"]?["media"]
+        let entities = extended?.isTruthy == true ? extended! : (tweet["entities"]?["media"] ?? .array([]))
+        for entity in entities.array ?? [] {
+            if let source = entity.text("source_status_id_str") { return source }
+        }
+        let gist = gist(body)
+        guard gist.unicodeScalars.count >= 12 else { return nil }
+        if let key = start(gist) { return liked.start[key] ?? nil }
+        return liked.whole[gist] ?? nil
+    }
+
     public static func parse(_ archive: Archive, emit: (ImportRecord) throws -> Void) throws {
         var me = "i"
         for (_, entry) in try feed(archive, "account") {
@@ -72,6 +126,8 @@ public enum XImporter: ArchiveImporter {
             mediaFiles[id, default: []].append(name)
         }
 
+        let liked = try likedIndex(archive)
+
         // Your posts, replies and reposts.
         for (source, entry) in try feed(archive, "tweets") {
             let tweet = unwrap(entry, "tweet")
@@ -80,10 +136,13 @@ public enum XImporter: ArchiveImporter {
             let at = PipelineText.parseTwitterDate(tweet["created_at"]?.string) ?? PipelineText.snowflakeTime(id)
             let full = tweet.text("full_text") ?? ""
             var author: String? = me
+            var original: String?
             let type: String
             if full.hasPrefix("RT @") {
                 type = "repost"
-                author = PipelineText.firstGroups(repostAuthor, full)?[1]
+                let groups = PipelineText.firstGroups(repost, full)
+                author = groups?[1] ?? nil
+                original = reposted(tweet, body: (groups?[2] ?? nil) ?? "", liked: liked)
             } else if tweet["in_reply_to_status_id_str"]?.isTruthy == true {
                 type = "reply"
             } else {
@@ -114,6 +173,17 @@ public enum XImporter: ArchiveImporter {
             }
             let kind = hasVideo ? "video" : !media.isEmpty ? "image"
                 : tweet["entities"]?["urls"]?.isTruthy == true ? "link" : "text"
+            if let original {
+                // The post itself, with your repost as something you did with it.
+                let text = expandedText(tweet).map {
+                    repost.stringByReplacingMatches(in: $0, range: NSRange($0.startIndex..., in: $0), withTemplate: "$2")
+                }
+                try emit(ImportRecord(id: "x:\(original)", platform: "x", kind: kind, url: "https://x.com/\(author ?? me)/status/\(original)",
+                                      author: author, text: text, createdAt: PipelineText.snowflakeTime(original), hydrated: media.isEmpty ? 0 : 1,
+                                      interactions: [ImportInteraction(type: type, at: at, source: source)], media: media,
+                                      replaces: ["x:\(id)"]))
+                continue
+            }
             try emit(ImportRecord(id: "x:\(id)", platform: "x", kind: kind, url: "https://x.com/\(author ?? me)/status/\(id)", author: author,
                                   text: expandedText(tweet), createdAt: at, hydrated: type != "repost" || !media.isEmpty ? 1 : 0,
                                   interactions: [ImportInteraction(type: type, at: at, source: source)], media: media))

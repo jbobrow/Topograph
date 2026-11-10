@@ -14,10 +14,13 @@ public struct ImportRecord: Sendable {
     public var hydrated = 0
     public var interactions: [ImportInteraction] = []
     public var media: [ImportMedia] = []
+    /// Ids this same thing was stored under before the importer knew better, like an X repost
+    /// under its own id rather than the post's. They're folded into this one (`absorb`).
+    public var replaces: [String] = []
 
     public init(id: String, platform: String, kind: String = "link", url: String? = nil, author: String? = nil, text: String? = nil,
                 createdAt: Int? = nil, createdEstimated: Bool = false, hydrated: Int = 0,
-                interactions: [ImportInteraction] = [], media: [ImportMedia] = []) {
+                interactions: [ImportInteraction] = [], media: [ImportMedia] = [], replaces: [String] = []) {
         self.id = id
         self.platform = platform
         self.kind = kind
@@ -29,6 +32,7 @@ public struct ImportRecord: Sendable {
         self.hydrated = hydrated
         self.interactions = interactions
         self.media = media
+        self.replaces = replaces
     }
 }
 
@@ -126,7 +130,9 @@ public final class LibraryWriter: @unchecked Sendable {
         return try db.write { db in
             let existing = try Row.fetchOne(db, sql: "select kind, created_at, created_estimated from item where id = ?", arguments: [record.id])
             if let existing {
-                let kind = record.kind == "link" ? existing["kind"] as String : record.kind
+                // A like says "text" for a post whose pictures were fetched since: still pictures.
+                let had = existing["kind"] as String
+                let kind = Self.kindRank(record.kind) >= Self.kindRank(had) ? record.kind : had
                 var created = existing["created_at"] as Int?
                 var estimated = existing["created_estimated"] as Int
                 if let new = record.createdAt, new != 0, created == nil || (estimated != 0 && !record.createdEstimated) {
@@ -154,8 +160,52 @@ public final class LibraryWriter: @unchecked Sendable {
                                arguments: [record.id, media.ord, media.kind, media.url])
                 if let ready = prepared[media.ord] { try Self.record(ready, itemID: record.id, ord: media.ord, db) }
             }
+            for old in record.replaces { try Self.absorb(old, into: record.id, db) }
             return existing == nil
         }
+    }
+
+    /// How much an item's kind says it has. Merging never moves down.
+    static func kindRank(_ kind: String) -> Int {
+        switch kind {
+        case "image", "video": 2
+        case "text": 1
+        default: 0
+        }
+    }
+
+    /// Folds the item stored as `old` into `new`, the same thing under its right id. What you
+    /// did with it moves over. So do its pictures, vectors and place on the map when `new` has
+    /// none, so a repost that was fetched isn't fetched again and the item keeps its place until
+    /// the map is next built. Then `old` goes. Same as `absorb` in db.py.
+    @discardableResult
+    static func absorb(_ old: String, into new: String, _ db: Database) throws -> Bool {
+        guard old != new, let was = try Row.fetchOne(db, sql: "select kind, author, text, hydrated from item where id = ?", arguments: [old]) else {
+            return false
+        }
+        let kind: String = was["kind"]
+        try db.execute(sql: """
+            update item set kind = case when kind in ('link', 'text') and ? in ('image', 'video') then ? else kind end,
+            author = coalesce(author, ?), text = coalesce(text, ?), hydrated = max(hydrated, ?) where id = ?
+            """, arguments: [kind, kind, was["author"] as String?, was["text"] as String?, was["hydrated"] as Int, new])
+        try db.execute(sql: """
+            insert or ignore into interaction(item_id, type, at, at_estimated, collection, source_file)
+            select ?, type, at, at_estimated, collection, source_file from interaction where item_id = ?
+            """, arguments: [new, old])
+        let pictures = "select 1 from media where item_id = ? and status = 'ok'"
+        if try Bool.fetchOne(db, sql: pictures, arguments: [new]) == nil, try Bool.fetchOne(db, sql: pictures, arguments: [old]) != nil {
+            try db.execute(sql: "delete from media where item_id = ?", arguments: [new])
+            try db.execute(sql: "update media set item_id = ? where item_id = ?", arguments: [new, old])
+        }
+        // Per model: a row `new` already has for a model stays, and `old`'s is dropped.
+        for table in ["embedding", "layout", "cloud"] {
+            try db.execute(sql: "update or ignore \(table) set item_id = ? where item_id = ?", arguments: [new, old])
+        }
+        for table in ["interaction", "media", "embedding", "layout", "cloud"] {
+            try db.execute(sql: "delete from \(table) where item_id = ?", arguments: [old])
+        }
+        try db.execute(sql: "delete from item where id = ?", arguments: [old])
+        return true
     }
 
     /// Bytes fetched for a media row that's already there.

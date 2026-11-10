@@ -185,8 +185,29 @@ def _media_entries(obj):
             yield d
 
 
+def _own_codes(archive: Archive, username: str | None) -> dict[int, str]:
+    """Your own posts' shortcodes, by when they were posted, from those you liked or saved.
+
+    The export lists your posts without their shortcode, but a shortcode holds the moment
+    it was posted, to the second, which is the time your post carries.
+    """
+    if not username:
+        return {}
+    codes: dict[int, str] = {}
+    for pattern, ix_type, aware in ((r"(^|/)liked_posts\.json$", "like", False),
+                                    (r"(^|/)saved_collections\.json$", "save", True),
+                                    (r"(^|/)saved_posts\.json$", "save", False)):
+        for name in archive.find(pattern):
+            for rec in _link_records(archive, name, ix_type, collection_aware=aware):
+                code = rec.id.split(":", 1)[1]
+                if rec.author == username and rec.created_at:
+                    codes[rec.created_at] = code
+    return codes
+
+
 def _own_posts(archive: Archive, username: str | None):
     profile = f"https://www.instagram.com/{username}/" if username else None
+    codes = _own_codes(archive, username)
     # Older exports keep your posts in content/, newer ones in your_instagram_activity/media/.
     files = archive.find(r"(^|/)(content|media)/(posts_\d+|reels|stories|igtv_videos|profile_photos)\.json$")
     for name in files:
@@ -212,11 +233,14 @@ def _own_posts(archive: Archive, username: str | None):
                     media.append({"ord": i, "kind": "video" if is_video else "image",
                                   "data": archive.read(member), "name": member})
             pid = hashlib.sha1(entries[0]["uri"].encode()).hexdigest()[:16]
+            # Known by its shortcode when you also liked or saved it, so that's one item.
+            code = codes.get(int(stamp)) if stamp else None
             yield Record(
-                id=f"ig:own:{pid}",
+                id=f"ig:{code}" if code else f"ig:own:{pid}",
                 platform="instagram",
                 kind="video" if kinds == {"video"} else "image",
-                url=profile,
+                url=f"https://www.instagram.com/p/{code}/" if code else profile,
+                replaces=[f"ig:own:{pid}"] if code else [],
                 author=username,
                 text=caption,
                 created_at=int(stamp) if stamp else None,

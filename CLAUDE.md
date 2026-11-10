@@ -61,7 +61,11 @@ It lives in `~/Library/Application Support/Topograph/` (override with `TOPOGRAPH
 
 Details that matter for compatibility:
 
-- Item ids are `<platform>:<native id>`. One item can have many interactions.
+- Item ids are `<platform>:<native id>`. One item can have many interactions. One thing is one
+  item: an X repost is a `repost` on the post it reposts (found by its pictures' source id, or by
+  its text matching a post you liked), and your own Instagram post takes its shortcode when you
+  liked or saved it. A record's `replaces` names ids an older import used, and `absorb` folds
+  them in, so re-importing mends a library.
 - Resonance is the sum of `INTERACTION_WEIGHTS` over the item's distinct interaction
   types. It raises terrain and sizes thumbnails.
 - Embedding vectors are float32 and L2-normalized, with model name `clip-vit-b-32`.

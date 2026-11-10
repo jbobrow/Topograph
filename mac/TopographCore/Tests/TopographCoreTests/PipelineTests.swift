@@ -963,3 +963,104 @@ final class WordsTokenizerTests: XCTestCase {
         XCTAssertEqual(tokenizer.tokens(String(repeating: "hello ", count: 400)).count, 256)
     }
 }
+
+/// One thing, one item: a repost joins the post it reposts, and your own Instagram post is the
+/// same item as your like of it. Libraries imported before this are mended on re-import.
+final class SameThingTests: XCTestCase {
+    private let liked = "1750000000000000001", repost = "1760000000000000000", source = "1740000000000000000"
+    private let repostWithPicture = "1770000000000000000", unliked = "1780000000000000000"
+
+    private func xArchive() throws -> Archive {
+        let root = try neutralFolder()
+        func shim(_ feed: String, _ json: String) -> Data { Data("window.YTD.\(feed).part0 = \(json)".utf8) }
+        func tweet(_ id: String, _ text: String, _ extra: String = "") -> String {
+            #"{"tweet": {"id_str": "\#(id)", "full_text": "\#(text)", "created_at": "Mon Feb 05 14:00:34 +0000 2024", "entities": {"urls": []}\#(extra)}}"#
+        }
+        let tweets = [
+            tweet(repost, "RT @maker: First things first. Enable the flag in settings, then reload https://example.com/a and wa…"),
+            tweet(repostWithPicture, "RT @painter: Studio",
+                  #", "extended_entities": {"media": [{"type": "photo", "media_url_https": "https://pbs.twimg.com/media/K.jpg", "source_status_id_str": "\#(source)"}]}"#),
+            tweet(unliked, "RT @someone: Something you never liked, only passed on"),
+        ]
+        try write(shim("account", #"[{"account": {"username": "me"}}]"#), root, "t/data/account.js")
+        try write(shim("tweets", "[" + tweets.joined(separator: ",") + "]"), root, "t/data/tweets.js")
+        try write(shim("like", #"[{"like": {"tweetId": "\#(liked)", "fullText": "First things first. Enable the flag in settings, then reload https://t.co/xyz and watch it go"}}]"#),
+                  root, "t/data/like.js")
+        return try Archive([root])
+    }
+
+    func testARepostIsThePostItReposts() throws {
+        var reposts: [String: ImportRecord] = [:]
+        try XImporter.parse(try xArchive()) { record in
+            if record.interactions.first?.type == "repost" { reposts[record.id] = record }
+        }
+        let post = try XCTUnwrap(reposts["x:\(liked)"])
+        XCTAssertEqual(post.replaces, ["x:\(repost)"])
+        XCTAssertEqual(post.author, "maker")
+        XCTAssertFalse(post.text?.hasPrefix("RT @") ?? true)
+        XCTAssertEqual(reposts["x:\(source)"]?.replaces, ["x:\(repostWithPicture)"])
+        XCTAssertEqual(reposts["x:\(unliked)"]?.replaces, [], "nothing to join")
+    }
+
+    func testGistMatchesPython() {
+        XCTAssertEqual(XImporter.gist("RT body with https://t.co/x a link and a cut wor…"), "rt body with a link and a cut")
+        XCTAssertEqual(XImporter.gist("  Two\n spaces  "), "two spaces")
+    }
+
+    func testReimportMendsALibrary() throws {
+        let library = try LibraryWriter(root: try neutralFolder())
+        // As an older import left it: the repost as an item of its own, fetched and mapped.
+        try library.upsert(ImportRecord(id: "x:\(repost)", platform: "x", kind: "image", text: "RT @maker: First things", hydrated: 1,
+                                        interactions: [ImportInteraction(type: "repost", at: 1_707_141_634)]))
+        try library.db.write { db in
+            try db.execute(sql: "insert into media(item_id, ord, thumb_path, status) values (?, 0, 'media/aa/t.webp', 'ok')", arguments: ["x:\(repost)"])
+            try db.execute(sql: "insert into layout(item_id, model, x, y, cluster) values (?, 'm', 1, 2, 3)", arguments: ["x:\(repost)"])
+        }
+        let archive = try xArchive()
+        for _ in 0..<2 {
+            try XImporter.parse(archive) { try library.upsert($0) }
+        }
+        try library.db.read { db in
+            XCTAssertEqual(try Int.fetchOne(db, sql: "select count(*) from item where id = ?", arguments: ["x:\(repost)"]), 0)
+            XCTAssertEqual(Set(try String.fetchAll(db, sql: "select type from interaction where item_id = ?", arguments: ["x:\(liked)"])), ["like", "repost"])
+            // Its picture and place came along, so it isn't fetched again or lost from the map.
+            XCTAssertEqual(try String.fetchOne(db, sql: "select thumb_path from media where item_id = ?", arguments: ["x:\(liked)"]), "media/aa/t.webp")
+            XCTAssertEqual(try Double.fetchOne(db, sql: "select x from layout where item_id = ?", arguments: ["x:\(liked)"]), 1)
+            XCTAssertEqual(try String.fetchOne(db, sql: "select kind from item where id = ?", arguments: ["x:\(liked)"]), "image")
+            XCTAssertEqual(try Int.fetchOne(db, sql: "select count(*) from item"), 3, "the liked post, the post behind the picture, the repost of one never liked")
+        }
+    }
+
+    func testYourPostYouLikedIsOneItem() throws {
+        let alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+        var n = ((1_620_000_000 * 1000 - 1_314_220_021_721) << 23) + 12345
+        var code = ""
+        for _ in 0..<11 { code = String(alphabet[n % 64]) + code; n /= 64 }
+        XCTAssertEqual(PipelineText.instagramShortcodeTime(code), 1_620_000_000)
+
+        let root = try neutralFolder()
+        try write(Data(#"{"profile_user": [{"string_map_data": {"Username": {"value": "jb.test"}}}]}"#.utf8), root,
+                  "personal_information/personal_information/personal_information.json")
+        try write(picture(seed: 1), root, "media/posts/202105/111.jpg")
+        try write(picture(seed: 2), root, "media/posts/202105/113.jpg")
+        try write(Data(#"""
+            [{"media": [{"uri": "media/posts/202105/111.jpg", "creation_timestamp": 1620000000, "title": "Ferns"}]},
+             {"media": [{"uri": "media/posts/202105/113.jpg", "creation_timestamp": 1621000000, "title": "Blue hour"}]}]
+            """#.utf8), root, "your_instagram_activity/media/posts_1.json")
+        try write(Data(#"""
+            [{"timestamp": 1620000500, "media": [], "label_values": [
+              {"label": "URL", "value": "https://www.instagram.com/p/\#(code)/", "href": "https://www.instagram.com/p/\#(code)/"},
+              {"label": "Caption", "value": "Ferns"},
+              {"dict": [{"dict": [{"label": "Username", "value": "jb.test"}], "title": ""}], "title": "Owner"}]}]
+            """#.utf8), root, "your_instagram_activity/likes/liked_posts.json")
+
+        var records: [ImportRecord] = []
+        try InstagramImporter.parse(try Archive([root])) { records.append($0) }
+        let mine = records.filter { $0.id == "ig:\(code)" }
+        XCTAssertEqual(Set(mine.compactMap { $0.interactions.first?.type }), ["post", "like"])
+        let post = try XCTUnwrap(mine.first { $0.interactions.first?.type == "post" })
+        XCTAssertEqual(post.url, "https://www.instagram.com/p/\(code)/")
+        XCTAssertTrue(post.replaces.first?.hasPrefix("ig:own:") ?? false)
+        XCTAssertEqual(records.filter { $0.id.hasPrefix("ig:own:") }.count, 1, "the post you didn't like keeps its own id")
+    }
+}

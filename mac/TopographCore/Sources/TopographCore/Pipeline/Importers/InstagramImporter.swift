@@ -165,8 +165,24 @@ public enum InstagramImporter: ArchiveImporter {
         return out
     }
 
+    /// Your own posts' shortcodes, by when they were posted, from those you liked or saved.
+    /// The export lists your posts without their shortcode, but a shortcode holds the moment
+    /// it was posted, to the second, which is the time your post carries.
+    private static func ownCodes(_ archive: Archive, username: String?) throws -> [Int: String] {
+        guard let username else { return [:] }
+        var codes: [Int: String] = [:]
+        let note: (ImportRecord) -> Void = { record in
+            if record.author == username, let time = record.createdAt { codes[time] = String(record.id.dropFirst("ig:".count)) }
+        }
+        for name in archive.find(#"(^|/)liked_posts\.json$"#) { try links(archive, name, type: "like", emit: note) }
+        for name in archive.find(#"(^|/)saved_collections\.json$"#) { try links(archive, name, type: "save", collectionAware: true, emit: note) }
+        for name in archive.find(#"(^|/)saved_posts\.json$"#) { try links(archive, name, type: "save", emit: note) }
+        return codes
+    }
+
     private static func ownPosts(_ archive: Archive, username: String?, emit: (ImportRecord) throws -> Void) throws {
         let profile = username.map { "https://www.instagram.com/\($0)/" }
+        let codes = try ownCodes(archive, username: username)
         // Older exports keep your posts in content/, newer ones in your_instagram_activity/media/.
         for name in archive.find(#"(^|/)(content|media)/(posts_\d+|reels|stories|igtv_videos|profile_photos)\.json$"#) {
             guard let data = load(archive, name) else { continue }
@@ -188,9 +204,13 @@ public enum InstagramImporter: ArchiveImporter {
                     }
                 }
                 let id = PipelineText.sha1Prefix(first["uri"]?.string ?? "")
-                try emit(ImportRecord(id: "ig:own:\(id)", platform: "instagram", kind: kinds == ["video"] ? "video" : "image", url: profile, author: username,
+                // Known by its shortcode when you also liked or saved it, so that's one item.
+                let code = stamp != 0 ? codes[stamp] : nil
+                try emit(ImportRecord(id: code.map { "ig:\($0)" } ?? "ig:own:\(id)", platform: "instagram", kind: kinds == ["video"] ? "video" : "image",
+                                      url: code.map { "https://www.instagram.com/p/\($0)/" } ?? profile, author: username,
                                       text: caption, createdAt: stamp != 0 ? stamp : nil, hydrated: 1,
-                                      interactions: [ImportInteraction(type: "post", at: stamp, collection: collection, source: name)], media: media))
+                                      interactions: [ImportInteraction(type: "post", at: stamp, collection: collection, source: name)], media: media,
+                                      replaces: code == nil ? [] : ["ig:own:\(id)"]))
             }
         }
     }
