@@ -96,8 +96,8 @@ private struct LabelDraw {
 
 /// One thumbnail to draw this frame, in points.
 struct ThumbPlacement {
-    let center: CGPoint
-    let size: CGSize
+    var center: CGPoint
+    var size: CGSize
     let frame: Double
     let mine: Bool
     let texture: MTLTexture?

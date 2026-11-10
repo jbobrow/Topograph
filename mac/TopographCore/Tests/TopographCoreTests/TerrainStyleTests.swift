@@ -19,4 +19,14 @@ final class TerrainStyleTests: XCTestCase {
         XCTAssertEqual(TerrainStyle.ditherDensity.first!, 0.03, accuracy: 1e-5)
         XCTAssertEqual(TerrainStyle.ditherDensity.last!, 0.34, accuracy: 1e-5)
     }
+
+    func testIn3DResonanceDecidesUntilPicturesComeClose() {
+        let far = TerrainStyle.standingNear * 0.5, close = TerrainStyle.standingNear * 2
+        XCTAssertGreaterThan(TerrainStyle.standingRank(size: far, resonance: 5), TerrainStyle.standingRank(size: TerrainStyle.standingNear, resonance: 1),
+                             "a resonant picture far off still shows before a plain one nearer")
+        XCTAssertGreaterThan(TerrainStyle.standingRank(size: close, resonance: 0.3), TerrainStyle.standingRank(size: far, resonance: 12),
+                             "close up, nothing is missing, however plain")
+        XCTAssertGreaterThan(TerrainStyle.standingRank(size: close, resonance: 3), TerrainStyle.standingRank(size: close * 1.2, resonance: 1),
+                             "among the close, resonance decides again")
+    }
 }

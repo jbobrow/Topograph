@@ -57,4 +57,16 @@ public enum TerrainStyle {
 
     /// How much larger a resonant thumbnail is drawn.
     public static func thumbnailScale(resonance: Float) -> Double { 0.7 + 0.15 * Double(min(resonance, 4)) }
+
+    /// In 3D, from how large on screen (a thumbnail's long edge before resonance, in points)
+    /// nearness starts to count in which pictures show. It counts fully at twice this.
+    public static let standingNear: Double = 60
+
+    /// In 3D, which pictures show when there are more than can be drawn: the most resonant,
+    /// however far, until pictures come near enough to be drawn large. Those show whatever their
+    /// resonance, so nothing close by is missing, and among them resonance decides again.
+    public static func standingRank(size: Double, resonance: Float) -> Double {
+        let t = min(max((size - standingNear) / standingNear, 0), 1)
+        return Double(resonance) + 100 * t * t * (3 - 2 * t)
+    }
 }

@@ -146,6 +146,11 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
     private var labelAlpha: [Int: Double] = [:]
     private var lastLabelFrame: CFTimeInterval = 0
     private var labelsMoving = false
+    /// How far each picture has grown into place, 0 to 1. They pop in as they come into view
+    /// and shrink away as they leave, rather than blinking on and off.
+    private var growth: [Int32: Double] = [:]
+    private var lastGrowthFrame: CFTimeInterval = 0
+    private var picturesMoving = false
 
     /// While the terrain is in 3D, the camera flying over it. Everything that works on the flat
     /// map's transform uses `shown`, the flat equivalent of what the camera sees.
@@ -233,6 +238,11 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
         }
         guard scene?.id != shownScene else { return keep(newlySelected) }
         shownScene = scene?.id
+        // Another map numbers its items differently, so what was growing would be something else.
+        if let before = self.scene?.map, before.recipe != scene?.map.recipe || before.items.count != scene?.map.items.count
+            || before.items.last?.id != scene?.map.items.last?.id {
+            growth = [:]
+        }
         self.scene = scene
         points = nil
         renderer?.setScene(scene)
@@ -349,7 +359,7 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
             let scale = bounds.width > 0 ? Double(drawableSize.width / bounds.width) : 1
             overlay.dots = transform.k >= TerrainStyle.thumbnailZoom
             thumbnails?.beginFrame()
-            if overlay.dots { overlay.thumbs = thumbnailPlacements(scene, scale: scale) }
+            overlay.thumbs = thumbnailPlacements(scene, scale: scale)
             if let selected, scene.visible.contains(selected) {
                 // With a picture lifted off, this marks the place it came from.
                 let item = scene.map.items[Int(selected)]
@@ -385,7 +395,8 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
 
         var chosen: [Int32] = []
         chosen.reserveCapacity(limit)
-        for index in scene.pictures {
+        // Zoomed out they're dots, and only the ones leaving are drawn, shrinking away.
+        for index in k >= TerrainStyle.thumbnailZoom ? scene.pictures : [] {
             let item = scene.map.items[Int(index)]
             let x = Double(item.x), y = Double(item.y)
             guard x >= x0, x <= x1, y >= y0, y <= y1 else { continue }
@@ -394,11 +405,11 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
         }
 
         let sizePoints = TerrainStyle.thumbnailSize(k: k)
-        var out: [ThumbPlacement] = []
+        var out: [Popping] = []
         out.reserveCapacity(chosen.count + 1)
-        func place(_ index: Int32, lifted: Bool) {
+        func make(_ index: Int32, lifted: Bool) -> Popping? {
             let item = scene.map.items[Int(index)]
-            guard let path = item.thumb else { return }
+            guard let path = item.thumb else { return nil }
             let long = sizePoints * TerrainStyle.thumbnailScale(resonance: item.resonance) * (lifted ? 1.18 : 1)
             let aspect = Double(item.aspect ?? 1)
             let size = aspect >= 1 ? CGSize(width: long, height: long / aspect) : CGSize(width: long * aspect, height: long)
@@ -408,18 +419,73 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
             let texture = thumbnails.texture(item: index, path: path, pixels: long * scale, dither: dither)
             // Stays a dot until its picture is ready. With the timeline playing, pictures arrive
             // faster than they can load, and empty frames would flicker across the map.
-            if texture == nil, !lifted { return }
-            out.append(ThumbPlacement(center: screen(item), size: size, frame: item.mine || lifted ? 2 : 1, mine: item.mine || lifted,
-                                      texture: texture, mode: mode,
-                                      nearest: dither && long * scale >= Double(texture?.width ?? 0), lifted: lifted))
+            if texture == nil, !lifted { return nil }
+            let center = screen(item)
+            return Popping(index: index, pivot: center,
+                           thumb: ThumbPlacement(center: center, size: size, frame: item.mine || lifted ? 2 : 1, mine: item.mine || lifted,
+                                                 texture: texture, mode: mode,
+                                                 nearest: dither && long * scale >= Double(texture?.width ?? 0), lifted: lifted))
         }
         // The selected picture is lifted off the map, so it isn't here as well.
-        for index in chosen.reversed() where index != hovered && index != selected { place(index, lifted: false) }
-        if let hovered, hovered != selected, chosen.contains(hovered) {
-            let before = out.count
-            place(hovered, lifted: true)
-            hoverIsPicture = out.count > before
+        for index in chosen.reversed() where index != hovered && index != selected {
+            if let placed = make(index, lifted: false) { out.append(placed) }
         }
+        if let hovered, hovered != selected, chosen.contains(hovered), let placed = make(hovered, lifted: true) {
+            out.append(placed)
+            hoverIsPicture = true
+        }
+        return pop(out) { index in index == selected ? nil : make(index, lifted: false) }
+    }
+
+    /// A picture placed this frame, and the point it grows from.
+    private struct Popping {
+        let index: Int32
+        let pivot: CGPoint
+        let thumb: ThumbPlacement
+    }
+
+    /// Grows pictures into place as they come into view and shrinks the ones that have left,
+    /// placed again by `leaving` while they can be. Those draw first, under the rest.
+    private func pop(_ shown: [Popping], leaving: (Int32) -> Popping?) -> [ThumbPlacement] {
+        let now = CACurrentMediaTime()
+        // The first step after a pause is one frame's worth, as for the names.
+        let dt = picturesMoving ? min(now - lastGrowthFrame, 0.1) : 0.016
+        lastGrowthFrame = now
+        let step = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 1 : min(1, dt / 0.18)
+        var moving = false
+        func scaled(_ placed: Popping, _ g: Double) -> ThumbPlacement {
+            guard g < 1 else { return placed.thumb }
+            // Out past full size a little on the way in, so it pops rather than slides.
+            let c = 1.7, t = g - 1
+            let s = max(0, 1 + (c + 1) * t * t * t + c * t * t)
+            var thumb = placed.thumb
+            thumb.center = CGPoint(x: placed.pivot.x + (thumb.center.x - placed.pivot.x) * s,
+                                   y: placed.pivot.y + (thumb.center.y - placed.pivot.y) * s)
+            thumb.size = CGSize(width: thumb.size.width * s, height: thumb.size.height * s)
+            return thumb
+        }
+        var here = Set<Int32>()
+        here.reserveCapacity(shown.count)
+        var out: [ThumbPlacement] = []
+        for placed in shown { here.insert(placed.index) }
+        for (index, before) in growth where !here.contains(index) {
+            let g = max(0, before - step)
+            guard g > 0, let placed = leaving(index) else {
+                growth[index] = nil
+                continue
+            }
+            growth[index] = g
+            moving = true
+            out.append(scaled(placed, g))
+        }
+        for placed in shown {
+            let g = min(1, (growth[placed.index] ?? 0) + step)
+            growth[placed.index] = g
+            if g < 1 { moving = true }
+            out.append(scaled(placed, g))
+        }
+        picturesMoving = moving
+        if moving { needsDisplay = true }
         return out
     }
 
@@ -1067,50 +1133,54 @@ extension TerrainMTKView {
     /// 0.55 MB each): more, and it would drop pictures in use to make room for others.
     private static let standingLimit = 1400
 
-    /// The pictures largest on screen, standing on their spots, farthest first so nearer ones
-    /// draw over them. Seen straight down they lie flat, as on the flat map.
+    /// The pictures that rank highest (`TerrainStyle.standingRank`), standing on their spots,
+    /// farthest first so nearer ones draw over them. Seen straight down they lie flat, as on the flat map.
     private func standingPlacements(_ scene: TerrainScene, points: ReliefPoints, projection: Projection,
                                     camera: OrbitCamera, scale: Double) -> [ThumbPlacement] {
         guard let thumbnails else { return [] }
         let rise = Float(self.rise)
-        // The largest as they'd be drawn: nearness makes a picture larger, and so does resonance,
-        // so the hills in front keep theirs and the more resonant win among those alike.
         let found = points.onScreen(scene.pictures, projection: projection, rise: rise, margin: 80,
                                     minimumScale: TerrainStyle.thumbnailZoom, limit: Self.standingLimit) { index, at in
-            TerrainStyle.thumbnailSize(k: at.scale) * TerrainStyle.thumbnailScale(resonance: scene.map.items[Int(index)].resonance)
+            TerrainStyle.standingRank(size: TerrainStyle.thumbnailSize(k: at.scale), resonance: scene.map.items[Int(index)].resonance)
         }
         let stand = min(1, cos(camera.pitch) * 3)
-        var out: [ThumbPlacement] = []
-        var hits: [(Int32, CGRect)] = []
-        func place(_ index: Int32, _ at: Projection.Projected, lifted: Bool) {
+        var out: [Popping] = []
+        func make(_ index: Int32, _ at: Projection.Projected, lifted: Bool) -> Popping? {
             let item = scene.map.items[Int(index)]
-            guard let path = item.thumb else { return }
+            guard let path = item.thumb else { return nil }
             let long = TerrainStyle.thumbnailSize(k: at.scale) * TerrainStyle.thumbnailScale(resonance: item.resonance) * (lifted ? 1.18 : 1)
             let aspect = Double(item.aspect ?? 1)
             let size = aspect >= 1 ? CGSize(width: long, height: long / aspect) : CGSize(width: long * aspect, height: long)
             let mode = lifted ? ImageMode.color : imageMode
             let dither = mode == .dither
             let texture = thumbnails.texture(item: index, path: path, pixels: long * scale, dither: dither)
-            if texture == nil, !lifted { return }
+            if texture == nil, !lifted { return nil }
             let center = CGPoint(x: at.point.x, y: at.point.y - size.height / 2 * stand)
             // A little toward the eye, so the ground it stands on doesn't cut into it. Lifted, nothing does.
             let spot = points.position(index, rise: rise)
             let toward = simd_normalize(projection.eye - spot)
             let depth = lifted ? 0 : projection.project(spot + toward * 3)?.depth ?? at.depth
-            out.append(ThumbPlacement(center: center, size: size, frame: item.mine || lifted ? 2 : 1, mine: item.mine || lifted,
-                                      texture: texture, mode: mode,
-                                      nearest: dither && long * scale >= Double(texture?.width ?? 0), depth: depth))
-            hits.append((index, CGRect(x: center.x - size.width / 2, y: center.y - size.height / 2, width: size.width, height: size.height)))
+            // It grows up from the spot it stands on.
+            return Popping(index: index, pivot: at.point,
+                           thumb: ThumbPlacement(center: center, size: size, frame: item.mine || lifted ? 2 : 1, mine: item.mine || lifted,
+                                                 texture: texture, mode: mode,
+                                                 nearest: dither && long * scale >= Double(texture?.width ?? 0), depth: depth, lifted: lifted))
         }
         for (index, at) in found.sorted(by: { $0.at.depth > $1.at.depth }) where index != hovered && index != selected {
-            place(index, at, lifted: false)
+            if let placed = make(index, at, lifted: false) { out.append(placed) }
         }
-        if let hovered, hovered != selected, let at = found.first(where: { $0.index == hovered })?.at {
-            let before = out.count
-            place(hovered, at, lifted: true)
-            hoverIsPicture = out.count > before
+        if let hovered, hovered != selected, let at = found.first(where: { $0.index == hovered })?.at, let placed = make(hovered, at, lifted: true) {
+            out.append(placed)
+            hoverIsPicture = true
         }
-        standing = hits
-        return out
+        standing = out.map { placed in
+            let thumb = placed.thumb
+            return (placed.index, CGRect(x: thumb.center.x - thumb.size.width / 2, y: thumb.center.y - thumb.size.height / 2,
+                                         width: thumb.size.width, height: thumb.size.height))
+        }
+        return pop(out) { index in
+            guard index != selected, let at = projection.project(points.position(index, rise: rise)) else { return nil }
+            return make(index, at, lifted: false)
+        }
     }
 }
