@@ -82,6 +82,12 @@ public enum LibrarySchema {
       primary key (item_id, model)
     );
 
+    -- Items showing the same picture from different places: one point on the map.
+    create table if not exists same_picture (
+      item_id  text primary key references item(id) on delete cascade,
+      lead     text not null      -- the one that stands for the set on the map; its own row too
+    );
+
     create table if not exists phrase_vec (
       model  text not null,
       phrase text not null,

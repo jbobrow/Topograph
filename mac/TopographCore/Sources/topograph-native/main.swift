@@ -7,7 +7,7 @@ import TopographCore
 setvbuf(stdout, nil, _IOLBF, 0)
 let arguments = Array(CommandLine.arguments.dropFirst())
 guard let command = arguments.first else {
-    print("usage: topograph-native import|files|hydrate|sync|build|layout ...")
+    print("usage: topograph-native import|files|hydrate|sync|build|same|layout ...")
     exit(2)
 }
 let flags = Set(arguments.dropFirst().filter { $0.hasPrefix("--") })
@@ -35,6 +35,8 @@ do {
     case "build":
         let recipe = values.first.flatMap(MapRecipe.init(rawValue:))
         try MapBuilder.build(recipe: recipe, library: library, force: flags.contains("--force"), reporter: reporter)
+    case "same":
+        try SamePictures.find(library: library, reporter: reporter)
     case "layout":
         let recipe = try MapBuilder.chosenMap(values.first.flatMap(MapRecipe.init(rawValue:)), library: library)
         try MapBuilder.computeLayout(library: library, recipe: recipe, clip: try CLIPEncoder(), reporter: reporter)

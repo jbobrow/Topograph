@@ -162,11 +162,20 @@ private struct ItemPanel: View {
                 .padding(.top, 6)
             ItemActions(item: item, detail: detail, theme: theme).padding(.top, 12)
 
+            if let same = detail?.same, !same.isEmpty {
+                PanelHeading(text: "also in", theme: theme)
+                ForEach(same, id: \.id) { SameSourceRow(source: $0, theme: theme) }
+            }
+
             PanelHeading(text: "history", theme: theme)
             ForEach(Array((detail?.interactions ?? []).enumerated()), id: \.offset) { _, interaction in
-                HStack {
+                HStack(spacing: 8) {
                     Text(Interactions.verb(interaction.type).lowercased() + (interaction.collection.map { " to “\($0)”" } ?? ""))
                         .foregroundStyle(theme.ink.color)
+                    // Which place, when the picture is in more than one.
+                    if let source = interaction.source {
+                        Text(Format.platform(source)).foregroundStyle(theme.secondary.color)
+                    }
                     Spacer(minLength: 12)
                     Text(when(interaction)).foregroundStyle(theme.secondary.color)
                 }
@@ -211,6 +220,52 @@ private struct ItemPanel: View {
     private func when(_ interaction: Interaction) -> String {
         guard interaction.at != 0 else { return "" }
         return interaction.estimated ? "~" + Format.month(interaction.at) : Format.date(interaction.at)
+    }
+}
+
+/// Another place the same picture came from, with a way to go there.
+private struct SameSourceRow: View {
+    let source: SameSource
+    let theme: Theme
+    @State private var fileMissing = false
+
+    private var file: URL? {
+        guard let url = source.url, url.hasPrefix("file://") else { return nil }
+        return URL(string: url)
+    }
+
+    /// A file by its name and folder; a post by where, who and when.
+    private var label: String {
+        if let file {
+            return "\(file.lastPathComponent), in \(file.deletingLastPathComponent().lastPathComponent)"
+        }
+        return [Format.platform(source.platform), source.author.map { "@\($0)" },
+                source.createdAt.map { Format.date($0) }].compactMap { $0 }.joined(separator: "  ")
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(PlexMono.font(.regular, size: 11))
+                .foregroundStyle(theme.ink.color)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 8)
+            if let file {
+                Button(fileMissing ? "not found" : "show in finder") {
+                    if FileManager.default.fileExists(atPath: file.path) {
+                        NSWorkspace.shared.activateFileViewerSelecting([file])
+                    } else {
+                        fileMissing = true
+                    }
+                }
+                .buttonStyle(KeyStyle(theme: theme))
+            } else if let link = source.url, let url = URL(string: link) {
+                Button("open") { NSWorkspace.shared.open(url) }
+                    .buttonStyle(KeyStyle(theme: theme))
+            }
+        }
+        .padding(.vertical, 3)
     }
 }
 

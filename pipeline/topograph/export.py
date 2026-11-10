@@ -20,6 +20,15 @@ def _month(ts: int) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m")
 
 
+def _caption(it, others, items):
+    """A file's name says less than the caption it was posted with."""
+    if it["platform"] == "files":
+        for o in others:
+            if items[o]["platform"] != "files" and items[o]["text"]:
+                return items[o]["text"]
+    return it["text"]
+
+
 def export(lib, model: str) -> Path:
     c = lib.conn
     items = {r["id"]: dict(r) for r in c.execute("select * from item")}
@@ -31,6 +40,19 @@ def export(lib, model: str) -> Path:
         media[r["item_id"]].append(r)
     layout = c.execute("select * from layout where model=?", (model,)).fetchall()
     clusters = {r["id"]: r for r in c.execute("select * from cluster where model=?", (model,))}
+
+    # The same picture from other places is drawn once, where the one leading it is.
+    led = defaultdict(list)
+    for r in c.execute("select item_id, lead from same_picture where item_id != lead"):
+        led[r["lead"]].append(r["item_id"])
+    elsewhere = {i for v in led.values() for i in v}
+    # A map laid out before its sets were found still has the others.
+    on_map = {r["item_id"] for r in layout}
+    lead_of = {o: lead for lead, v in led.items() for o in v}
+    layout = [r for r in layout if not (r["item_id"] in elsewhere and lead_of[r["item_id"]] in on_map)]
+    for lead, others in led.items():
+        for o in others:
+            ixs[lead] = sorted(ixs[lead] + ixs[o], key=lambda r: r["at"])
 
     def taste_time(iid):
         real = [r["at"] for r in ixs[iid] if r["at"] and not r["at_estimated"]]
@@ -55,7 +77,8 @@ def export(lib, model: str) -> Path:
             "id": iid,
             "x": round(row["x"], 2), "y": round(row["y"], 2), "c": row["cluster"],
             "p": it["platform"], "k": it["kind"],
-            "a": it["author"], "t": (it["text"] or "")[:600] or None, "u": it["url"],
+            "a": it["author"], "t": (_caption(it, led.get(iid, []), items) or "")[:600] or None, "u": it["url"],
+            "al": sorted({items[o]["platform"] for o in led.get(iid, [])} - {it["platform"]}) or None,
             "th": ms[0]["thumb_path"] if ms else None,
             "im": [m["local_path"] for m in ms],
             "wh": [ms[0]["width"], ms[0]["height"]] if ms else None,
@@ -79,7 +102,7 @@ def export(lib, model: str) -> Path:
     placed = set(index) | {r[0] for r in c.execute("select item_id from cloud where model=?", (model,))}
     unmapped = Counter()
     for iid in items:
-        if iid not in placed and iid not in gone:
+        if iid not in placed and iid not in gone and iid not in elsewhere:
             t = taste_time(iid)
             if t:
                 unmapped[_month(t)] += 1

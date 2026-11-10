@@ -1064,3 +1064,69 @@ final class SameThingTests: XCTestCase {
         XCTAssertEqual(records.filter { $0.id.hasPrefix("ig:own:") }.count, 1, "the post you didn't like keeps its own id")
     }
 }
+
+final class SamePicturesTests: XCTestCase {
+    private func small(_ seed: Int, flat: Bool = false) -> [Float] {
+        var random = SeededRandom(seed: UInt64(seed + 1))
+        return (0..<(SamePictures.side * SamePictures.side * 3)).map { _ in flat ? 0.5 : Float(random.next() % 256) / 255 }
+    }
+
+    func testSameNeedsDetailAndAlmostEveryPixel() {
+        let picture = small(1)
+        XCTAssertTrue(SamePictures.same(picture, picture.map { min($0 + 0.005, 1) }), "a copy, re-encoded")
+        XCTAssertFalse(SamePictures.same(picture, small(2)), "another picture")
+        XCTAssertFalse(SamePictures.same(small(0, flat: true), small(0, flat: true)), "flat frames say nothing")
+    }
+
+    func testEveryMemberMatchesTheLeadItself() {
+        let pictures = ["a", "b", "c"].enumerated().map {
+            SamePictures.Picture(id: $1, hash: 0, thumb: "", pixels: 1000 - $0, aspect: 1, time: 0)
+        }
+        // Frames of a video: each like the next, the first not like the last.
+        let sets = SamePictures.sets(pictures, matches: [0: [1], 1: [0, 2], 2: [1]])
+        XCTAssertEqual(sets, [[0, 1]])
+    }
+
+    func testCandidatesAreCloseHashesOnly() {
+        let pairs = SamePictures.candidates([0xFFFF_0000_FFFF_0000, 0xFFFF_0000_FFFF_0001, 0x0123_4567_89AB_CDEF])
+        XCTAssertEqual(pairs.map { [$0.0, $0.1] }, [[0, 1]])
+    }
+
+    /// A picture with shapes in it, which survive being made small, unlike noise.
+    private func shapes(_ seed: Int) -> Data {
+        let context = CGContext(data: nil, width: 480, height: 360, bitsPerComponent: 8, bytesPerRow: 0,
+                                space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+        var random = SeededRandom(seed: UInt64(seed))
+        context.setFillColor(gray: 0.9, alpha: 1)
+        context.fill(CGRect(x: 0, y: 0, width: 480, height: 360))
+        for _ in 0..<8 {
+            context.setFillColor(red: CGFloat(random.next() % 256) / 255, green: CGFloat(random.next() % 256) / 255, blue: 0.2, alpha: 1)
+            context.fill(CGRect(x: Int(random.next() % 400), y: Int(random.next() % 300), width: 80, height: 60))
+        }
+        let out = NSMutableData()
+        let target = CGImageDestinationCreateWithData(out, "public.jpeg" as CFString, 1, nil)!
+        CGImageDestinationAddImage(target, context.makeImage()!, nil)
+        CGImageDestinationFinalize(target)
+        return out as Data
+    }
+
+    func testFindsCopiesAcrossPlacesAndLeadsWithTheLargest() throws {
+        let library = try LibraryWriter(root: try neutralFolder())
+        let photo = shapes(3), other = shapes(9)
+        for (id, platform, data, width) in [("file:1", "files", photo, 4000), ("ig:1", "instagram", photo, 1080),
+                                            ("x:1", "x", other, 1200), ("youtube:1", "youtube", photo, 1280)] {
+            try write(data, library.root, "media/\(id).jpg")
+            try library.db.write { db in
+                try db.execute(sql: "insert into item(id, platform, hydrated) values (?, ?, 1)", arguments: [id, platform])
+                try db.execute(sql: "insert into interaction(item_id, type, at) values (?, 'like', 1)", arguments: [id])
+                try db.execute(sql: """
+                    insert into media(item_id, ord, thumb_path, width, height, phash, status) values (?, 0, ?, ?, ?, 'ffff0000ffff0000', 'ok')
+                    """, arguments: [id, "media/\(id).jpg", width, width * 3 / 4])
+            }
+        }
+        XCTAssertEqual(try SamePictures.find(library: library, reporter: silent), 1)
+        let rows = try library.db.read { try Row.fetchAll($0, sql: "select item_id, lead from same_picture order by item_id") }
+        XCTAssertEqual(rows.map { [$0[0] as String, $0[1] as String] }, [["file:1", "file:1"], ["ig:1", "file:1"]],
+                       "another picture with the same hash isn't it, and a video's poster isn't matched")
+    }
+}

@@ -248,9 +248,12 @@ public enum MapBuilder {
     @discardableResult
     public static func computeLayout(library: LibraryWriter, recipe: MapRecipe, clip clipEncoder: CLIPEncoder?, reporter: PipelineReporter) throws -> Int {
         let model = CLIPEncoder.modelName
+        try SamePictures.find(library: library, reporter: reporter)
         reporter.progress("Arranging the \(recipe.rawValue) map")
-        let (allIDs, allClip, allInfos, wordDimensions, searches) = try library.db.read { db -> ([String], Matrix, [MapVectors.ItemInfo], Int, Set<String>) in
+        let (allIDs, allClip, allInfos, wordDimensions, searches, followers) = try library.db.read { db -> ([String], Matrix, [MapVectors.ItemInfo], Int, Set<String>, Set<String>) in
             let searches = Set(try String.fetchAll(db, sql: LibraryWriter.searchOnlySQL))
+            // The same picture from elsewhere goes where the one leading it goes.
+            let followers = Set(try String.fetchAll(db, sql: "select item_id from same_picture where item_id != lead"))
             var ids: [String] = []
             var values: [Float] = []
             var words: [String: [Float]] = [:]
@@ -270,12 +273,12 @@ public enum MapBuilder {
             let infos = ids.map { id in
                 MapVectors.ItemInfo(platform: details[id]?.platform ?? "", text: details[id]?.text, hasPicture: pictures.contains(id), words: words[id].map { ArraySlice($0) })
             }
-            return (ids, Matrix(rows: ids.count, columns: dimensions, values: values), infos, words.first?.value.count ?? 0, searches)
+            return (ids, Matrix(rows: ids.count, columns: dimensions, values: values), infos, words.first?.value.count ?? 0, searches, followers)
         }
         let sky = allIDs.indices.filter { searches.contains(allIDs[$0]) }
-        let land = sky.isEmpty ? Array(allIDs.indices) : allIDs.indices.filter { !searches.contains(allIDs[$0]) }
+        let land = allIDs.indices.filter { !searches.contains(allIDs[$0]) && !followers.contains(allIDs[$0]) }
         let ids = land.map { allIDs[$0] }, infos = land.map { allInfos[$0] }
-        let clip = sky.isEmpty ? allClip : allClip.selecting(land)
+        let clip = land.count == allIDs.count ? allClip : allClip.selecting(land)
         guard !ids.isEmpty else {
             reporter.say("Nothing to map yet.")
             return 0

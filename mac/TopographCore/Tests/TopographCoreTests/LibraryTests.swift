@@ -48,6 +48,36 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(items.map(\.groups), [[.liked, .kept], [.made]])
     }
 
+    func testTheSamePictureFromSeveralPlacesIsOnePoint() throws {
+        try place("file:1", text: "IMG_0042, in Photos", types: ["made"])
+        try place("ig:1", text: "Ferns after rain", types: ["post", "like"])
+        try place("x:3", types: ["like"])
+        try writer.write { db in
+            try db.execute(sql: "update item set platform = 'files' where id = 'file:1'")
+            try db.execute(sql: "update item set platform = 'instagram', author = 'me', url = 'https://www.instagram.com/p/A/' where id = 'ig:1'")
+            try db.execute(sql: "insert into same_picture(item_id, lead) values ('file:1', 'file:1'), ('ig:1', 'file:1')")
+        }
+        let library = try Library(root: root)
+        let map = try library.map()
+        XCTAssertEqual(map.items.map(\.id).sorted(), ["file:1", "x:3"], "the post is drawn where the file is")
+        let file = try XCTUnwrap(map.items.first { $0.id == "file:1" })
+        XCTAssertEqual(file.also, ["instagram"])
+        XCTAssertEqual(file.text, "Ferns after rain", "the caption it was posted with, not the file's name")
+        XCTAssertEqual(file.resonance, 2.5 + 2.5 + 1, "made, posted and liked")
+        XCTAssertEqual(map.waiting, 0, "the post isn't waiting for the map")
+
+        var filter = MapFilter()
+        filter.hiddenPlatforms = ["files"]
+        XCTAssertTrue(filter.matches(file), "it shows while Instagram is on")
+        filter.hiddenPlatforms = ["files", "instagram"]
+        XCTAssertFalse(filter.matches(file))
+
+        let detail = try library.detail(of: "file:1")
+        XCTAssertEqual(detail.same.map(\.id), ["ig:1"])
+        XCTAssertEqual(detail.same.first?.url, "https://www.instagram.com/p/A/")
+        XCTAssertEqual(Set(detail.interactions.map { "\($0.type) \($0.source ?? "")" }), ["made files", "post instagram", "like instagram"])
+    }
+
     /// Two arrangements of one item, with a region and a neighbor on each.
     private func placeOnTwoMaps() throws {
         try place("x:1", x: 10, y: 10)

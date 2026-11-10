@@ -144,15 +144,21 @@ def compute_layout(lib, model: str, backend=None, log=print, map_name: str = "pi
         log("Nothing embedded yet; run `topograph embed` first.")
         return 0
     from .db import SEARCH_ONLY_SQL
+    from .progress import step
+    from .same import find_same, followers
+    with step("Finding the same picture in different places"):
+        find_same(lib, log=lambda *_: None)
+    # The same picture from elsewhere goes where the one leading it goes.
+    elsewhere = followers(lib)
     searches = {r[0] for r in lib.conn.execute(SEARCH_ONLY_SQL)}
     is_sky = np.array([i in searches for i in ids])
+    is_land = np.array([i not in searches and i not in elsewhere for i in ids])
     sky_ids, sky_vecs = [i for i, s in zip(ids, is_sky) if s], vecs[is_sky]
-    ids, vecs = [i for i, s in zip(ids, is_sky) if not s], vecs[~is_sky]
+    ids, vecs = [i for i, s in zip(ids, is_land) if s], vecs[is_land]
     if not ids:
         log("Nothing to map yet: only searches, which float over the map.")
         return 0
     from .maps import layout_model, map_vectors
-    from .progress import step
     with step(f"Arranging the {map_name} map"):
         arranged = map_vectors(lib, map_name, ids, vecs, words_model)
     with step(f"Laying out {len(ids):,} items on the map"):

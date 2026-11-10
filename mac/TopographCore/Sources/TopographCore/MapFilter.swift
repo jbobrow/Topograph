@@ -57,7 +57,8 @@ public struct MapFilter: Sendable, Equatable {
     public init() {}
 
     public func matches(_ item: MapItem) -> Bool {
-        if hiddenPlatforms.contains(item.platform) { return false }
+        // The same picture from elsewhere shows while any of its places is on.
+        if hiddenPlatforms.contains(item.platform) && item.also.allSatisfy(hiddenPlatforms.contains) { return false }
         if !kinds.contains(ContentKinds(of: item)) { return false }
         // An item with only quiet actions, like opening a file, has no group to turn off.
         if !item.groups.isEmpty && item.groups.isDisjoint(with: groups) { return false }

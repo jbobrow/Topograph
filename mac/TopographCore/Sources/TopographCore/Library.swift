@@ -26,11 +26,14 @@ public struct MapItem: Sendable, Equatable, Identifiable {
     public var color: UInt32?
     /// Its perceptual hash, for finding near-duplicates.
     public var phash: UInt64?
+    /// Where else the same picture came from, when it's in more than one place
+    /// (`SamePictures`). It shows while any of them is turned on.
+    public var also: [String] = []
 
     public init(id: String = "", x: Float, y: Float, resonance: Float, mine: Bool = false, groups: ActionGroups = [],
                 platform: String = "x", kind: String = "text", author: String? = nil, text: String? = nil,
                 region: Int? = nil, time: Int? = nil, thumb: String? = nil, aspect: Float? = nil,
-                color: UInt32? = nil, phash: UInt64? = nil) {
+                color: UInt32? = nil, phash: UInt64? = nil, also: [String] = []) {
         self.id = id
         self.x = x
         self.y = y
@@ -47,6 +50,7 @@ public struct MapItem: Sendable, Equatable, Identifiable {
         self.aspect = aspect
         self.color = color
         self.phash = phash
+        self.also = also
     }
 }
 
@@ -89,6 +93,25 @@ public struct Interaction: Sendable, Equatable {
     public let at: Int
     public let estimated: Bool
     public let collection: String?
+    /// Where it happened, when the picture is in more than one place.
+    public var source: String?
+
+    public init(type: String, at: Int, estimated: Bool, collection: String?, source: String? = nil) {
+        self.type = type
+        self.at = at
+        self.estimated = estimated
+        self.collection = collection
+        self.source = source
+    }
+}
+
+/// Another place the same picture came from.
+public struct SameSource: Sendable, Equatable {
+    public let id: String
+    public let platform: String
+    public let url: String?
+    public let author: String?
+    public let createdAt: Int?
 }
 
 public struct MediaFile: Sendable, Equatable {
@@ -124,6 +147,8 @@ public struct ItemDetail: Sendable, Equatable {
     public let media: [MediaFile]
     /// Ids, nearest first.
     public let neighbors: [String]
+    /// The same picture elsewhere, oldest first.
+    public var same: [SameSource] = []
 }
 
 public enum LibraryError: LocalizedError, Equatable {
@@ -229,24 +254,55 @@ public struct Library: Sendable {
                 pictures[id] = (row[1], aspect, color, (row[5] as String?).flatMap { UInt64($0, radix: 16) })
             }
 
+            // The same picture from other places, by the item leading it: one point for them all.
+            let hasSame = try db.tableExists("same_picture")
+            var following: [String: [(id: String, platform: String, text: String?, author: String?)]] = [:]
+            if hasSame {
+                for row in try Row.fetchAll(db, sql: Self.followersSQL) {
+                    let text: String? = row[3]
+                    following[row[1] as String, default: []].append((row[0], row[2], text?.isEmpty == false ? text : nil, row[4]))
+                }
+            }
+            var placedRows = try Row.fetchAll(db, sql: Self.placedSQL, arguments: [model])
+            // A map laid out before its sets were found still has the others: they go, unless
+            // what leads them isn't on this map.
+            let followers = Set(following.values.flatMap { $0.map(\.id) })
+            if !followers.isEmpty {
+                let placedIDs = Set(placedRows.map { $0[0] as String })
+                let leadOf = following.reduce(into: [String: String]()) { out, set in for member in set.value { out[member.id] = set.key } }
+                placedRows.removeAll { row in
+                    let id: String = row[0]
+                    return followers.contains(id) && leadOf[id].map(placedIDs.contains) == true
+                }
+            }
+
             var items: [MapItem] = []
-            let placed = try Row.fetchCursor(db, sql: Self.placedSQL, arguments: [model])
-            while let row = try placed.next() {
+            for row in placedRows {
                 let id: String = row[0]
-                let engagement = engaged[id] ?? Engagement()
+                var engagement = engaged[id] ?? Engagement()
+                let others = following[id] ?? []
+                for other in others { engagement.merge(engaged[other.id]) }
                 let picture = pictures[id]
-                let text: String? = row[6]
+                var text: String? = row[6]
+                var author: String? = row[7]
+                if text?.isEmpty != false { text = nil }
+                // A file's name says less than the caption it was posted with.
+                if (row[4] as String) == "files", let post = others.first(where: { $0.platform != "files" && $0.text != nil }) {
+                    text = post.text
+                    author = post.author
+                }
                 items.append(MapItem(
                     id: id, x: Float(row[1] as Double), y: Float(row[2] as Double),
                     resonance: Interactions.resonance(engagement.types),
                     mine: engagement.types.contains(where: Interactions.mine.contains),
                     groups: ActionGroups(types: engagement.types),
-                    platform: row[4], kind: row[5], author: row[7],
-                    text: text?.isEmpty == false ? text : nil,
+                    platform: row[4], kind: row[5], author: author,
+                    text: text,
                     region: row[3],
                     time: engagement.time ?? row[8],
                     thumb: picture?.thumb, aspect: picture?.aspect,
-                    color: picture?.color, phash: picture?.phash))
+                    color: picture?.color, phash: picture?.phash,
+                    also: Array(Set(others.map(\.platform)).subtracting([row[4] as String])).sorted()))
             }
             guard !items.isEmpty else { throw LibraryError.noMap }
 
@@ -262,7 +318,7 @@ public struct Library: Sendable {
 
             var waitingTimes: [Int] = []
             var waiting = 0
-            let unplaced = try Row.fetchCursor(db, sql: Self.waitingSQL(clouds: hasClouds), arguments: hasClouds ? [model, model] : [model])
+            let unplaced = try Row.fetchCursor(db, sql: Self.waitingSQL(clouds: hasClouds, same: hasSame), arguments: hasClouds ? [model, model] : [model])
             while let row = try unplaced.next() {
                 waiting += 1
                 if let time = engaged[row[0] as String]?.time ?? (row[1] as Int?) { waitingTimes.append(time) }
@@ -298,12 +354,26 @@ public struct Library: Sendable {
 
     public func detail(of id: String, in recipe: MapRecipe? = nil) throws -> ItemDetail {
         try db.read { db in
-            let item = try Row.fetchOne(db, sql: "select url, created_at from item where id = ?", arguments: [id])
-            let interactions = try Row.fetchAll(db, sql: """
-                select type, at, at_estimated, collection from interaction where item_id = ? order by at
-                """, arguments: [id]).map {
-                Interaction(type: $0[0], at: $0[1], estimated: ($0[2] as Int) != 0, collection: $0[3])
+            let item = try Row.fetchOne(db, sql: "select url, created_at, platform from item where id = ?", arguments: [id])
+            // The same picture elsewhere: each place, and what you did there, in the history.
+            var same: [SameSource] = []
+            if try db.tableExists("same_picture") {
+                same = try Row.fetchAll(db, sql: """
+                    select item.id, item.platform, item.url, item.author, item.created_at from same_picture s join item on item.id = s.item_id
+                    where s.lead = (select lead from same_picture where item_id = ?) and s.item_id != ? order by item.created_at, item.id
+                    """, arguments: [id, id]).map { SameSource(id: $0[0], platform: $0[1], url: $0[2], author: $0[3], createdAt: $0[4]) }
             }
+            let platform: String? = item?[2]
+            var interactions: [Interaction] = []
+            for (member, source) in [(id, platform)] + same.map({ ($0.id, $0.platform) }) {
+                interactions += try Row.fetchAll(db, sql: """
+                    select type, at, at_estimated, collection from interaction where item_id = ? order by at
+                    """, arguments: [member]).map {
+                    Interaction(type: $0[0], at: $0[1], estimated: ($0[2] as Int) != 0, collection: $0[3],
+                                source: same.isEmpty ? nil : source)
+                }
+            }
+            interactions.sort { $0.at < $1.at }
             let media = try Row.fetchAll(db, sql: """
                 select kind, local_path, thumb_path, original_url, palette from media
                 where item_id = ? and status = 'ok' order by ord
@@ -314,7 +384,8 @@ public struct Library: Sendable {
             let neighbors = try String.fetchOne(db, sql: "select neighbors from layout where item_id = ? and model = ?",
                                                 arguments: [id, model])
             return ItemDetail(url: item?[0], createdAt: item?[1], interactions: interactions, media: media,
-                              neighbors: neighbors.flatMap { try? JSONDecoder().decode([String].self, from: Data($0.utf8)) } ?? [])
+                              neighbors: neighbors.flatMap { try? JSONDecoder().decode([String].self, from: Data($0.utf8)) } ?? [],
+                              same: same)
         }
     }
 
@@ -330,13 +401,18 @@ public struct Library: Sendable {
         from layout join item on item.id = layout.item_id
         where layout.model = ? and not (\(goneSQL))
         """
-    private static func waitingSQL(clouds: Bool) -> String {
+    private static func waitingSQL(clouds: Bool, same: Bool) -> String {
         """
         select item.id, item.created_at from item
         where not (\(goneSQL))
           and not exists (select 1 from layout where layout.item_id = item.id and layout.model = ?)
         """ + (clouds ? " and not exists (select 1 from cloud where cloud.item_id = item.id and cloud.model = ?)" : "")
+            + (same ? " and not exists (select 1 from same_picture s where s.item_id = item.id and s.lead != item.id)" : "")
     }
+    private static let followersSQL = """
+        select s.item_id, s.lead, item.platform, item.text, item.author from same_picture s join item on item.id = s.item_id
+        where s.item_id != s.lead order by s.item_id
+        """
     private static let cloudsSQL = """
         select item.id, cloud.x, cloud.y, item.text, item.created_at, cloud.region
         from cloud join item on item.id = cloud.item_id
@@ -359,6 +435,14 @@ private struct Engagement {
     }
 
     var time: Int? { real ?? estimated }
+
+    /// What you did with the same picture somewhere else, as part of this.
+    mutating func merge(_ other: Engagement?) {
+        guard let other else { return }
+        types.formUnion(other.types)
+        if let at = other.real { real = min(real ?? at, at) }
+        if let at = other.estimated { estimated = min(estimated ?? at, at) }
+    }
 }
 
 /// `INTERACTION_WEIGHTS` in config.py and `MINE` in viewer/app.js.
@@ -423,12 +507,14 @@ public struct LibrarySources: Sendable, Equatable {
     public let maps: [MapRecipe: Int]
     /// The map `unplaced` is about.
     public let shownMap: MapRecipe?
+    /// Items showing a picture another item leads, which a map draws once.
+    public var alike = 0
 
     /// Items missing from a map. Exact for the map being shown. For others it's the difference
     /// in counts, which is enough to say a map has fallen behind.
     public func waiting(on recipe: MapRecipe) -> Int {
         if recipe == shownMap { return unplaced }
-        return max(0, platforms.reduce(0) { $0 + $1.items } - (maps[recipe] ?? 0))
+        return max(0, platforms.reduce(0) { $0 + $1.items } - alike - (maps[recipe] ?? 0))
     }
 }
 
@@ -455,7 +541,9 @@ extension Library {
             for (key, value) in meta where key.hasPrefix("sync_") { accounts[String(key.dropFirst(5))] = value }
             let shown = try Self.resolve(showing, db)
             let hasClouds = try db.tableExists("cloud")
-            let unplaced = try Int.fetchOne(db, sql: "select count(*) from (\(Self.waitingSQL(clouds: hasClouds)))",
+            let hasSame = try db.tableExists("same_picture")
+            let alike = hasSame ? try Int.fetchOne(db, sql: "select count(*) from same_picture where item_id != lead") ?? 0 : 0
+            let unplaced = try Int.fetchOne(db, sql: "select count(*) from (\(Self.waitingSQL(clouds: hasClouds, same: hasSame)))",
                                             arguments: hasClouds ? [shown?.1 ?? "", shown?.1 ?? ""] : [shown?.1 ?? ""]) ?? 0
             let counts = try Row.fetchAll(db, sql: "select model, count(*) from layout group by model")
                 .reduce(into: [String: Int]()) { $0[$1[0] as String] = $1[1] as Int }
@@ -466,7 +554,7 @@ extension Library {
                 }
             }
             return LibrarySources(platforms: platforms, fileRoots: roots, syncAccounts: accounts, unplaced: unplaced,
-                                  maps: maps, shownMap: shown?.0)
+                                  maps: maps, shownMap: shown?.0, alike: alike)
         }
     }
 }

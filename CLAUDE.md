@@ -50,7 +50,8 @@ It lives in `~/Library/Application Support/Topograph/` (override with `TOPOGRAPH
 
 - `topograph.sqlite`: WAL mode. Tables: `item`, `interaction`, `media`, `embedding`,
   `layout`, `cluster` (regions, with `parent`, `depth`, label anchor `x`, `y` and
-  size `r`), `cloud` (searches over a map), `phrase_vec` (cached CLIP vectors of candidate
+  size `r`), `cloud` (searches over a map), `same_picture` (one picture from several places),
+  `phrase_vec` (cached CLIP vectors of candidate
   names), `meta`. Use `db.py`
   as the reference: SPEC §3 is close but older (for example, `media` is keyed by
   `(item_id, ord)` and paths are relative to the library root).
@@ -87,6 +88,13 @@ Details that matter for compatibility:
   they float as stacked slices above the peaks and cast shadows. Clicking one opens its searches,
   grouped into themes (`CloudThemes`: by the text model's vectors, named by their own words);
   `topograph-native check-clouds [yyyy-mm-dd]` prints a season's themes for judging them.
+- The same picture from several places (a post shared to Instagram and Facebook, the file it
+  came from, a copy in another folder) stays several items, linked in `same_picture` and drawn as
+  one point, led by the largest copy (`same.py` / `SamePictures`, run before each layout).
+  Perceptual hashes find candidates and 32 × 32 pixels decide: both need detail (flat frames all
+  hash alike) and must differ under 1% (bursts and edits are sequences, not copies), and each
+  member matches the lead itself, so video frames don't chain. YouTube posters aren't matched.
+  The two pipelines shrink pictures a little differently and agree on 99% of items.
 - An item is "gone" when it's unreachable (`hydrated = -1`) with no text and no
   `ok` media. It stays in the database so it isn't re-imported or re-fetched, and
   it's left off the map and out of counts (`GONE_SQL` in `db.py`). X's
