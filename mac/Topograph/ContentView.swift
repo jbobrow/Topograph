@@ -382,13 +382,15 @@ struct Readout: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            Text(visible.formatted()).font(PlexMono.font(.semibold, size: 11))
-            Text(" / \(total.formatted()) mapped")
+            HStack(spacing: 0) {
+                Text(visible.formatted()).font(PlexMono.font(.semibold, size: 11))
+                Text(" / \(total.formatted()) mapped")
+            }
+            .help(waiting > 0 ? "\(waiting.formatted()) not on the map" : "")
             Rectangle().fill(theme.ink.color).frame(width: 7, height: 7).padding(.leading, 10).padding(.trailing, 4)
             Text("made")
             Circle().strokeBorder(theme.ink.color, lineWidth: 1).frame(width: 7, height: 7).padding(.leading, 10).padding(.trailing, 4)
             Text("kept")
-            if waiting > 0 { Text("   \(waiting.formatted()) not on the map") }
         }
         .font(PlexMono.font(.regular, size: 11))
         .foregroundStyle(theme.ink.color)
