@@ -66,6 +66,11 @@ final class MapFilterTests: XCTestCase {
         XCTAssertTrue(shows([.made, .liked], in: .creation))
         XCTAssertTrue(shows([.made, .liked], in: .consumption))
         XCTAssertTrue(shows(.liked, in: .all))
+        // A video you only watched is something you took in.
+        XCTAssertTrue(shows(ActionGroups(types: ["view"]), in: .consumption))
+        XCTAssertFalse(shows(ActionGroups(types: ["view"]), in: .creation))
+        // Opening a file is still no group, so it shows either way.
+        XCTAssertEqual(ActionGroups(types: ["open"]), [])
     }
 
     func testSearchListsEachItemOnceAndNeverMatchesAcrossItems() {

@@ -18,7 +18,8 @@ public struct ActionGroups: OptionSet, Sendable, Hashable {
         for type in types {
             switch type {
             case "post", "repost", "reply", "comment", "made", "capture": insert(.made)
-            case "like", "react": insert(.liked)
+            // Watching is taking something in, though not as much as liking it.
+            case "like", "react", "view": insert(.liked)
             case "save", "bookmark", "download": insert(.kept)
             default: break
             }
