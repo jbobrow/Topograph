@@ -409,6 +409,21 @@ public struct Library: Sendable {
         """ + (clouds ? " and not exists (select 1 from cloud where cloud.item_id = item.id and cloud.model = ?)" : "")
             + (same ? " and not exists (select 1 from same_picture s where s.item_id = item.id and s.lead != item.id)" : "")
     }
+    /// Items a map could hold: whether there's anything to read, whether the map shown has
+    /// them, and whether they're land rather than searches.
+    private static func mappableSQL(clouds: Bool, same: Bool) -> String {
+        let cloud = clouds ? "or exists (select 1 from cloud where cloud.item_id = item.id and cloud.model = ?)" : ""
+        let follower = same ? "and not exists (select 1 from same_picture s where s.item_id = item.id and s.lead != item.id)" : ""
+        return """
+            select item.text,
+                   exists (select 1 from embedding e where e.item_id = item.id and e.model = ?)
+                     or exists (select 1 from media m where m.item_id = item.id and m.status = 'ok'),
+                   exists (select 1 from layout where layout.item_id = item.id and layout.model = ?) \(cloud),
+                   exists (select 1 from interaction i where i.item_id = item.id and i.type != 'search')
+                     or not exists (select 1 from interaction i where i.item_id = item.id)
+            from item where item.kind != 'trace' and not (\(goneSQL)) \(follower)
+            """
+    }
     private static let followersSQL = """
         select s.item_id, s.lead, item.platform, item.text, item.author from same_picture s join item on item.id = s.item_id
         where s.item_id != s.lead order by s.item_id
@@ -507,14 +522,15 @@ public struct LibrarySources: Sendable, Equatable {
     public let maps: [MapRecipe: Int]
     /// The map `unplaced` is about.
     public let shownMap: MapRecipe?
-    /// Items showing a picture another item leads, which a map draws once.
-    public var alike = 0
+    /// Items a map places on its land: not searches, which float over it, and not a picture
+    /// another item leads, which a map draws once.
+    public var land = 0
 
     /// Items missing from a map. Exact for the map being shown. For others it's the difference
     /// in counts, which is enough to say a map has fallen behind.
     public func waiting(on recipe: MapRecipe) -> Int {
         if recipe == shownMap { return unplaced }
-        return max(0, platforms.reduce(0) { $0 + $1.items } - alike - (maps[recipe] ?? 0))
+        return max(0, land - (maps[recipe] ?? 0))
     }
 }
 
@@ -542,9 +558,17 @@ extension Library {
             let shown = try Self.resolve(showing, db)
             let hasClouds = try db.tableExists("cloud")
             let hasSame = try db.tableExists("same_picture")
-            let alike = hasSame ? try Int.fetchOne(db, sql: "select count(*) from same_picture where item_id != lead") ?? 0 : 0
-            let unplaced = try Int.fetchOne(db, sql: "select count(*) from (\(Self.waitingSQL(clouds: hasClouds, same: hasSame)))",
-                                            arguments: hasClouds ? [shown?.1 ?? "", shown?.1 ?? ""] : [shown?.1 ?? ""]) ?? 0
+            // Only what updating the map would place: something with a picture or words to read.
+            // A reaction's trace, or a link still waiting to be fetched, has neither yet.
+            let model = shown?.1 ?? ""
+            var unplaced = 0, land = 0
+            let rows = try Row.fetchCursor(db, sql: Self.mappableSQL(clouds: hasClouds, same: hasSame),
+                                           arguments: [meta["embedding_model"] ?? "clip-vit-b-32", model] + (hasClouds ? [model] : []))
+            while let row = try rows.next() {
+                guard row[1] as Bool || PipelineText.hasWords(row[0]) else { continue }
+                if !(row[2] as Bool) { unplaced += 1 }
+                if row[3] as Bool { land += 1 }
+            }
             let counts = try Row.fetchAll(db, sql: "select model, count(*) from layout group by model")
                 .reduce(into: [String: Int]()) { $0[$1[0] as String] = $1[1] as Int }
             var maps: [MapRecipe: Int] = [:]
@@ -554,7 +578,7 @@ extension Library {
                 }
             }
             return LibrarySources(platforms: platforms, fileRoots: roots, syncAccounts: accounts, unplaced: unplaced,
-                                  maps: maps, shownMap: shown?.0, alike: alike)
+                                  maps: maps, shownMap: shown?.0, land: land)
         }
     }
 }

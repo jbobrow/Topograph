@@ -493,8 +493,8 @@ final class AppModel {
     /// The strata chart: all of time for the current filter, whatever's selected. The selection
     /// moves the view around it and shades it; the minimap shows it whole.
     private(set) var strataChart: StrataModel?
-    /// A layer on the strata chart for links still waiting for their pictures, by when you
-    /// engaged with them. Useful while they're being fetched; off otherwise.
+    /// A layer on the strata chart for what isn't on the map, by when you engaged with it:
+    /// links not fetched yet, and reactions with nothing to show. Off unless asked for.
     var strataShowsWaiting = UserDefaults.standard.bool(forKey: "strataShowsWaiting") {
         didSet {
             UserDefaults.standard.set(strataShowsWaiting, forKey: "strataShowsWaiting")

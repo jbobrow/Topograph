@@ -388,7 +388,7 @@ struct Readout: View {
             Text("made")
             Circle().strokeBorder(theme.ink.color, lineWidth: 1).frame(width: 7, height: 7).padding(.leading, 10).padding(.trailing, 4)
             Text("kept")
-            if waiting > 0 { Text("   \(waiting.formatted()) waiting") }
+            if waiting > 0 { Text("   \(waiting.formatted()) not on the map") }
         }
         .font(PlexMono.font(.regular, size: 11))
         .foregroundStyle(theme.ink.color)

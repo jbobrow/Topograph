@@ -267,6 +267,9 @@ final class LibraryTests: XCTestCase {
             try db.execute(sql: """
                 insert into item(id, platform, hydrated, hydrate_attempts) values
                   ('x:waiting', 'x', 0, 0), ('x:gaveup', 'x', 0, 3), ('x:gone', 'x', -1, 3), ('ig:1', 'instagram', 1, 0);
+                insert into item(id, platform, kind, text, hydrated) values
+                  ('ig:2', 'instagram', 'text', 'a red chair', 1), ('ig:3', 'instagram', 'text', '👍 https://t.co/x', 1),
+                  ('fb:trace:1', 'facebook', 'trace', 'You liked a photo', -1);
                 insert into meta values ('files_roots', '["/a", "/b"]'), ('sync_bluesky', 'ann.test');
                 """)
         }
@@ -278,7 +281,8 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(x.newest, 0)
         XCTAssertEqual(sources.fileRoots, ["/a", "/b"])
         XCTAssertEqual(sources.syncAccounts, ["bluesky": "ann.test"])
-        XCTAssertEqual(sources.unplaced, 3)
+        XCTAssertEqual(sources.unplaced, 1, "only what updating the map would place: the one with words")
+        XCTAssertEqual(sources.waiting(on: .blended), 2, "x:1 and ig:2 on a map that isn't built")
     }
 
     func testDroppedThingsAreClassified() throws {

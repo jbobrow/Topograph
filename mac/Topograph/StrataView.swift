@@ -58,9 +58,9 @@ extension StrataScreen {
     private var controls: some View {
         HStack(spacing: 4) {
             if (model.map?.waiting ?? 0) > 0 {
-                Button("not yet mapped") { model.strataShowsWaiting.toggle() }
+                Button("not on the map") { model.strataShowsWaiting.toggle() }
                     .buttonStyle(KeyStyle(theme: theme, led: model.strataShowsWaiting))
-                    .help("A layer for links still waiting for their pictures, by when you engaged with them.")
+                    .help("A layer for what isn't on the map, by when you engaged with it: links not fetched yet, and reactions with nothing to show.")
                     .padding(.trailing, 8)
             }
             // Either way the selection stays, unlike the timeline's "all time", which clears it.
@@ -900,8 +900,8 @@ final class StrataNSView: NSView {
         let time = axis.time(atFraction: fraction)
         let month = axis.index(of: time)
         let raw = month.map { layer.raw[$0] } ?? 0
-        let name = layer.region.flatMap(labels) ?? "not yet mapped (links waiting for images)"
-        let amount = layer.region == nil ? "\(Int(raw)) links" : "resonance \(String(format: "%.1f", raw))"
+        let name = layer.region.flatMap(labels) ?? "not on the map"
+        let amount = layer.region == nil ? "\(Int(raw)) items" : "resonance \(String(format: "%.1f", raw))"
         onTip?(StrataTip(text: "\(name)  \(Format.month(time))  \(amount)",
                          x: min(point.x + 12, bounds.width - 270), y: point.y + 12))
     }

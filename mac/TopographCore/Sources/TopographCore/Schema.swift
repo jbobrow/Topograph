@@ -98,6 +98,9 @@ public enum LibrarySchema {
     create table if not exists meta (key text primary key, value text);
 
     create index if not exists interaction_at on interaction(at);
-    create index if not exists media_status on media(status);
+    -- Status first, so finding an item's pictures uses it too: by status alone, looking up each
+    -- item's pictures read every picture there is (minutes on a large library).
+    drop index if exists media_status;
+    create index if not exists media_status_item on media(status, item_id);
     """
 }
