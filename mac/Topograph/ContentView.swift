@@ -44,6 +44,7 @@ struct ContentView: View {
                 case .process: ProcessScreen(model: model, theme: theme)
                 case .sources: SourcesScreen(model: model, theme: theme)
                 }
+                if model.section.isFiltered { FindTag(model: model, theme: theme) }
                 if model.section != .sources { status(theme) }
                 if model.selection != nil, let library = model.library, let map = model.map {
                     DetailPanel(model: model, library: library, map: map, theme: theme)
@@ -313,6 +314,46 @@ struct MinimapDial: View {
 }
 
 /// The regions you've zoomed inside, as keys that take you back out.
+/// What find is narrowing to, at the top of the view, with a key to stop.
+private struct FindTag: View {
+    let model: AppModel
+    let theme: Theme
+
+    var body: some View {
+        let query = model.findQuery.trimmingCharacters(in: .whitespaces)
+        if !query.isEmpty, !model.filter.query.isEmpty || model.filter.nearest != nil {
+            HStack(spacing: 0) {
+                Text(query)
+                    .foregroundStyle(theme.ink.color)
+                    .lineLimit(1)
+                    // As wide as the search, all of it.
+                    .fixedSize()
+                    .font(PlexMono.font(.regular, size: 11))
+                    .padding(.horizontal, 8)
+                Button { model.findQuery = "" } label: {
+                    Text("×")
+                        .font(PlexMono.font(.regular, size: 13))
+                        .foregroundStyle(theme.ink.color)
+                        .frame(width: 26, height: 26)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .overlay(alignment: .leading) { Rectangle().fill(theme.rule.color).frame(width: 1) }
+                .accessibilityLabel("Clear find")
+                .help("Clear find")
+            }
+            .frame(height: 26)
+            .background(theme.surface.color, in: RoundedRectangle(cornerRadius: 3))
+            .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(theme.ink.color, lineWidth: 1))
+            .padding(.top, 12)
+            // Centered on what the side panel leaves of the view.
+            .frame(maxWidth: .infinity, alignment: .top)
+            .padding(.trailing, model.selection == nil ? 0 : DetailPanel.width)
+            .transition(.opacity)
+        }
+    }
+}
+
 private struct WhereBar: View {
     let model: AppModel
     let theme: Theme
