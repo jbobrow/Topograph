@@ -8,6 +8,8 @@ struct SourcesScreen: View {
     let model: AppModel
     let theme: Theme
     /// The source whose steps for getting an archive are showing.
+    /// The source whose count the pointer is over, which shows where its items are.
+    @State private var hoveredCount: String?
     @State private var showingGuide: String?
     @State private var targeted = false
     @State private var folderCheck: [URL]?
@@ -349,7 +351,25 @@ struct SourcesScreen: View {
             Spacer(minLength: 16)
             if added {
                 Text(items.formatted()).font(PlexMono.font(.semibold, size: 15)).foregroundStyle(theme.ink.color)
-                    .help(Self.whereabouts(found.reduce(.init()) { $0 + $1.whereabouts }))
+                    .onHover { inside in
+                        if inside { hoveredCount = row.key } else if hoveredCount == row.key { hoveredCount = nil }
+                    }
+                    // Drawn here rather than as a system tooltip, which the page's refreshes kept resetting.
+                    .overlay(alignment: .topTrailing) {
+                        if hoveredCount == row.key {
+                            Text(Self.whereabouts(found.reduce(.init()) { $0 + $1.whereabouts }))
+                                .font(PlexMono.font(.regular, size: 11))
+                                .foregroundStyle(theme.ink.color)
+                                .lineSpacing(2)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 6)
+                                .background(theme.surface.color)
+                                .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(theme.ink.color, lineWidth: 1))
+                                .fixedSize()
+                                .offset(y: 24)
+                                .allowsHitTesting(false)
+                        }
+                    }
             } else if !known {
                 LoadingNote(text: "checking", theme: theme, delay: Double(position) * 0.1)
             } else if row.isSync {
@@ -359,6 +379,7 @@ struct SourcesScreen: View {
             }
         }
         .padding(.vertical, 14)
+        .zIndex(hoveredCount == row.key ? 1 : 0)
     }
 
     /// How to get this source's archive, opened from its row. Worth having after it's added
