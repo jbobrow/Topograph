@@ -1063,14 +1063,22 @@ extension TerrainMTKView {
                       relief: ReliefFrame(camera: camera, projection: projection, rise: rise))
     }
 
-    /// The most resonant pictures near enough to show, standing on their spots, farthest first
-    /// so nearer ones draw over them. Seen straight down they lie flat, as on the flat map.
+    /// About as many pictures as the thumbnail cache holds at its largest size (768 MB, about
+    /// 0.55 MB each): more, and it would drop pictures in use to make room for others.
+    private static let standingLimit = 1400
+
+    /// The pictures largest on screen, standing on their spots, farthest first so nearer ones
+    /// draw over them. Seen straight down they lie flat, as on the flat map.
     private func standingPlacements(_ scene: TerrainScene, points: ReliefPoints, projection: Projection,
                                     camera: OrbitCamera, scale: Double) -> [ThumbPlacement] {
         guard let thumbnails else { return [] }
         let rise = Float(self.rise)
+        // The largest as they'd be drawn: nearness makes a picture larger, and so does resonance,
+        // so the hills in front keep theirs and the more resonant win among those alike.
         let found = points.onScreen(scene.pictures, projection: projection, rise: rise, margin: 80,
-                                    minimumScale: TerrainStyle.thumbnailZoom, limit: 800)
+                                    minimumScale: TerrainStyle.thumbnailZoom, limit: Self.standingLimit) { index, at in
+            TerrainStyle.thumbnailSize(k: at.scale) * TerrainStyle.thumbnailScale(resonance: scene.map.items[Int(index)].resonance)
+        }
         let stand = min(1, cos(camera.pitch) * 3)
         var out: [ThumbPlacement] = []
         var hits: [(Int32, CGRect)] = []

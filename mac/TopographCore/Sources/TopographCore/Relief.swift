@@ -67,20 +67,27 @@ public struct ReliefPoints: Sendable {
         return SIMD3(p.x, p.y * rise, p.z)
     }
 
-    /// Of `candidates`, in their order, those that land on screen and are seen at least
-    /// `minimumScale` points per map unit, up to `limit`.
-    public func onScreen(_ candidates: [Int32], projection: Projection, rise: Float, margin: Double,
-                         minimumScale: Double, limit: Int) -> [(index: Int32, at: Projection.Projected)] {
+    /// Of `candidates`, those that land on screen and are seen at least `minimumScale` points
+    /// per map unit: the `limit` that rank highest, in `candidates`' order, ties going to the
+    /// earlier. By default the nearest. Not the first: seen low, the view reaches far, and
+    /// taking the first would fill it with distant pictures and leave the hills in front bare.
+    public func onScreen(_ candidates: [Int32], projection: Projection, rise: Float, margin: Double, minimumScale: Double, limit: Int,
+                         rank: (Int32, Projection.Projected) -> Double = { _, at in at.scale }) -> [(index: Int32, at: Projection.Projected)] {
         var out: [(Int32, Projection.Projected)] = []
-        out.reserveCapacity(min(limit, candidates.count))
+        var ranks: [Double] = []
         let bounds = CGRect(origin: .zero, size: projection.size).insetBy(dx: -margin, dy: -margin)
         for index in candidates {
             guard let at = projection.project(position(index, rise: rise)),
                   at.scale >= minimumScale, bounds.contains(at.point) else { continue }
             out.append((index, at))
-            if out.count == limit { break }
+            ranks.append(rank(index, at))
         }
-        return out
+        guard out.count > limit else { return out }
+        let cutoff = ranks.sorted(by: >)[limit - 1]
+        var kept: [(Int32, Projection.Projected)] = []
+        kept.reserveCapacity(limit)
+        for (found, value) in zip(out, ranks) where value >= cutoff && kept.count < limit { kept.append(found) }
+        return kept
     }
 
     /// The item drawn nearest a point on screen, within `radius` points. Nearer the eye wins a tie.

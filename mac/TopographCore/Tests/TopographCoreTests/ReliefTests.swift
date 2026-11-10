@@ -40,6 +40,21 @@ final class ReliefTests: XCTestCase {
         XCTAssertGreaterThan(far.depth, near.depth)
     }
 
+    func testOnScreenKeepsTheNearestNotTheFirst() {
+        // A row running away from a low camera, listed farthest first, as resonance might list it.
+        let items = (0..<8).map { MapItem(x: 500, y: Float(300 + $0 * 50), resonance: 1) }
+        let visible = (0..<8).map(Int32.init)
+        let points = ReliefPoints(items: items, visible: visible, field: DensityField(items: items, visible: visible, fullPeak: 1))
+        let projection = OrbitCamera(x: 500, y: 500, distance: 600, pitch: 0.25).projection(viewSize: size)
+        let found = points.onScreen(visible, projection: projection, rise: 0, margin: 80, minimumScale: 0, limit: 3)
+        XCTAssertEqual(points.onScreen(visible, projection: projection, rise: 0, margin: 80, minimumScale: 0, limit: 8).count, 8)
+        XCTAssertEqual(found.map(\.index), [5, 6, 7], "the three nearest the eye, in the order given")
+        let ranked = points.onScreen(visible, projection: projection, rise: 0, margin: 80, minimumScale: 0, limit: 3) { index, _ in
+            index == 7 ? 0 : 1
+        }
+        XCTAssertEqual(ranked.map(\.index), [0, 1, 2], "by the rank given, ties to the earlier")
+    }
+
     func testPanningStraightDownMatchesTheFlatMap() {
         let flat = MapTransform(k: 1.5, x: 40, y: 10)
         let camera = OrbitCamera(above: flat, viewSize: size).panned(dx: 30, dy: -45, viewSize: size)
