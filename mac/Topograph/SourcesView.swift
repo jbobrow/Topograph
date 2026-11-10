@@ -22,11 +22,19 @@ struct SourcesScreen: View {
 
     var body: some View {
         ScrollView {
-            HStack(alignment: .top, spacing: 58) {
-                addColumn.frame(width: 460)
-                table.frame(maxWidth: .infinity)
+            // Side by side while the sources have room beside it, else one under the other.
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 58) {
+                    addColumn.frame(width: 460)
+                    table.frame(minWidth: 560, maxWidth: .infinity)
+                }
+                .padding(.horizontal, 58)
+                VStack(alignment: .leading, spacing: 44) {
+                    addColumn
+                    table
+                }
+                .padding(.horizontal, 32)
             }
-            .padding(.horizontal, 58)
             .padding(.top, 36)
             .padding(.bottom, 24)
         }
