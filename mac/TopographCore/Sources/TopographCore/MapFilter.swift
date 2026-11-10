@@ -26,11 +26,24 @@ public struct ActionGroups: OptionSet, Sendable, Hashable {
     }
 }
 
+/// What an item is to look at: a picture, or words alone.
+public struct ContentKinds: OptionSet, Sendable, Hashable {
+    public let rawValue: UInt8
+    public init(rawValue: UInt8) { self.rawValue = rawValue }
+
+    public static let image = ContentKinds(rawValue: 1)
+    public static let text = ContentKinds(rawValue: 2)
+    public static let all: ContentKinds = [.image, .text]
+
+    public init(of item: MapItem) { self = item.thumb == nil ? .text : .image }
+}
+
 /// Which items are showing. Everything showing by default.
 public struct MapFilter: Sendable, Equatable {
     /// Platforms turned off. Kept as what's off so a new platform shows by default.
     public var hiddenPlatforms: Set<String> = []
     public var groups: ActionGroups = .all
+    public var kinds: ContentKinds = .all
     /// Lowercase words to find in the text or as an @author.
     public var query = ""
     /// Items ranked by meaning, closest first. When set, this takes the place of `query`
@@ -44,6 +57,7 @@ public struct MapFilter: Sendable, Equatable {
 
     public func matches(_ item: MapItem) -> Bool {
         if hiddenPlatforms.contains(item.platform) { return false }
+        if !kinds.contains(ContentKinds(of: item)) { return false }
         // An item with only quiet actions, like opening a file, has no group to turn off.
         if !item.groups.isEmpty && item.groups.isDisjoint(with: groups) { return false }
         if let range {

@@ -432,7 +432,7 @@ enum Format {
     static func platform(_ key: String) -> String {
         switch key {
         case "x": "x"
-        case "files": "your files"
+        case "files": "files"
         default: key
         }
     }

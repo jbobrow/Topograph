@@ -21,6 +21,19 @@ final class MapFilterTests: XCTestCase {
         XCTAssertEqual(filter.ignoringTime.groups, .creation)
     }
 
+    func testImageAndTextSplitByPicture() {
+        let items = [
+            MapItem(id: "p", x: 0, y: 0, resonance: 1, groups: .liked, thumb: "media/ab/p-t.webp"),
+            MapItem(id: "w", x: 0, y: 0, resonance: 1, groups: .liked, text: "just words"),
+        ]
+        var filter = MapFilter()
+        XCTAssertEqual(filter.visible(in: items, search: SearchIndex(items: items)), [0, 1])
+        filter.kinds = .image
+        XCTAssertEqual(filter.visible(in: items, search: SearchIndex(items: items)), [0])
+        filter.kinds = .text
+        XCTAssertEqual(filter.visible(in: items, search: SearchIndex(items: items)), [1])
+    }
+
     func testTimeSlicerShowsWhatTheFilterShows() {
         var items: [MapItem] = []
         for index in 0..<200 {

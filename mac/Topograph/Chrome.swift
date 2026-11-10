@@ -1,14 +1,18 @@
 import SwiftUI
 import TopographCore
 
-/// Platforms, what you did, how pictures show, and find.
+/// Where things came from, what you did, what they are, how pictures show, and find: in one
+/// row, or two when the window is narrow.
 struct FilterBar: View {
     @Bindable var model: AppModel
     let theme: Theme
     @FocusState private var findFocused: Bool
-    /// Counts tries to turn off the last of creation and consumption.
-    @State private var triedLastOff = 0
-    @State private var showingStaysOn = false
+    /// A try to turn off the last of a pair, which has to keep one on.
+    @State private var lastOff: LastOff?
+
+    private static let kinds: [(ContentKinds, String, KeyEquivalent)] = [
+        (.image, "image", "i"), (.text, "text", "u"),
+    ]
 
     private static let groups: [(ActionGroups, String, KeyEquivalent)] = [
         (.creation, "creation", "["), (.consumption, "consumption", "]"),
@@ -17,74 +21,78 @@ struct FilterBar: View {
     private static let imageKeys: [ImageMode: KeyEquivalent] = [.color: "l", .gray: "g", .dither: "b"]
 
     var body: some View {
-        HStack(spacing: 14) {
-            HStack(spacing: 4) {
-                ForEach(Array(model.platforms.enumerated()), id: \.element) { position, platform in
-                    Button(Format.platform(platform)) {
-                        // Worked out here, on the press: a keyboard shortcut can keep calling
-                        // the action it first had, and one holding the state from back then
-                        // would only ever do the same thing.
-                        if model.filter.hiddenPlatforms.contains(platform) {
-                            model.filter.hiddenPlatforms.remove(platform)
-                        } else {
-                            model.filter.hiddenPlatforms.insert(platform)
-                        }
+        // One row when the window has room, else find and the sources above the rest.
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 14) {
+                platforms
+                filters
+                Spacer(minLength: 0)
+                find
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 14) {
+                    platforms
+                    Spacer(minLength: 0)
+                    find
+                }
+                HStack(spacing: 14) {
+                    filters
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 8)
+        .task(id: lastOff) {
+            guard let tried = lastOff else { return }
+            try? await Task.sleep(for: .seconds(2))
+            // A newer try has started its own two seconds.
+            if !Task.isCancelled, lastOff == tried { lastOff = nil }
+        }
+        .task(id: FindRequest(query: model.findQuery, byMeaning: model.findsByMeaning)) {
+            // Wait for a pause in the typing.
+            try? await Task.sleep(for: .milliseconds(model.findsByMeaning ? 300 : 150))
+            guard !Task.isCancelled else { return }
+            await model.find(model.findQuery)
+        }
+    }
+
+    /// What things are, what you did, the terrain's own keys, and how pictures show.
+    @ViewBuilder
+    private var filters: some View {
+        HStack(spacing: 4) {
+            ForEach(Self.groups, id: \.1) { group, label, key in
+                Button(label) {
+                    if !model.filter.groups.isSuperset(of: group) {
+                        model.filter.groups.formUnion(group)
+                    } else if model.filter.groups != group {
+                        model.filter.groups.subtract(group)
+                    } else {
+                        // The last one stays on: with neither, the map would be empty.
+                        lastOff = LastOff(pair: "groups")
                     }
-                    .buttonStyle(KeyStyle(theme: theme, led: !model.filter.hiddenPlatforms.contains(platform)))
-                    // ⌥, since ⇧⌘3, ⇧⌘4 and ⇧⌘5 are the system's screenshots.
-                    .hotkey("⌥⌘\(position + 1)", key: KeyEquivalent(Character(String(position + 1))), modifiers: [.command, .option], model: model, theme: theme)
                 }
+                .buttonStyle(KeyStyle(theme: theme, led: model.filter.groups.isSuperset(of: group)))
+                .hotkey("⌘\(key.character)", key: key, model: model, theme: theme)
             }
-            HStack(spacing: 4) {
-                ForEach(Self.groups, id: \.1) { group, label, key in
-                    Button(label) {
-                        if !model.filter.groups.isSuperset(of: group) {
-                            model.filter.groups.formUnion(group)
-                        } else if model.filter.groups != group {
-                            model.filter.groups.subtract(group)
-                        } else {
-                            // The last one stays on: with neither, the map would be empty.
-                            triedLastOff += 1
-                        }
+        }
+        .overlay(alignment: .topLeading) { staysOn("groups") }
+        HStack(spacing: 4) {
+            ForEach(Self.kinds, id: \.1) { kind, label, key in
+                Button(label) {
+                    if !model.filter.kinds.contains(kind) {
+                        model.filter.kinds.insert(kind)
+                    } else if model.filter.kinds != kind {
+                        model.filter.kinds.remove(kind)
+                    } else {
+                        lastOff = LastOff(pair: "kinds")
                     }
-                    .buttonStyle(KeyStyle(theme: theme, led: model.filter.groups.isSuperset(of: group)))
-                    .hotkey("⌘\(key.character)", key: key, model: model, theme: theme)
                 }
-            }
-            .overlay(alignment: .topLeading) {
-                if showingStaysOn {
-                    Text("one has to stay on")
-                        .font(PlexMono.font(.medium, size: 11))
-                        .foregroundStyle(theme.ground.color)
-                        .fixedSize()
-                        .padding(.horizontal, 8)
-                        .frame(height: 22)
-                        .background(theme.ink.color)
-                        .offset(y: 32)
-                        .allowsHitTesting(false)
-                }
-            }
-            .task(id: triedLastOff) {
-                guard triedLastOff > 0 else { return }
-                showingStaysOn = true
-                try? await Task.sleep(for: .seconds(2))
-                // A newer try has started its own two seconds.
-                if !Task.isCancelled { showingStaysOn = false }
-            }
-            HStack(spacing: 4) {
-                ForEach(ImageMode.allCases, id: \.self) { mode in
-                    let key = Self.imageKeys[mode] ?? "g"
-                    Button(mode.label) { model.imageMode = mode }
-                        .buttonStyle(KeyStyle(theme: theme, led: model.imageMode == mode))
-                        .hotkey("⌘\(key.character)", key: key, model: model, theme: theme)
-                }
+                .buttonStyle(KeyStyle(theme: theme, led: model.filter.kinds.contains(kind)))
+                .hotkey("⌘\(key.character)", key: key, model: model, theme: theme)
             }
             // The terrain's own: they do nothing on the other views.
             if model.section == .terrain {
-                Button("markers") { model.showsMarkers.toggle() }
-                    .buttonStyle(KeyStyle(theme: theme, led: model.showsMarkers))
-                    .hotkey("⌘J", key: "j", model: model, theme: theme)
-                    .help("Hidden, they show only around the pointer, so the terrain reads on its own.")
                 Button("clouds") { model.showsClouds.toggle() }
                     .buttonStyle(KeyStyle(theme: theme, led: model.showsClouds))
                     .hotkey("⌘K", key: "k", model: model, theme: theme)
@@ -93,62 +101,113 @@ struct FilterBar: View {
                           ? "Searches float over the map once Google activity is imported and the map is updated."
                           : "Your searches as weather: where the season before the time shown searched more than usual.")
             }
-            Spacer(minLength: 0)
-            HStack(spacing: 4) {
-                HStack(spacing: 0) {
-                    Button { findFocused = true } label: {
-                        Text("find")
-                            .font(PlexMono.font(.regular, size: 11))
-                            .foregroundStyle(theme.secondary.color)
-                            .padding(.horizontal, 8)
-                            .frame(height: 26)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .overlay(alignment: .trailing) { Rectangle().fill(theme.rule.color).frame(width: 1) }
-                    TextField("", text: $model.findQuery, prompt: Text(model.findsByMeaning ? "what it's about" : "words or @author").foregroundStyle(theme.secondary.color))
-                        .textFieldStyle(.plain)
-                        .focused($findFocused)
-                        .font(PlexMono.font(.regular, size: 11))
-                        .foregroundStyle(theme.ink.color)
-                        .padding(.horizontal, 8)
-                        .frame(minWidth: 120, maxWidth: 190)
+        }
+        .overlay(alignment: .topLeading) { staysOn("kinds") }
+        if model.section == .terrain {
+            Button("markers") { model.showsMarkers.toggle() }
+                .buttonStyle(KeyStyle(theme: theme, led: model.showsMarkers))
+                .hotkey("⌘J", key: "j", model: model, theme: theme)
+                .help("Hidden, they show only around the pointer, so the terrain reads on its own.")
+        }
+        UpwardPicker(title: "Pictures in", options: ImageMode.allCases, selection: $model.imageMode,
+                     label: \.label, theme: theme, opensDown: true)
+            .help("How pictures show: ⌘L color, ⌘G gray, ⌘B 1-bit")
+            .background {
+                ForEach(ImageMode.allCases, id: \.self) { mode in
+                    Button("") { model.imageMode = mode }
+                        .keyboardShortcut(Self.imageKeys[mode] ?? "g", modifiers: .command)
+                        .hidden()
                 }
-                .frame(height: 26)
-                .background(theme.surface.color)
-                .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(theme.rule.color, lineWidth: 1))
-                .overlay(alignment: .bottomLeading) {
-                    if model.findingByMeaning > 0 {
-                        LoadingNote(text: "reading for meaning", theme: theme)
-                            .fixedSize()
-                            .padding(.horizontal, 8)
-                            .frame(height: 22)
-                            .background(theme.surface.color, in: Rectangle())
-                            .overlay(Rectangle().strokeBorder(theme.rule.color, lineWidth: 1))
-                            .offset(y: 24)
-                            .allowsHitTesting(false)
+            }
+    }
+
+    private var platforms: some View {
+        HStack(spacing: 4) {
+            ForEach(Array(model.platforms.enumerated()), id: \.element) { position, platform in
+                Button(Format.platform(platform)) {
+                    // Worked out here, on the press: a keyboard shortcut can keep calling
+                    // the action it first had, and one holding the state from back then
+                    // would only ever do the same thing.
+                    if model.filter.hiddenPlatforms.contains(platform) {
+                        model.filter.hiddenPlatforms.remove(platform)
+                    } else {
+                        model.filter.hiddenPlatforms.insert(platform)
                     }
                 }
-                // On the whole field, or its outline draws over the label.
-                .hotkey("⌘F", key: "f", placement: .belowLeft, model: model, theme: theme)
-                Button("by meaning") { model.findsByMeaning.toggle() }
-                    .buttonStyle(KeyStyle(theme: theme, led: model.findsByMeaning))
-                    .hotkey("⌘Y", key: "y", model: model, theme: theme)
-                    .disabled(!model.canFindByMeaning)
-                    .help(model.canFindByMeaning
-                          ? "Find what things are about, using the CLIP model on this Mac"
-                          : "Needs the CLIP model on this Mac.")
+                .buttonStyle(KeyStyle(theme: theme, led: !model.filter.hiddenPlatforms.contains(platform)))
+                // ⌥, since ⇧⌘3, ⇧⌘4 and ⇧⌘5 are the system's screenshots.
+                .hotkey("⌥⌘\(position + 1)", key: KeyEquivalent(Character(String(position + 1))), modifiers: [.command, .option], model: model, theme: theme)
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.bottom, 8)
-        .task(id: FindRequest(query: model.findQuery, byMeaning: model.findsByMeaning)) {
-            // Wait for a pause in the typing.
-            try? await Task.sleep(for: .milliseconds(model.findsByMeaning ? 300 : 150))
-            guard !Task.isCancelled else { return }
-            await model.find(model.findQuery)
+    }
+
+    private var find: some View {
+        HStack(spacing: 4) {
+            HStack(spacing: 0) {
+                Button { findFocused = true } label: {
+                    Text("find")
+                        .font(PlexMono.font(.regular, size: 11))
+                        .foregroundStyle(theme.secondary.color)
+                        .padding(.horizontal, 8)
+                        .frame(height: 26)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .overlay(alignment: .trailing) { Rectangle().fill(theme.rule.color).frame(width: 1) }
+                TextField("", text: $model.findQuery, prompt: Text(model.findsByMeaning ? "what it's about" : "words or @author").foregroundStyle(theme.secondary.color))
+                    .textFieldStyle(.plain)
+                    .focused($findFocused)
+                    .font(PlexMono.font(.regular, size: 11))
+                    .foregroundStyle(theme.ink.color)
+                    .padding(.horizontal, 8)
+                    .frame(minWidth: 120, maxWidth: 190)
+            }
+            .frame(height: 26)
+            .background(theme.surface.color)
+            .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(theme.rule.color, lineWidth: 1))
+            .overlay(alignment: .bottomLeading) {
+                if model.findingByMeaning > 0 {
+                    LoadingNote(text: "reading for meaning", theme: theme)
+                        .fixedSize()
+                        .padding(.horizontal, 8)
+                        .frame(height: 22)
+                        .background(theme.surface.color, in: Rectangle())
+                        .overlay(Rectangle().strokeBorder(theme.rule.color, lineWidth: 1))
+                        .offset(y: 24)
+                        .allowsHitTesting(false)
+                }
+            }
+            // On the whole field, or its outline draws over the label.
+            .hotkey("⌘F", key: "f", placement: .belowLeft, model: model, theme: theme)
+            Button("by meaning") { model.findsByMeaning.toggle() }
+                .buttonStyle(KeyStyle(theme: theme, led: model.findsByMeaning))
+                .hotkey("⌘Y", key: "y", model: model, theme: theme)
+                .disabled(!model.canFindByMeaning)
+                .help(model.canFindByMeaning
+                      ? "Find what things are about, using the CLIP model on this Mac"
+                      : "Needs the CLIP model on this Mac.")
         }
     }
+
+    @ViewBuilder
+    private func staysOn(_ pair: String) -> some View {
+        if lastOff?.pair == pair {
+            Text("one has to stay on")
+                .font(PlexMono.font(.medium, size: 11))
+                .foregroundStyle(theme.ground.color)
+                .fixedSize()
+                .padding(.horizontal, 8)
+                .frame(height: 22)
+                .background(theme.ink.color)
+                .offset(y: 32)
+                .allowsHitTesting(false)
+        }
+    }
+}
+
+private struct LastOff: Equatable {
+    let pair: String
+    let id = UUID()
 }
 
 private struct FindRequest: Equatable {
@@ -156,29 +215,38 @@ private struct FindRequest: Equatable {
     let byMeaning: Bool
 }
 
-/// A key showing a choice, which opens a column of keys above it to change it. A system menu
-/// can't be drawn in the app's style, and opens wherever it likes.
+/// A key showing a choice, which opens a column of keys above it to change it, or below it
+/// at the top of the window. A system menu can't be drawn in the app's style, and opens
+/// wherever it likes.
 struct UpwardPicker<Option: Hashable>: View {
     let title: String
     let options: [Option]
     @Binding var selection: Option
     let label: (Option) -> String
     let theme: Theme
+    var opensDown = false
     @State private var open = false
     @State private var monitor: Any?
 
-    private let width = 58.0
+    /// As wide as the widest choice, so the key doesn't change size as the choice does.
+    private func widest(_ shown: String, suffix: String = "") -> some View {
+        ZStack(alignment: .leading) {
+            ForEach(options, id: \.self) { Text(label($0) + suffix).hidden() }
+            Text(shown)
+        }
+    }
 
     var body: some View {
+        let arrow = open != opensDown ? "▾" : "▴"
         Button {
             open.toggle()
         } label: {
-            Text("\(label(selection))  \(open ? "▾" : "▴")").frame(width: width + 14, alignment: .leading)
+            widest("\(label(selection))  \(arrow)", suffix: "  \(arrow)")
         }
         .buttonStyle(KeyStyle(theme: theme, on: open))
         .accessibilityLabel(title)
         .accessibilityValue(label(selection))
-        .overlay(alignment: .bottomTrailing) {
+        .overlay(alignment: opensDown ? .topTrailing : .bottomTrailing) {
             if open {
                 VStack(spacing: 4) {
                     ForEach(options, id: \.self) { option in
@@ -186,7 +254,7 @@ struct UpwardPicker<Option: Hashable>: View {
                             selection = option
                             open = false
                         } label: {
-                            Text(label(option)).frame(width: width, alignment: .leading)
+                            widest(label(option))
                         }
                         .buttonStyle(KeyStyle(theme: theme, led: option == selection))
                     }
@@ -195,7 +263,7 @@ struct UpwardPicker<Option: Hashable>: View {
                 .background(theme.ground.color, in: RoundedRectangle(cornerRadius: 3))
                 .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(theme.ink.color, lineWidth: 1))
                 .fixedSize()
-                .offset(y: -30)
+                .offset(y: opensDown ? 30 : -30)
             }
         }
         .zIndex(open ? 2 : 0)
