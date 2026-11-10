@@ -89,7 +89,16 @@ final class AppModel {
         filter.hiddenPlatforms = ["google"]
         return filter
     }() {
-        didSet { if filter != oldValue { applyFilter() } }
+        didSet {
+            // Moving the time shown takes the clouds along again.
+            if filter.range != oldValue.range { cloudsEnd = nil }
+            if filter != oldValue { applyFilter() }
+        }
+    }
+    /// Where the clouds' season ends when you've moved it along the timeline. nil follows the
+    /// end of the time shown.
+    var cloudsEnd: Int? {
+        didSet { if cloudsEnd != oldValue { applyFilter() } }
     }
     /// Searches as weather over the map: where the season before the time shown gathered more
     /// than usual. Like searches on the map before them, they start hidden.
@@ -673,6 +682,7 @@ final class AppModel {
         let wantsColors = section == .palette && paletteShowsSeasons && (current == nil || paletteSeasons == nil)
         let share = paletteShowsShare
         let clouds = showsClouds
+        let cloudsEnd = self.cloudsEnd
         let waiting = strataShowsWaiting
         let (scene, newSlicer, newOrder, counts, overview, seasons) = await Task.detached(priority: .userInitiated) { () -> (TerrainScene, TimeSlicer, [Int]?, [Int]?, StrataModel?, StrataModel?) in
             let slicer = current ?? TimeSlicer(filter: filter, items: map.items, search: search)
@@ -682,7 +692,7 @@ final class AppModel {
             let order = order ?? axis.map { StrataModel.stackingOrder(map: map, visible: slicer.all, axis: $0, waiting: waiting) }
             let seasons = wantsColors ? axis.map { StrataModel(colorsOf: map, visible: slicer.all, axis: $0, share: share) } : nil
             let overview = wantsChart ? axis.map { StrataModel(map: map, visible: slicer.all, axis: $0, order: order, waiting: waiting) } : nil
-            return (TerrainScene(map: map, visible: visible, fullPeak: peak, range: filter.range, clouds: clouds),
+            return (TerrainScene(map: map, visible: visible, fullPeak: peak, range: filter.range, clouds: clouds, cloudsEnd: cloudsEnd),
                     slicer, order, counts, overview, seasons)
         }.value
         guard generation == mapGeneration else { return }

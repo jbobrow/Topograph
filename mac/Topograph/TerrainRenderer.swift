@@ -19,7 +19,7 @@ struct TerrainScene: Sendable {
     let weatherEnd: Int?
 
     init(map: LibraryMap, visible: [Int32], fullPeak: Double, range: ClosedRange<Int>? = nil,
-         clouds: Bool = false) {
+         clouds: Bool = false, cloudsEnd: Int? = nil) {
         self.map = map
         self.visible = visible
         self.range = range
@@ -28,8 +28,9 @@ struct TerrainScene: Sendable {
         spatial = SpatialIndex(items: map.items, visible: visible)
         pictures = visible.filter { map.items[Int($0)].thumb != nil }
             .sorted { map.items[Int($0)].resonance > map.items[Int($1)].resonance }
-        // The season up to the end of the time shown: with all time, the latest.
-        weatherEnd = range?.upperBound ?? map.clouds.searches.last?.time
+        // The season up to the end of the time shown (with all time, the latest), unless it's
+        // been moved along the timeline.
+        weatherEnd = cloudsEnd ?? range?.upperBound ?? map.clouds.searches.last?.time
         weather = clouds ? weatherEnd.flatMap { map.clouds.weather(endingAt: $0) } : nil
     }
 }

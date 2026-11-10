@@ -301,11 +301,15 @@ struct TimeBar: View {
         case moving(offset: Int)
         case lowerEdge
         case upperEdge
+        /// The clouds' season, taken hold of by its top.
+        case clouds(offset: Int)
     }
 
     private let margin = 16.0
     private let barsHeight = 34.0
     private static let edgeReach = 6.0
+    /// How far down from the top of the clouds' season it can be taken hold of.
+    private static let cloudsReach = 8.0
 
     var body: some View {
         HStack(spacing: 12) {
@@ -322,7 +326,7 @@ struct TimeBar: View {
                     .onContinuousHover { phase in
                         guard drag == nil else { return }
                         switch phase {
-                        case .active(let point): setCursor(at: point.x, width: geometry.size.width)
+                        case .active(let point): setCursor(at: point, width: geometry.size.width)
                         case .ended: NSCursor.arrow.set()
                         }
                     }
@@ -352,6 +356,22 @@ struct TimeBar: View {
         margin + axis.fraction(of: time) * (width - margin * 2)
     }
 
+    /// When the clouds showing on the terrain come from: the season before the time shown, or
+    /// where you've moved it.
+    private var cloudSeason: ClosedRange<Int>? {
+        guard model.section == .terrain, model.showsClouds, model.map?.clouds.isEmpty == false,
+              let end = model.cloudsEnd ?? model.scene?.weatherEnd else { return nil }
+        return (end - Clouds.season)...end
+    }
+
+    /// Whether a point is on the top of the clouds' season, where it can be taken hold of.
+    private func isOnClouds(_ point: CGPoint, width: Double) -> Bool {
+        guard let axis = model.axis, let season = cloudSeason, point.y < Self.cloudsReach else { return false }
+        let left = x(max(season.lowerBound, axis.start), axis: axis, width: width)
+        let right = max(x(min(season.upperBound, axis.end), axis: axis, width: width), left + 3)
+        return point.x > left - 3 && point.x < right + 3
+    }
+
     private func time(atX x: Double, axis: MonthAxis, width: Double) -> Int {
         axis.time(atFraction: (x - margin) / (width - margin * 2))
     }
@@ -361,6 +381,19 @@ struct TimeBar: View {
             guard let axis = model.axis, !model.monthCounts.isEmpty else { return }
             let high = Double(model.monthCounts.max() ?? 1)
             let barWidth = max(1, ((width - 8) / Double(axis.count)).rounded(.down) - 1)
+            // The season the clouds over the terrain come from, as a dot screen behind the bars.
+            if let season = cloudSeason {
+                let left = x(max(season.lowerBound, axis.start), axis: axis, width: width).rounded()
+                let right = max(x(min(season.upperBound, axis.end), axis: axis, width: width).rounded(), left + 3)
+                var dots = Path()
+                for row in stride(from: 1.0, to: barsHeight, by: 3) {
+                    // Every other row offset, like the terrain's screens.
+                    let shift = Int(row / 3) % 2 == 0 ? 0.0 : 1.5
+                    for column in stride(from: left + shift, to: right, by: 3) { dots.addRect(CGRect(x: column, y: row, width: 1, height: 1)) }
+                }
+                context.fill(dots, with: .color(theme.secondary.color))
+                context.fill(Path(CGRect(x: left, y: 0, width: right - left, height: 1)), with: .color(theme.secondary.color))
+            }
             for (month, count) in model.monthCounts.enumerated() where count > 0 {
                 let left = x(axis.edges[month], axis: axis, width: width).rounded()
                 let height = (barsHeight - 2) * Double(count) / high
@@ -414,8 +447,8 @@ struct TimeBar: View {
             || abs(position - x(range.upperBound, axis: axis, width: width)) < Self.edgeReach
     }
 
-    private func setCursor(at position: Double, width: Double) {
-        (isOnEdge(position, width: width) ? NSCursor.resizeLeftRight : .arrow).set()
+    private func setCursor(at point: CGPoint, width: Double) {
+        (isOnClouds(point, width: width) ? NSCursor.openHand : isOnEdge(point.x, width: width) ? NSCursor.resizeLeftRight : .arrow).set()
     }
 
     private func changed(_ value: DragGesture.Value, width: Double) {
@@ -424,7 +457,10 @@ struct TimeBar: View {
         if drag == nil {
             model.stopPlaying()
             let start = time(atX: value.startLocation.x, axis: axis, width: width)
-            if let range = model.filter.range {
+            if isOnClouds(value.startLocation, width: width), let season = cloudSeason {
+                drag = .clouds(offset: start - season.upperBound)
+                NSCursor.closedHand.set()
+            } else if let range = model.filter.range {
                 let lo = x(range.lowerBound, axis: axis, width: width), hi = x(range.upperBound, axis: axis, width: width)
                 if abs(value.startLocation.x - lo) < Self.edgeReach {
                     drag = .lowerEdge
@@ -458,6 +494,8 @@ struct TimeBar: View {
         case .upperEdge:
             guard let range = model.filter.range else { return }
             model.filter.range = min(now, range.lowerBound)...max(now, range.lowerBound)
+        case .clouds(let offset):
+            model.cloudsEnd = min(max(now - offset, axis.start + Clouds.season), axis.end)
         case nil:
             break
         }
@@ -472,6 +510,6 @@ struct TimeBar: View {
             }
         }
         drag = nil
-        setCursor(at: value.location.x, width: width)
+        setCursor(at: value.location, width: width)
     }
 }
