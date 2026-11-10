@@ -10,7 +10,8 @@ final class PipelineRunner {
         case importArchives([URL])
         case readFiles([String], options: FilesRules.Options, dryRun: Bool)
         case fixDates
-        case hydrate
+        /// Fetch the posts still waiting, from these sources.
+        case hydrate(platforms: [String])
         case retryUnreachable(platform: String)
         case sync(source: String, account: String)
         case build(MapRecipe?)
@@ -24,6 +25,8 @@ final class PipelineRunner {
     private(set) var running: Job?
     /// The latest line of progress.
     private(set) var line = ""
+    /// Its numbers: how many done, out of how many when that's known.
+    private(set) var count: (done: Int, total: Int?)?
     /// Everything said since the last job began.
     private(set) var log: [String] = []
     private(set) var failure: String?
@@ -56,6 +59,7 @@ final class PipelineRunner {
         stop = flag
         running = job
         line = job.title
+        count = nil
         log = []
         failure = nil
         let page = instagram.isSignedIn ? instagram.pageReader : nil
@@ -63,7 +67,9 @@ final class PipelineRunner {
             Task { @MainActor in self?.line = text }
         }, say: { [weak self] text in
             Task { @MainActor in self?.say(text) }
-        }, isCancelled: { flag.isStopped })
+        }, isCancelled: { flag.isStopped }, count: { [weak self] done, total in
+            Task { @MainActor in self?.count = (done, total) }
+        })
         let work = job.work
         // Blocking work with all the cores it can use, so not on the shared task threads.
         DispatchQueue.global(qos: .utility).async {
@@ -94,8 +100,8 @@ final class PipelineRunner {
             try Pipeline.readFiles(folders, options: options, dryRun: dryRun, library: library, reporter: reporter)
         case .fixDates:
             try Pipeline.readFiles([], fixDates: true, library: library, reporter: reporter)
-        case .hydrate:
-            try Pipeline.hydrate(library: library, hydrator: Hydrator(signedInPage: instagramPage), reporter: reporter)
+        case .hydrate(let platforms):
+            try Pipeline.hydrate(library: library, hydrator: Hydrator(signedInPage: instagramPage), platforms: Set(platforms), reporter: reporter)
         case .retryUnreachable(let platform):
             // Posts the public pages refused may open once you've signed in.
             try Pipeline.hydrate(library: library, hydrator: Hydrator(signedInPage: instagramPage), platforms: [platform], retryingUnreachable: true, reporter: reporter)
@@ -129,7 +135,9 @@ final class PipelineRunner {
             check.waitUntilExit()
             return check.terminationStatus == 0
         }.value
-        hydrateElsewhere = found && running?.work != .hydrate
+        var mine = false
+        if case .hydrate = running?.work { mine = true }
+        hydrateElsewhere = found && !mine
         hasCheckedHydrate = true
     }
 }

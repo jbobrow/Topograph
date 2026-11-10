@@ -340,7 +340,7 @@ struct SourcesScreen: View {
                 if added, let note = row.note {
                     Text(note).font(PlexMono.font(.regular, size: 10)).foregroundStyle(theme.secondary.color)
                 }
-                if row.canHydrate, let progress = hydrateProgress(found) { hydrateRow(progress, key: row.key) }
+                if row.canHydrate, found.contains(where: { $0.waiting > 0 }) { hydrateRow(found, row: row) }
                 if row.key == "instagram", added { instagramSession(found) }
                 if row.key == "files", added { filesActions }
                 if !added, row.isSync { notAddedActions(row) }
@@ -349,6 +349,7 @@ struct SourcesScreen: View {
             Spacer(minLength: 16)
             if added {
                 Text(items.formatted()).font(PlexMono.font(.semibold, size: 15)).foregroundStyle(theme.ink.color)
+                    .help(Self.whereabouts(found.reduce(.init()) { $0 + $1.whereabouts }))
             } else if !known {
                 LoadingNote(text: "checking", theme: theme, delay: Double(position) * 0.1)
             } else if row.isSync {
@@ -451,34 +452,63 @@ struct SourcesScreen: View {
         }
     }
 
-    private func hydrateProgress(_ found: [LibrarySources.Platform]) -> (done: Int, total: Int)? {
-        let waiting = found.reduce(0) { $0 + $1.waiting }, done = found.reduce(0) { $0 + $1.fetched }
-        return waiting > 0 ? (done, done + waiting) : nil
+    /// Where a source's items are on the map, for the count's tooltip.
+    static func whereabouts(_ w: LibrarySources.Whereabouts) -> String {
+        var lines = ["\(w.placed.formatted()) on the map"]
+        func add(_ n: Int, _ text: String) { if n > 0 { lines.append("\(n.formatted()) \(text)") } }
+        add(w.placedToFetch, "of them by their words, with a picture still to fetch")
+        add(w.clouds, "searches, as clouds over it")
+        add(w.alike, "the same picture as one from elsewhere, drawn as one")
+        let off = w.toPlace + w.toFetch + w.cantFetch + w.gaveUp + w.empty + w.traces
+        if off > 0 {
+            lines.append("")
+            lines.append("\(off.formatted()) not on the map:")
+            add(w.toPlace, "ready for the map to be updated")
+            add(w.toFetch, "links still to fetch")
+            add(w.gaveUp, "links that couldn’t be fetched")
+            add(w.cantFetch, "links Topograph can’t fetch")
+            add(w.empty, "with no picture or words to show")
+            add(w.traces, "reactions with nothing to show, counted in strata")
+        }
+        return lines.joined(separator: "\n")
     }
 
+    /// Posts still to fetch, and fetching them: what's counted is what the row says is left.
     @ViewBuilder
-    private func hydrateRow(_ progress: (done: Int, total: Int), key: String) -> some View {
-        let mine = model.pipeline.running?.work == .hydrate
+    private func hydrateRow(_ found: [LibrarySources.Platform], row: Row) -> some View {
+        let waiting = found.reduce(0) { $0 + $1.waiting }, fetched = found.reduce(0) { $0 + $1.fetched }
+        let work = PipelineRunner.Work.hydrate(platforms: row.platforms)
+        let mine = model.pipeline.running?.work == work
         let elsewhere = model.pipeline.hydrateElsewhere
         let checked = model.pipeline.hasCheckedHydrate
+        let count = mine ? model.pipeline.count : nil
         VStack(alignment: .leading, spacing: 5) {
             HStack {
-                let left = (progress.total - progress.done).formatted()
-                Text(mine || elsewhere ? "hydrate · fetching · \(left) posts to go" : "hydrate · \(left) posts still to fetch")
+                if let count, let total = count.total {
+                    Text("hydrate · fetching · \((total - count.done).formatted()) to go")
+                } else {
+                    Text("hydrate · \(waiting.formatted()) posts still to fetch" + (elsewhere ? " · fetching" : ""))
+                }
                 if !checked { LoadingNote(text: "checking", theme: theme) }
                 Spacer()
-                Text("\(progress.done.formatted()) / \(progress.total.formatted()) done")
+                if let count, let total = count.total {
+                    Text("\(count.done.formatted()) / \(total.formatted())")
+                } else {
+                    Text("\(fetched.formatted()) fetched")
+                }
             }
             .font(PlexMono.font(.regular, size: 10))
             .foregroundStyle(theme.secondary.color)
-            ProgressTicks(fraction: Double(progress.done) / Double(max(progress.total, 1)), theme: theme).frame(height: 11)
+            ProgressTicks(fraction: count.flatMap { c in c.total.map { Double(c.done) / Double(max($0, 1)) } }
+                            ?? Double(fetched) / Double(max(fetched + waiting, 1)), theme: theme)
+                .frame(height: 11)
             Text("gentle pace · deleted posts stay as links" + (elsewhere ? " · running in a terminal" : ""))
                 .font(PlexMono.font(.regular, size: 10))
                 .foregroundStyle(theme.secondary.color)
             if mine {
                 Button("❚❚ pause") { model.pipeline.pause() }.buttonStyle(KeyStyle(theme: theme))
             } else if !elsewhere, checked {
-                Button("▶ fetch") { start(title: "fetching images", .hydrate) }
+                Button("▶ fetch") { start(title: "fetching \(row.title) posts", work) }
                     .buttonStyle(KeyStyle(theme: theme))
                     .disabled(model.pipeline.running != nil)
             }

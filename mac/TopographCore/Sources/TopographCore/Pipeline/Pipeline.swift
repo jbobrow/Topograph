@@ -7,11 +7,15 @@ public struct PipelineReporter: Sendable {
     /// A line that stays.
     public var say: @Sendable (String) -> Void
     public var isCancelled: @Sendable () -> Bool
+    /// The live line's numbers: how many done, out of how many when that's known.
+    public var count: @Sendable (Int, Int?) -> Void
 
-    public init(progress: @escaping @Sendable (String) -> Void, say: @escaping @Sendable (String) -> Void, isCancelled: @escaping @Sendable () -> Bool = { false }) {
+    public init(progress: @escaping @Sendable (String) -> Void, say: @escaping @Sendable (String) -> Void, isCancelled: @escaping @Sendable () -> Bool = { false },
+                count: @escaping @Sendable (Int, Int?) -> Void = { _, _ in }) {
         self.progress = progress
         self.say = say
         self.isCancelled = isCancelled
+        self.count = count
     }
 }
 
@@ -33,9 +37,13 @@ public final class ProgressLine {
         self.unit = unit
         self.reporter = reporter
         reporter.progress(title)
+        reporter.count(0, total)
     }
 
-    func setTotal(_ total: Int) { self.total = total }
+    func setTotal(_ total: Int) {
+        self.total = total
+        reporter.count(done, total)
+    }
 
     func advance(_ by: Int = 1, note: String? = nil) {
         done += by
@@ -43,6 +51,7 @@ public final class ProgressLine {
         guard now.timeIntervalSince(last) > 0.1 else { return }
         last = now
         reporter.progress(text(note))
+        reporter.count(done, total)
     }
 
     private func text(_ note: String?) -> String {
@@ -134,7 +143,7 @@ public enum Pipeline {
     public static func hydrate(library: LibraryWriter, hydrator: Hydrator = Hydrator(), platforms: Set<String>? = nil, limit: Int? = nil, retryingUnreachable: Bool = false, reporter: PipelineReporter) throws {
         reporter.say("Fetching images for liked and saved posts. Pause any time; it picks up where it left off.")
         let waiting = ProgressLine("Downloading waiting images", unit: "images", reporter: reporter)
-        let arrived = try hydrator.downloadPendingMedia(library: library, delay: hydrator.delay / 3, reporter: reporter, line: waiting)
+        let arrived = try hydrator.downloadPendingMedia(library: library, platforms: platforms, delay: hydrator.delay / 3, reporter: reporter, line: waiting)
         if waiting.done > 0 { waiting.close("\(arrived.formatted()) images") }
         _ = try hydrator.hydrate(library: library, platforms: platforms, limit: limit, retryingUnreachable: retryingUnreachable, reporter: reporter)
     }

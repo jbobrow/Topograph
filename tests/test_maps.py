@@ -172,6 +172,25 @@ def test_hydrate_tries_posts_it_has_not_tried_before_ones_that_failed(tmp_path, 
     lib.close()
 
 
+def test_hydrate_counts_only_posts_it_can_fetch(tmp_path, monkeypatch):
+    from topograph import hydrate as hydrate_mod
+    lib = Library(tmp_path / "lib")
+    lib.conn.executemany("insert into item(id, platform) values (?, ?)",
+                         [("x:1", "x"), ("fb:link:1", "facebook"), ("ig:abc", "instagram")])
+    lib.conn.commit()
+    monkeypatch.setitem(hydrate_mod.HYDRATORS, "x", lambda item: None)
+    monkeypatch.setitem(hydrate_mod.HYDRATORS, "instagram", lambda item: None)
+
+    class Progress:
+        def set_total(self, n): self.total = n
+        def advance(self, note=None): pass
+        def write(self, text): pass
+    progress = Progress()
+    hydrate_mod.hydrate(lib, delay=0, platforms={"x"}, progress=progress)
+    assert progress.total == 1, "the X post, not Facebook's link or the Instagram post"
+    lib.close()
+
+
 def test_posts_saved_with_instagrams_logo_go_back_to_waiting(tmp_path):
     from topograph import hydrate as hydrate_mod
     lib = Library(tmp_path / "lib")

@@ -509,6 +509,21 @@ final class HydratorTests: XCTestCase {
         XCTAssertTrue(asked.values[14].contains("id=1000000000014"), "the failed one waits until the end")
     }
 
+    func testCountsOnlyPostsItCanFetchFromTheSourcesAsked() throws {
+        let library = try library()
+        try library.db.write { db in
+            try db.execute(sql: "insert into item(id, platform, kind, url) values ('fb:link:1', 'facebook', 'link', 'https://www.facebook.com/a')")
+            try db.execute(sql: "insert into item(id, platform, kind, url) values ('ig:abc', 'instagram', 'link', 'https://www.instagram.com/p/abc/')")
+        }
+        let totals = LockedList()
+        let reporter = PipelineReporter(progress: { _ in }, say: { _ in }, count: { _, total in totals.add(total.map(String.init) ?? "-") })
+        let gone = WebFetcher { _, _, _ in Data(#"{"__typename":"TweetTombstone"}"#.utf8) }
+        _ = try Hydrator(fetcher: gone, delay: 0).hydrate(library: library, platforms: ["x"], reporter: reporter)
+        XCTAssertEqual(totals.values.last, "15", "the X posts the Sources page says are waiting, not Facebook's or Instagram's")
+        XCTAssertEqual(try Library(root: library.root).sources().platforms.first { $0.platform == "facebook" }?.waiting, 0,
+                       "a Facebook link isn't waiting for anything")
+    }
+
     func testSaysWhatBecameOfEveryPost() throws {
         let library = try library()
         try library.db.write { try $0.execute(sql: "update item set hydrate_attempts = 2 where id = 'x:1000000000014'") }

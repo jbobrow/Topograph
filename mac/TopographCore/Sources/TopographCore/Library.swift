@@ -409,19 +409,22 @@ public struct Library: Sendable {
         """ + (clouds ? " and not exists (select 1 from cloud where cloud.item_id = item.id and cloud.model = ?)" : "")
             + (same ? " and not exists (select 1 from same_picture s where s.item_id = item.id and s.lead != item.id)" : "")
     }
-    /// Items a map could hold: whether there's anything to read, whether the map shown has
-    /// them, and whether they're land rather than searches.
-    private static func mappableSQL(clouds: Bool, same: Bool) -> String {
-        let cloud = clouds ? "or exists (select 1 from cloud where cloud.item_id = item.id and cloud.model = ?)" : ""
-        let follower = same ? "and not exists (select 1 from same_picture s where s.item_id = item.id and s.lead != item.id)" : ""
+    /// Every item there is, with what decides where it is: whether there's a picture or vector,
+    /// whether the map shown has it on its land or as a cloud, whether it's land rather than a
+    /// search, and whether it's the same picture as another that leads it.
+    private static func whereaboutsSQL(clouds: Bool, same: Bool) -> String {
+        let cloud = clouds ? "exists (select 1 from cloud where cloud.item_id = item.id and cloud.model = ?)" : "0"
+        let follower = same ? "exists (select 1 from same_picture s where s.item_id = item.id and s.lead != item.id)" : "0"
         return """
-            select item.text,
+            select item.platform, item.kind, item.text, item.hydrated, item.hydrate_attempts,
                    exists (select 1 from embedding e where e.item_id = item.id and e.model = ?)
                      or exists (select 1 from media m where m.item_id = item.id and m.status = 'ok'),
-                   exists (select 1 from layout where layout.item_id = item.id and layout.model = ?) \(cloud),
+                   exists (select 1 from layout where layout.item_id = item.id and layout.model = ?),
+                   \(cloud),
                    exists (select 1 from interaction i where i.item_id = item.id and i.type != 'search')
-                     or not exists (select 1 from interaction i where i.item_id = item.id)
-            from item where item.kind != 'trace' and not (\(goneSQL)) \(follower)
+                     or not exists (select 1 from interaction i where i.item_id = item.id),
+                   \(follower)
+            from item where not (\(goneSQL))
             """
     }
     private static let followersSQL = """
@@ -510,6 +513,41 @@ public struct LibrarySources: Sendable, Equatable {
         public let newest: Int?
         /// Given up on: tried a few times, or marked gone. A signed-in look might still find them.
         public var unreachable = 0
+        /// Where its items are on the map being shown.
+        public var whereabouts = Whereabouts()
+    }
+
+    /// Where a source's items are on the map being shown, and why the rest aren't on it.
+    public struct Whereabouts: Sendable, Equatable {
+        /// On the land.
+        public var placed = 0
+        /// Of those, ones placed by their words with a picture still to fetch.
+        public var placedToFetch = 0
+        /// Searches, floating over it.
+        public var clouds = 0
+        /// The same picture as an item from elsewhere, drawn as one with it.
+        public var alike = 0
+        /// Have a picture or words: updating the map places them.
+        public var toPlace = 0
+        /// Links still to fetch.
+        public var toFetch = 0
+        /// Links from a source nothing here can fetch.
+        public var cantFetch = 0
+        /// Tried a few times and not found, or no longer online.
+        public var gaveUp = 0
+        /// Fetched, with no picture or words to show.
+        public var empty = 0
+        /// Reactions with no link or picture: they count in Strata, never on the map.
+        public var traces = 0
+
+        public init() {}
+
+        public static func + (a: Self, b: Self) -> Self {
+            var sum = a
+            sum.placed += b.placed; sum.placedToFetch += b.placedToFetch; sum.clouds += b.clouds; sum.alike += b.alike; sum.toPlace += b.toPlace; sum.toFetch += b.toFetch
+            sum.cantFetch += b.cantFetch; sum.gaveUp += b.gaveUp; sum.empty += b.empty; sum.traces += b.traces
+            return sum
+        }
     }
 
     public let platforms: [Platform]
@@ -542,10 +580,12 @@ extension Library {
                 select item.platform, max(interaction.at) from interaction join item on item.id = interaction.item_id
                 group by item.platform
                 """).reduce(into: [String: Int]()) { $0[$1[0] as String] = $1[1] as Int? }
+            let fetchable = Hydrator.fetchable.sorted().map { "'\($0)'" }.joined(separator: ", ")
             let unreachable = try Row.fetchAll(db, sql: "select platform, count(*) from item where hydrated = -1 group by platform")
                 .reduce(into: [String: Int]()) { $0[$1[0] as String] = $1[1] as Int }
-            let platforms = try Row.fetchAll(db, sql: """
-                select platform, count(*), sum(hydrated = 0 and hydrate_attempts < 3), sum(hydrated = 1) from item
+            var platforms = try Row.fetchAll(db, sql: """
+                select platform, count(*), sum(hydrated = 0 and hydrate_attempts < \(Hydrator.maxAttempts) and platform in (\(fetchable))),
+                       sum(hydrated = 1) from item
                 where not (\(Self.goneSQL)) group by platform
                 """).map {
                 LibrarySources.Platform(platform: $0[0], items: $0[1], waiting: $0[2] ?? 0, fetched: $0[3] ?? 0, newest: newest[$0[0] as String],
@@ -558,17 +598,36 @@ extension Library {
             let shown = try Self.resolve(showing, db)
             let hasClouds = try db.tableExists("cloud")
             let hasSame = try db.tableExists("same_picture")
-            // Only what updating the map would place: something with a picture or words to read.
-            // A reaction's trace, or a link still waiting to be fetched, has neither yet.
+            // Where each item is on the map shown, and why the rest aren't. Only what has a picture
+            // or words to read is waiting for the map to be updated.
             let model = shown?.1 ?? ""
-            var unplaced = 0, land = 0
-            let rows = try Row.fetchCursor(db, sql: Self.mappableSQL(clouds: hasClouds, same: hasSame),
+            var whereabouts: [String: LibrarySources.Whereabouts] = [:]
+            var land = 0
+            let rows = try Row.fetchCursor(db, sql: Self.whereaboutsSQL(clouds: hasClouds, same: hasSame),
                                            arguments: [meta["embedding_model"] ?? "clip-vit-b-32", model] + (hasClouds ? [model] : []))
             while let row = try rows.next() {
-                guard row[1] as Bool || PipelineText.hasWords(row[0]) else { continue }
-                if !(row[2] as Bool) { unplaced += 1 }
-                if row[3] as Bool { land += 1 }
+                let platform: String = row[0], kind: String = row[1], hydrated: Int = row[3], attempts: Int = row[4]
+                let placed: Bool = row[6], clouded: Bool = row[7], isLand: Bool = row[8], follower: Bool = row[9]
+                let mappable = kind != "trace" && (placed || clouded || row[5] as Bool || PipelineText.hasWords(row[2]))
+                if mappable, isLand, !follower { land += 1 }
+                var here = whereabouts[platform, default: .init()]
+                let toFetch = hydrated == 0 && attempts < Hydrator.maxAttempts && Hydrator.fetchable.contains(platform)
+                if follower { here.alike += 1 }
+                else if placed {
+                    here.placed += 1
+                    if toFetch { here.placedToFetch += 1 }
+                }
+                else if clouded { here.clouds += 1 }
+                else if kind == "trace" { here.traces += 1 }
+                else if mappable { here.toPlace += 1 }
+                else if hydrated == 0, !Hydrator.fetchable.contains(platform) { here.cantFetch += 1 }
+                else if toFetch { here.toFetch += 1 }
+                else if hydrated != 1 { here.gaveUp += 1 }
+                else { here.empty += 1 }
+                whereabouts[platform] = here
             }
+            for index in platforms.indices { platforms[index].whereabouts = whereabouts[platforms[index].platform] ?? .init() }
+            let unplaced = whereabouts.values.reduce(0) { $0 + $1.toPlace }
             let counts = try Row.fetchAll(db, sql: "select model, count(*) from layout group by model")
                 .reduce(into: [String: Int]()) { $0[$1[0] as String] = $1[1] as Int }
             var maps: [MapRecipe: Int] = [:]

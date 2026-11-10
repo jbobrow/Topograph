@@ -282,6 +282,10 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(sources.fileRoots, ["/a", "/b"])
         XCTAssertEqual(sources.syncAccounts, ["bluesky": "ann.test"])
         XCTAssertEqual(sources.unplaced, 1, "only what updating the map would place: the one with words")
+        let ig = try XCTUnwrap(sources.platforms.first { $0.platform == "instagram" }).whereabouts
+        XCTAssertEqual([ig.toPlace, ig.empty], [1, 2])
+        XCTAssertEqual([x.whereabouts.placed, x.whereabouts.toFetch, x.whereabouts.gaveUp], [1, 1, 1])
+        XCTAssertEqual(try XCTUnwrap(sources.platforms.first { $0.platform == "facebook" }).whereabouts.traces, 1)
         XCTAssertEqual(sources.waiting(on: .blended), 2, "x:1 and ig:2 on a map that isn't built")
     }
 

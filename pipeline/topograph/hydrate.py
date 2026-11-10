@@ -268,8 +268,9 @@ def hydrate(lib, limit: int | None = None, delay: float = 1.5, platforms=None, l
     q = ("select * from item where hydrated=0 and hydrate_attempts<? "
          "order by hydrate_attempts, (select max(at) from interaction where item_id=item.id) desc")
     rows = lib.conn.execute(q, (MAX_ATTEMPTS,)).fetchall()
-    if platforms:
-        rows = [r for r in rows if r["platform"] in platforms]
+    # Only what can be fetched, so the count is the one the Sources page shows: a Facebook
+    # link has nothing here to fetch it with.
+    rows = [r for r in rows if r["platform"] in HYDRATORS and (not platforms or r["platform"] in platforms)]
     if limit:
         rows = rows[:limit]
     consecutive_failures = 0

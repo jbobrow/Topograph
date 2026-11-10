@@ -22,6 +22,8 @@ public struct Hydrator: Sendable {
     }
 
     public static let maxAttempts = 3
+    /// The sources whose posts can be fetched.
+    public static let fetchable: Set<String> = ["x", "instagram", "youtube"]
     public static let maxFailures = 10
 
     public var fetcher: WebFetcher = .standard
@@ -222,9 +224,13 @@ public struct Hydrator: Sendable {
 
     /// Download media rows that only have a web address. Returns how many arrived.
     @discardableResult
-    func downloadPendingMedia(library: LibraryWriter, itemID: String? = nil, delay: TimeInterval, reporter: PipelineReporter, line: ProgressLine? = nil) throws -> Int {
-        let rows = try library.db.read { db -> [Row] in
-            var sql = "select item_id, ord, original_url, kind from media where status = 'pending' and original_url is not null"
+    func downloadPendingMedia(library: LibraryWriter, itemID: String? = nil, platforms: Set<String>? = nil, delay: TimeInterval,
+                              reporter: PipelineReporter, line: ProgressLine? = nil) throws -> Int {
+        var rows = try library.db.read { db -> [Row] in
+            var sql = """
+                select media.item_id, ord, original_url, media.kind, item.platform from media join item on item.id = media.item_id
+                where status = 'pending' and original_url is not null
+                """
             var arguments = StatementArguments()
             if let itemID {
                 sql += " and item_id = ?"
@@ -232,6 +238,7 @@ public struct Hydrator: Sendable {
             }
             return try Row.fetchAll(db, sql: sql, arguments: arguments)
         }
+        if let platforms { rows = rows.filter { platforms.contains($0["platform"] as String) } }
         line?.setTotal(rows.count)
         var done = 0
         for row in rows {
@@ -280,17 +287,15 @@ public struct Hydrator: Sendable {
                 order by hydrate_attempts, (select max(at) from interaction where item_id = item.id) desc
                 """)
         }
-        if let platforms { rows = rows.filter { platforms.contains($0["platform"] as String) } }
+        // Only what can be fetched, so the count is the one the Sources page shows: a Facebook
+        // link has nothing here to fetch it with.
+        rows = rows.filter { Self.fetchable.contains($0["platform"] as String) && platforms?.contains($0["platform"] as String) != false }
         if let limit { rows = Array(rows.prefix(limit)) }
         let line = ProgressLine("Fetching liked and saved posts", total: rows.count, unit: "posts", reporter: reporter)
         var failures = 0
         for row in rows {
             let id = row["id"] as String, platform = row["platform"] as String
             line.advance(note: "\(stats.hydrated.formatted()) fetched, \(stats.toRetry.formatted()) to retry, \(stats.unreachable.formatted()) unreachable")
-            if !["x", "instagram", "youtube"].contains(platform) {
-                stats.skipped += 1
-                continue
-            }
             var found: Found?
             var networkDown = false, failed = false
             do {
