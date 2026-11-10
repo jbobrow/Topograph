@@ -106,6 +106,8 @@ struct ThumbPlacement {
     let nearest: Bool
     /// Metal's depth where it stands, in 3D, so the ground in front of it hides it.
     var depth: Float = 0
+    /// Lifted off the map under the pointer, so above the clouds too.
+    var lifted = false
 }
 
 /// One region name to draw this frame.
@@ -403,38 +405,25 @@ final class TerrainRenderer {
             encoder.setFragmentBytes(&uniforms, length: uniformLength, index: 0)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: markerCount)
         }
-        // On the flat map the clouds cover the markers, and the pictures come over them.
-        if relief == nil, let weather, uniforms.clouds > 0 {
-            encoder.setRenderPipelineState(flatCloudPipeline)
-            encoder.setFragmentBytes(&uniforms, length: uniformLength, index: 0)
-            setBytes(TerrainStyle.bayer, encoder, index: 3)
-            encoder.setFragmentTexture(weather, index: 1)
-            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-        }
-        if relief == nil, let item = overlay.hovered {
-            encoder.setRenderPipelineState(markerPipeline)
-            drawHovered(item, encoder: encoder, uniforms: &uniforms)
-        }
-
-        if !overlay.thumbs.isEmpty {
-            if relief != nil { encoder.setDepthStencilState(standing) }
-            encoder.setRenderPipelineState(thumbPipeline)
-            encoder.setVertexBytes(&uniforms, length: uniformLength, index: 0)
-            encoder.setFragmentBytes(&uniforms, length: uniformLength, index: 0)
-            for thumb in overlay.thumbs {
-                var data = ThumbDraw(center: SIMD2(Float(thumb.center.x), Float(thumb.center.y)) * scale,
-                                     half: SIMD2(Float(thumb.size.width), Float(thumb.size.height)) * scale / 2,
-                                     frame: Float(thumb.frame) * scale,
-                                     mine: thumb.mine ? 1 : 0,
-                                     mode: thumb.mode == .color ? 0 : 1,
-                                     hasImage: thumb.texture == nil ? 0 : 1,
-                                     nearest: thumb.nearest ? 1 : 0,
-                                     depth: thumb.depth)
-                encoder.setVertexBytes(&data, length: MemoryLayout<ThumbDraw>.stride, index: 1)
-                encoder.setFragmentBytes(&data, length: MemoryLayout<ThumbDraw>.stride, index: 1)
-                encoder.setFragmentTexture(thumb.texture, index: 0)
-                encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        // On the flat map the pictures lie on the ground with the markers and the clouds pass over
+        // them all, except the one under the pointer, which is lifted above.
+        if relief == nil {
+            drawThumbs(overlay.thumbs.filter { !$0.lifted }, encoder: encoder, uniforms: &uniforms)
+            if let weather, uniforms.clouds > 0 {
+                encoder.setRenderPipelineState(flatCloudPipeline)
+                encoder.setFragmentBytes(&uniforms, length: uniformLength, index: 0)
+                setBytes(TerrainStyle.bayer, encoder, index: 3)
+                encoder.setFragmentTexture(weather, index: 1)
+                encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             }
+            if let item = overlay.hovered {
+                encoder.setRenderPipelineState(markerPipeline)
+                drawHovered(item, encoder: encoder, uniforms: &uniforms)
+            }
+            drawThumbs(overlay.thumbs.filter(\.lifted), encoder: encoder, uniforms: &uniforms)
+        } else if !overlay.thumbs.isEmpty {
+            encoder.setDepthStencilState(standing)
+            drawThumbs(overlay.thumbs, encoder: encoder, uniforms: &uniforms)
         }
         // Everything from here floats above the ground, the names like clouds.
         encoder.setDepthStencilState(flat)
@@ -572,6 +561,28 @@ final class TerrainRenderer {
             encoder.setRenderPipelineState(reliefMarkerPipeline)
             encoder.setVertexBytes(&r, length: length, index: 2)
             drawHovered(hovered, encoder: encoder, uniforms: &uniforms)
+        }
+    }
+
+    private func drawThumbs(_ thumbs: [ThumbPlacement], encoder: MTLRenderCommandEncoder, uniforms: inout Uniforms) {
+        guard !thumbs.isEmpty else { return }
+        let uniformLength = MemoryLayout<Uniforms>.stride, scale = uniforms.scale
+        encoder.setRenderPipelineState(thumbPipeline)
+        encoder.setVertexBytes(&uniforms, length: uniformLength, index: 0)
+        encoder.setFragmentBytes(&uniforms, length: uniformLength, index: 0)
+        for thumb in thumbs {
+            var data = ThumbDraw(center: SIMD2(Float(thumb.center.x), Float(thumb.center.y)) * scale,
+                                 half: SIMD2(Float(thumb.size.width), Float(thumb.size.height)) * scale / 2,
+                                 frame: Float(thumb.frame) * scale,
+                                 mine: thumb.mine ? 1 : 0,
+                                 mode: thumb.mode == .color ? 0 : 1,
+                                 hasImage: thumb.texture == nil ? 0 : 1,
+                                 nearest: thumb.nearest ? 1 : 0,
+                                 depth: thumb.depth)
+            encoder.setVertexBytes(&data, length: MemoryLayout<ThumbDraw>.stride, index: 1)
+            encoder.setFragmentBytes(&data, length: MemoryLayout<ThumbDraw>.stride, index: 1)
+            encoder.setFragmentTexture(thumb.texture, index: 0)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
     }
 

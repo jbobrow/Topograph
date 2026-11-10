@@ -411,7 +411,7 @@ final class TerrainMTKView: MTKView, MTKViewDelegate {
             if texture == nil, !lifted { return }
             out.append(ThumbPlacement(center: screen(item), size: size, frame: item.mine || lifted ? 2 : 1, mine: item.mine || lifted,
                                       texture: texture, mode: mode,
-                                      nearest: dither && long * scale >= Double(texture?.width ?? 0)))
+                                      nearest: dither && long * scale >= Double(texture?.width ?? 0), lifted: lifted))
         }
         // The selected picture is lifted off the map, so it isn't here as well.
         for index in chosen.reversed() where index != hovered && index != selected { place(index, lifted: false) }
