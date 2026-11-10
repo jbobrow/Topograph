@@ -376,7 +376,7 @@ public struct Library: Sendable {
             interactions.sort { $0.at < $1.at }
             let media = try Row.fetchAll(db, sql: """
                 select kind, local_path, thumb_path, original_url, palette from media
-                where item_id = ? and status = 'ok' order by ord
+                where item_id = ? and +status = 'ok' order by ord
                 """, arguments: [id]).map {
                 MediaFile(kind: $0[0], display: $0[1], thumb: $0[2], originalURL: $0[3], palette: PaletteColor.parse($0[4]))
             }
@@ -390,10 +390,12 @@ public struct Library: Sendable {
     }
 
     // `GONE_SQL` in db.py: unreachable, with no text and no picture. Gone items stay
-    // in the file but are left off the map and out of counts.
+    // in the file but are left off the map and out of counts. An item's pictures are found by
+    // its id: `+` keeps SQLite off an index on status alone, which a library that hasn't been
+    // written to since has, and which reads every picture for each item (minutes).
     fileprivate static let goneSQL = """
         item.hydrated = -1 and coalesce(item.text, '') = '' and not exists
-        (select 1 from media m where m.item_id = item.id and m.status = 'ok')
+        (select 1 from media m where m.item_id = item.id and +m.status = 'ok')
         """
     private static let placedSQL = """
         select item.id, layout.x, layout.y, layout.cluster, item.platform, item.kind, item.text, item.author,
@@ -418,7 +420,7 @@ public struct Library: Sendable {
         return """
             select item.platform, item.kind, item.text, item.hydrated, item.hydrate_attempts,
                    exists (select 1 from embedding e where e.item_id = item.id and e.model = ?)
-                     or exists (select 1 from media m where m.item_id = item.id and m.status = 'ok'),
+                     or exists (select 1 from media m where m.item_id = item.id and +m.status = 'ok'),
                    exists (select 1 from layout where layout.item_id = item.id and layout.model = ?),
                    \(cloud),
                    exists (select 1 from interaction i where i.item_id = item.id and i.type != 'search')
