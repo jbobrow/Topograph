@@ -1,0 +1,115 @@
+# Builds the Mac app and puts it on the Releases page.
+#
+# A push to main that touches the app replaces one rolling prerelease, "latest-main", so the page
+# isn't buried in builds. A tag like v0.1 makes a release of its own, named for the tag.
+#
+# The app is ad-hoc signed and not notarized, so macOS asks before opening it the first time.
+# The release notes say how to get past that, and that the models aren't included.
+
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths: ["mac/**", ".github/workflows/release.yml"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  # A newer push to main makes an older build pointless. A tag always finishes.
+  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
+
+jobs:
+  build:
+    # The same Xcode the app is developed with. If this image is busy or gone, macos-26
+    # (Xcode 26) also builds it.
+    runs-on: xcode-27
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Versions
+        id: version
+        run: |
+          xcodebuild -version
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version=$(grep -m1 'MARKETING_VERSION' mac/Topograph.xcodeproj/project.pbxproj | sed -E 's/.*= *([^;]+);/\1/')
+          fi
+          build="${GITHUB_RUN_NUMBER}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "zip=Topograph-$version-$build.zip" >> "$GITHUB_OUTPUT"
+          echo "Topograph $version ($build)"
+
+      - name: Metal toolchain
+        run: xcodebuild -downloadComponent MetalToolchain
+
+      - name: Test the core
+        run: swift test --package-path mac/TopographCore
+
+      - name: Build
+        run: |
+          xcodebuild build \
+            -project mac/Topograph.xcodeproj \
+            -scheme Topograph \
+            -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath build \
+            MARKETING_VERSION="${{ steps.version.outputs.version }}" \
+            CURRENT_PROJECT_VERSION="${{ steps.version.outputs.build }}"
+
+      - name: Package
+        run: |
+          app=build/Build/Products/Release/Topograph.app
+          codesign --verify --deep --strict "$app"
+          lipo -info "$app/Contents/MacOS/Topograph"
+          ditto -c -k --sequesterRsrc --keepParent "$app" "${{ steps.version.outputs.zip }}"
+          shasum -a 256 "${{ steps.version.outputs.zip }}"
+
+      - name: Release notes
+        run: |
+          cat > notes.md <<'EOF'
+          **Before you open it.** This build isn't notarized, so the first time you open it macOS
+          says it can't check it. Open it once, then go to System Settings › Privacy & Security and
+          choose **Open Anyway**. Or, in Terminal:
+
+          ```bash
+          xattr -dr com.apple.quarantine /Applications/Topograph.app
+          ```
+
+          **The models aren't included.** Making a map or searching by meaning needs CLIP and a
+          text model in `~/Library/Application Support/Topograph/models/`. The README says how to
+          make them.
+
+          Needs macOS 14 or later.
+          EOF
+          echo "" >> notes.md
+          echo "Built from ${GITHUB_SHA::7}." >> notes.md
+
+      - name: Publish the tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${{ steps.version.outputs.zip }}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${{ steps.version.outputs.zip }}" \
+              --title "Topograph ${{ steps.version.outputs.version }}" \
+              --notes-file notes.md --generate-notes --verify-tag
+          fi
+
+      - name: Publish the latest from main
+        if: github.ref == 'refs/heads/main'
+        run: |
+          gh release delete latest-main --yes --cleanup-tag 2> /dev/null || true
+          gh release create latest-main "${{ steps.version.outputs.zip }}" \
+            --target "$GITHUB_SHA" --prerelease --latest=false \
+            --title "Latest from main (${{ steps.version.outputs.version }}, build ${{ steps.version.outputs.build }})" \
+            --notes-file notes.md

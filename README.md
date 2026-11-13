@@ -84,7 +84,10 @@ first look before anything is read. It's also where you build maps and switch be
 
 ## Run the Mac app
 
-It needs macOS 14 or later and Xcode.
+It needs macOS 14 or later. A built app is on the
+[Releases](https://github.com/jbobrow/Topograph/releases) page: each tagged version, and the latest
+from main. It isn't notarized yet, so the release notes say how to open it the first time. To build
+it yourself you need Xcode.
 
 ```bash
 git clone https://github.com/jbobrow/Topograph.git
