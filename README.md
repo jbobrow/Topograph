@@ -68,8 +68,6 @@ of color for layers.
 Near-duplicates of your own work, grouped into pieces and played in order, so you can watch one
 change from version to version.
 
-![Process: a drawing of a die, version 20 of 22, with a scrubber and playback controls](docs/images/process.webp)
-
 ### Echoes and Drift
 
 **Echoes** finds themes that came back after a gap, shown as then and now with the months of
