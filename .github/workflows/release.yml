@@ -76,18 +76,15 @@ jobs:
 
       - name: Release notes
         run: |
+          # One line per paragraph: GitHub keeps line breaks in release notes.
           cat > notes.md <<'EOF'
-          **Before you open it.** This build isn't notarized, so the first time you open it macOS
-          says it can't check it. Open it once, then go to System Settings › Privacy & Security and
-          choose **Open Anyway**. Or, in Terminal:
+          **Before you open it.** This build isn't notarized, so the first time you open it macOS says it can't check it. Open it once, then go to System Settings › Privacy & Security and choose **Open Anyway**. Or, in Terminal:
 
           ```bash
           xattr -dr com.apple.quarantine /Applications/Topograph.app
           ```
 
-          **The models aren't included.** Making a map or searching by meaning needs CLIP and a
-          text model in `~/Library/Application Support/Topograph/models/`. The README says how to
-          make them.
+          **The models aren't included.** Making a map or searching by meaning needs CLIP and a text model in `~/Library/Application Support/Topograph/models/`. The README says how to make them.
 
           Needs macOS 14 or later.
           EOF
